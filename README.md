@@ -37,3 +37,12 @@ Up to no detection at all:
   "confidence": 0.0
 }
 ```
+
+## License
+
+The source code is available under the [0BSD license](LICENSE).
+
+Datasets distributed with or used to build this project are compiled
+from publicly available information. They are not covered by the 0BSD
+license; their contents remain subject to any applicable rights and
+source terms.
