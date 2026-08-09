@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use serde::Serialize;
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 /// Embedded first-name table (`name,weight` CSV). Weights are synthetic
 /// placeholders — see the file header.
@@ -73,6 +74,23 @@ const ORG_MULTIPLIER: f64 = 0.1;
 /// name. Below this, fall back to the full display name.
 pub const DEFAULT_THRESHOLD: f64 = 0.4;
 
+// TODO: Check out <https://github.com/postgres/postgres/blob/master/contrib/unaccent/unaccent.rules>
+// TODO: Not sure it's a good idea to do that, removing accents could conflict with words.
+trait Unaccent {
+    fn unaccent(&self) -> String;
+}
+
+impl<T: AsRef<str>> Unaccent for T {
+    fn unaccent(&self) -> String {
+        self.as_ref()
+            // TODO: Try `nfkd`?
+            .nfd()
+            .filter(|c| !is_combining_mark(*c))
+            .nfc()
+            .collect()
+    }
+}
+
 /// The result of [`extract`].
 #[derive(Debug, Clone, Serialize)]
 pub struct Extraction {
@@ -84,7 +102,7 @@ pub struct Extraction {
     pub first_name: Option<String>,
     /// Confidence in `first_name`, in `0.0..=1.0`.
     pub confidence: f64,
-    // TODO(gender/country): add `gender` + `country`. Gender depends on country
+    // TODO: add `gender` + `country`. Gender depends on country
     // (e.g. "Simone" -> FR=F, IT=M) and is needed for gendered greetings.
 }
 
@@ -131,7 +149,11 @@ pub fn extract(name: &str) -> Extraction {
     // hyphenated token is looked up whole — `jean-pierre` is a single row.
     let best = name
         .split_whitespace()
-        .filter_map(|token| table.get(&token.to_lowercase()).map(|&w| (token, w)))
+        .filter_map(|token| {
+            table
+                .get(&token.unaccent().to_lowercase())
+                .map(|&w| (token, w))
+        })
         .max_by(|a, b| a.1.total_cmp(&b.1));
 
     match best {
@@ -165,7 +187,7 @@ fn first_names() -> &'static HashMap<String, f64> {
             let Ok(weight) = weight.trim().parse::<f64>() else {
                 continue;
             };
-            table.insert(name.trim().to_lowercase(), weight);
+            table.insert(name.trim().unaccent().to_lowercase(), weight);
         }
         table
     })
