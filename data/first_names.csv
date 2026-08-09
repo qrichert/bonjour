@@ -1,0 +1,62 @@
+# bonjour — synthetic first-name table.
+#
+# SYNTHETIC PLACEHOLDER DATA. The weights below are made up, not real
+# frequencies. They only need a plausible *spread* (common names high,
+# ambiguous names lower) for the naive scorer to behave. Replace with a
+# real frequency dataset  before any serious use; see README for the
+# licensing note on distributed datasets.
+#
+# Format: `name,weight`, weight in 0.0..=1.0. Names are lowercase; accents are
+# kept and matched by lowercasing the input. Compound names are single atomic
+# rows (a hyphenated name is one name, never split).
+name,weight
+# --- very common (high confidence) ---
+jean,0.98
+marie,0.97
+pierre,0.95
+quentin,0.95
+anne,0.95
+paul,0.93
+maria,0.92
+sophie,0.92
+emma,0.90
+nicolas,0.90
+anna,0.90
+john,0.90
+antoine,0.86
+david,0.86
+michel,0.85
+thomas,0.85
+lucas,0.85
+james,0.85
+sarah,0.88
+louis,0.88
+julien,0.88
+mary,0.88
+léa,0.87
+michael,0.87
+manon,0.85
+# --- moderately common ---
+luc,0.82
+chloé,0.85
+zoé,0.82
+éric,0.84
+jérôme,0.80
+carlos,0.80
+sofia,0.85
+laura,0.84
+# --- unisex / needs country to resolve gender later ---
+camille,0.75
+claude,0.70
+simone,0.70
+# --- ambiguous: also common family names, kept deliberately lower ---
+martin,0.50
+laurent,0.55
+simon,0.60
+bernard,0.55
+# --- compound given names: atomic rows, never split on '-' ---
+jean-pierre,0.80
+jean-luc,0.75
+jean-françois,0.70
+anne-sophie,0.72
+marie-claire,0.70
