@@ -1,0 +1,22 @@
+[package]
+name = "bonjour"
+version = "0.0.0"
+edition = "2024"
+authors = ["Quentin Richert <noreply@richert.co>"]
+description = "Extract first names with confidence scores."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/qrichert/bonjour.git"
+readme = "README.md"
+keywords = ["first-name", "name-extraction", "person-name", "nlp", "classification"]
+categories = ["command-line-utilities", "text-processing"]
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
+
+[dependencies]
