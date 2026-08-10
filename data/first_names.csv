@@ -10,9 +10,10 @@
 # name common in several countries — or unisex within one — gets several
 # rows. That is how gender becomes country-dependent: `simone` is female
 # in FR, male in IT. country = ISO 3166-1 alpha-2 (uppercase), gender =
-# M/F, weight in 0.0..=1.0. Names are lowercase; accents are kept and
-# matched by unaccenting the input. Compound names are single atomic rows
-# (a hyphenated name is one name, never split).
+# M/F, weight in 0.0..=1.0. Names are lowercase; accents are kept. Matching
+# tries exact spelling first, then an unaccented fallback when its canonical
+# spelling is unambiguous. Compound names are single atomic rows (a hyphenated
+# name is one name, never split).
 name,country,gender,weight
 # --- very common (high confidence) ---
 jean,FR,M,0.98

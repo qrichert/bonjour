@@ -91,6 +91,12 @@ impl<T: AsRef<str>> Unaccent for T {
     }
 }
 
+/// Normalize canonically equivalent spellings (for example, precomposed `é`
+/// and `e` plus a combining acute accent) while preserving accents.
+fn normalize(s: &str) -> String {
+    s.to_lowercase().nfc().collect()
+}
+
 /// Binary gender label for a name in a given country.
 ///
 /// Gender is country-dependent (`Simone` is `Female` in France, `Male` in
@@ -126,6 +132,75 @@ struct NameEntry {
     gender: Gender,
     /// First-name likelihood in `0.0..=1.0` for this country.
     weight: f64,
+}
+
+/// Exact name rows plus unambiguous accent-folded aliases.
+struct NameTable {
+    exact: HashMap<String, Vec<NameEntry>>,
+    unaccented: HashMap<String, Option<String>>,
+}
+
+impl NameTable {
+    /// Look up an exact normalized spelling first, then an unambiguous
+    /// accent-folded alias.
+    fn get(&self, name: &str) -> Option<&[NameEntry]> {
+        let normalized = normalize(name);
+        if let Some(entries) = self.exact.get(&normalized) {
+            return Some(entries);
+        }
+
+        let canonical = self.unaccented.get(&normalized.unaccent())?.as_deref()?;
+        self.exact.get(canonical).map(Vec::as_slice)
+    }
+
+    /// Parse CSV rows while retaining their canonical accented spelling.
+    fn from_csv(csv: &str) -> Self {
+        let mut exact: HashMap<String, Vec<NameEntry>> = HashMap::new();
+        let mut unaccented: HashMap<String, Option<String>> = HashMap::new();
+
+        for line in csv.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue; // blank or comment line
+            }
+            // Exactly four fields, or skip the row.
+            let mut fields = line.split(',');
+            let (Some(name), Some(country), Some(gender), Some(weight), None) = (
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+            ) else {
+                continue;
+            };
+            // The header row's non-numeric `weight`/`gender` fail to parse and
+            // are skipped here too.
+            let Ok(weight) = weight.trim().parse::<f64>() else {
+                continue;
+            };
+            let Some(gender) = Gender::parse(gender) else {
+                continue;
+            };
+
+            let name = normalize(name.trim());
+            unaccented
+                .entry(name.unaccent())
+                .and_modify(|canonical| {
+                    if canonical.as_deref() != Some(name.as_str()) {
+                        *canonical = None;
+                    }
+                })
+                .or_insert_with(|| Some(name.clone()));
+            exact.entry(name).or_default().push(NameEntry {
+                country: country.trim().to_uppercase(),
+                gender,
+                weight,
+            });
+        }
+
+        Self { exact, unaccented }
+    }
 }
 
 /// The result of [`extract`].
@@ -215,7 +290,7 @@ pub fn extract(input: &str, country: Option<&str>, gender: Option<&str>) -> Extr
     let best = input
         .split_whitespace()
         .filter_map(|token| {
-            let entries = table.get(&token.unaccent().to_lowercase())?;
+            let entries = table.get(token)?;
             Some((
                 token,
                 resolve(entries, country_hint.as_deref(), gender_hint)?,
@@ -286,46 +361,10 @@ fn resolve(
     })
 }
 
-/// Parse the embedded CSV once into a `name -> [entry, ...]` map.
-fn first_names() -> &'static HashMap<String, Vec<NameEntry>> {
-    static TABLE: OnceLock<HashMap<String, Vec<NameEntry>>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut table: HashMap<String, Vec<NameEntry>> = HashMap::new();
-        for line in FIRST_NAMES_CSV.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue; // blank or comment line
-            }
-            // Exactly four fields, or skip the row.
-            let mut fields = line.split(',');
-            let (Some(name), Some(country), Some(gender), Some(weight), None) = (
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-            ) else {
-                continue;
-            };
-            // The header row's non-numeric `weight`/`gender` fail to parse and
-            // are skipped here too.
-            let Ok(weight) = weight.trim().parse::<f64>() else {
-                continue;
-            };
-            let Some(gender) = Gender::parse(gender) else {
-                continue;
-            };
-            table
-                .entry(name.trim().unaccent().to_lowercase())
-                .or_default()
-                .push(NameEntry {
-                    country: country.trim().to_uppercase(),
-                    gender,
-                    weight,
-                });
-        }
-        table
-    })
+/// Parse the embedded CSV once into exact rows and unaccented aliases.
+fn first_names() -> &'static NameTable {
+    static TABLE: OnceLock<NameTable> = OnceLock::new();
+    TABLE.get_or_init(|| NameTable::from_csv(FIRST_NAMES_CSV))
 }
 
 /// Strip surrounding non-alphanumerics (for org-marker matching), keeping inner
@@ -368,6 +407,16 @@ mod tests {
     #[test]
     fn accents_match_and_output_is_preserved() {
         assert_eq!(name_of("Éric Tabarly").as_deref(), Some("Éric"));
+        assert_eq!(name_of("Eric Tabarly").as_deref(), Some("Eric"));
+    }
+
+    #[test]
+    fn unaccented_fallback_requires_an_unambiguous_name() {
+        let table = NameTable::from_csv("rene,GB,M,0.60\nrené,FR,M,0.70");
+
+        assert!((table.get("Rene").unwrap()[0].weight - 0.60).abs() < f64::EPSILON);
+        assert!((table.get("René").unwrap()[0].weight - 0.70).abs() < f64::EPSILON);
+        assert!(table.get("Rène").is_none());
     }
 
     #[test]
