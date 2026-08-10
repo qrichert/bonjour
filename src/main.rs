@@ -15,7 +15,13 @@ fn main() -> ExitCode {
     // Hints are `--key=value` flags; everything else joins into the name, so
     // spaces in the display name are preserved.
     for arg in std::env::args().skip(1) {
-        if let Some(value) = arg.strip_prefix("--country=") {
+        if matches!(arg.as_str(), "-h" | "--help") {
+            help();
+            return ExitCode::SUCCESS;
+        } else if matches!(arg.as_str(), "-V" | "--version") {
+            version();
+            return ExitCode::SUCCESS;
+        } else if let Some(value) = arg.strip_prefix("--country=") {
             country = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("--gender=") {
             gender = Some(value.to_string());
@@ -41,4 +47,27 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[cfg(not(tarpaulin_include))]
+fn help() {
+    println!(
+        "\
+usage: {bin} [<options>] <display name>
+
+Arguments:
+  <display name>        Display name to extract a probable first name from.
+
+Options:
+  --country=<XX>        Hint with an ISO 3166-1 alpha-2 country code.
+  --gender=<F|M>        Hint with a gender.
+  -h, --help            Show this message and exit.
+  -V, --version         Show the version and exit.",
+        bin = env!("CARGO_BIN_NAME"),
+    );
+}
+
+#[cfg(not(tarpaulin_include))]
+fn version() {
+    println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 }
