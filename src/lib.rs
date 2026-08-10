@@ -91,6 +91,43 @@ impl<T: AsRef<str>> Unaccent for T {
     }
 }
 
+/// Binary gender label for a name in a given country.
+///
+/// Gender is country-dependent (`Simone` is `Female` in France, `Male` in
+/// Italy), so it belongs to a `(name, country)` row, never to a name alone.
+/// This is an output/normalization type; the `extract` hints are plain strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Gender {
+    Female,
+    Male,
+}
+
+impl Gender {
+    /// Parse a gender hint or dataset cell, leniently: `f`/`female` and
+    /// `m`/`male` in any case. Anything else is `None`, so an unrecognized hint
+    /// is simply treated as absent.
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "f" | "female" => Some(Self::Female),
+            "m" | "male" => Some(Self::Male),
+            _ => None,
+        }
+    }
+}
+
+/// One `(country, gender, weight)` observation for a name. A name maps to a
+/// `Vec` of these; several rows are how country-dependent gender and popularity
+/// are expressed.
+#[derive(Debug, Clone)]
+struct NameEntry {
+    /// ISO 3166-1 alpha-2 country code, uppercase.
+    country: String,
+    gender: Gender,
+    /// First-name likelihood in `0.0..=1.0` for this country.
+    weight: f64,
+}
+
 /// The result of [`extract`].
 #[derive(Debug, Clone, Serialize)]
 pub struct Extraction {
@@ -102,8 +139,14 @@ pub struct Extraction {
     pub first_name: Option<String>,
     /// Confidence in `first_name`, in `0.0..=1.0`.
     pub confidence: f64,
-    // TODO: add `gender` + `country`. Gender depends on country
-    // (e.g. "Simone" -> FR=F, IT=M) and is needed for gendered greetings.
+    /// Resolved gender, reported only when the surviving candidate rows agree
+    /// on one (a country/gender hint can force agreement). `None` when the name
+    /// is unknown, or when rows disagree and nothing disambiguates — the caller
+    /// then greets neutrally rather than guessing.
+    pub gender: Option<Gender>,
+    /// Country of the resolved row: the hinted one, else the highest-weight one.
+    /// `None` only when the name is unknown.
+    pub country: Option<String>,
 }
 
 impl Extraction {
@@ -121,73 +164,165 @@ impl Extraction {
     }
 }
 
-/// Extract a probable first name and confidence from a display name.
+/// Extract a probable first name from a display name, with confidence, gender
+/// and country.
+///
+/// `country` and `gender` are optional hints — typically the user's locale and
+/// profile gender. They act as *symmetric filters*: a country pins down gender
+/// (`Simone` + `IT` → male), a gender pins down country (`Simone` + `M` → `IT`).
+/// A hint that matches no row for the name is ignored (a hint never rejects a
+/// name we know). With no hint and rows that disagree on gender, `gender` is
+/// left `None` and `country` reports the highest-weight row.
 ///
 /// # Examples
 ///
 /// ```
-/// let e = bonjour::extract("Quentin Richert");
-/// assert_eq!(e.first_name.as_deref(), Some("Quentin"));
+/// use bonjour::Gender;
 ///
-/// let e = bonjour::extract("ACME Corporation");
+/// let e = bonjour::extract("Quentin Richert", None, None);
+/// assert_eq!(e.first_name.as_deref(), Some("Quentin"));
+/// assert_eq!(e.gender, Some(Gender::Male));
+/// assert_eq!(e.country.as_deref(), Some("FR"));
+///
+/// // Country resolves the gender of an otherwise-ambiguous name.
+/// assert_eq!(bonjour::extract("Simone", Some("IT"), None).gender, Some(Gender::Male));
+/// assert_eq!(bonjour::extract("Simone", Some("FR"), None).gender, Some(Gender::Female));
+///
+/// let e = bonjour::extract("ACME Corporation", None, None);
 /// assert_eq!(e.first_name, None);
 /// assert_eq!(e.confidence, 0.0);
 /// ```
 #[must_use]
-pub fn extract(name: &str) -> Extraction {
+pub fn extract(input: &str, country: Option<&str>, gender: Option<&str>) -> Extraction {
     let table = first_names();
 
     // Organization evidence applies to the whole name, once (not per token).
-    let looks_like_org = name.contains('&')
-        || name.split_whitespace().any(|token| {
+    let looks_like_org = input.contains('&')
+        || input.split_whitespace().any(|token| {
             let normalized = strip_surrounding_punctuation(token).to_lowercase();
             ORG_MARKERS.contains(&normalized.as_str())
         });
     let org_multiplier = if looks_like_org { ORG_MULTIPLIER } else { 1.0 };
 
-    // Score each token by its first-name weight and keep the strongest. A
-    // hyphenated token is looked up whole — `jean-pierre` is a single row.
-    let best = name
+    // Normalize hints once. Country matches case-insensitively via uppercase; an
+    // unparsable gender hint is dropped (treated as absent).
+    let country_hint = country.map(|c| c.trim().to_uppercase());
+    let gender_hint = gender.and_then(Gender::parse);
+
+    // Resolve each matching token under the hints, then keep the token whose
+    // resolved weight is highest. A hyphenated token is looked up whole —
+    // `jean-pierre` is a single row.
+    let best = input
         .split_whitespace()
         .filter_map(|token| {
-            table
-                .get(&token.unaccent().to_lowercase())
-                .map(|&w| (token, w))
+            let entries = table.get(&token.unaccent().to_lowercase())?;
+            Some((
+                token,
+                resolve(entries, country_hint.as_deref(), gender_hint)?,
+            ))
         })
-        .max_by(|a, b| a.1.total_cmp(&b.1));
+        .max_by(|a, b| a.1.weight.total_cmp(&b.1.weight));
 
     match best {
-        Some((token, weight)) => Extraction {
-            input: name.to_string(),
+        Some((token, resolution)) => Extraction {
+            input: input.to_string(),
             first_name: Some(token.to_string()),
-            confidence: (weight * org_multiplier).clamp(0.0, 1.0),
+            confidence: (resolution.weight * org_multiplier).clamp(0.0, 1.0),
+            gender: resolution.gender,
+            country: Some(resolution.country),
         },
         None => Extraction {
-            input: name.to_string(),
+            input: input.to_string(),
             first_name: None,
             confidence: 0.0,
+            gender: None,
+            country: None,
         },
     }
 }
 
-/// Parse the embedded CSV once into a `name -> weight` map.
-fn first_names() -> &'static HashMap<String, f64> {
-    static TABLE: OnceLock<HashMap<String, f64>> = OnceLock::new();
+/// A name's rows collapsed to a single answer under the active hints.
+struct Resolution {
+    country: String,
+    gender: Option<Gender>,
+    weight: f64,
+}
+
+/// Resolve a name's rows under optional country/gender hints.
+///
+/// Hints are equality filters: keep rows matching every hint present. If that
+/// leaves nothing (the hint doesn't apply to this name), fall back to all rows —
+/// a hint must never reject a name we know. From the survivors, the
+/// highest-weight row sets `country` and `weight`; `gender` is reported only
+/// when every survivor agrees on it.
+fn resolve(
+    entries: &[NameEntry],
+    country: Option<&str>,
+    gender: Option<Gender>,
+) -> Option<Resolution> {
+    let matches = |e: &&NameEntry| {
+        country.is_none_or(|c| e.country == c) && gender.is_none_or(|g| e.gender == g)
+    };
+
+    let mut candidates: Vec<&NameEntry> = entries.iter().filter(matches).collect();
+    if candidates.is_empty() {
+        candidates = entries.iter().collect();
+    }
+
+    let best = *candidates
+        .iter()
+        .max_by(|a, b| a.weight.total_cmp(&b.weight))?;
+
+    let first = candidates[0].gender;
+    let gender = candidates
+        .iter()
+        .all(|e| e.gender == first)
+        .then_some(first);
+
+    Some(Resolution {
+        country: best.country.clone(),
+        gender,
+        weight: best.weight,
+    })
+}
+
+/// Parse the embedded CSV once into a `name -> [entry, ...]` map.
+fn first_names() -> &'static HashMap<String, Vec<NameEntry>> {
+    static TABLE: OnceLock<HashMap<String, Vec<NameEntry>>> = OnceLock::new();
     TABLE.get_or_init(|| {
-        let mut table = HashMap::new();
+        let mut table: HashMap<String, Vec<NameEntry>> = HashMap::new();
         for line in FIRST_NAMES_CSV.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue; // blank or comment line
             }
-            let Some((name, weight)) = line.split_once(',') else {
+            // Exactly four fields, or skip the row.
+            let mut fields = line.split(',');
+            let (Some(name), Some(country), Some(gender), Some(weight), None) = (
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+            ) else {
                 continue;
             };
-            // The header row's `weight` fails to parse and is skipped here too.
+            // The header row's non-numeric `weight`/`gender` fail to parse and
+            // are skipped here too.
             let Ok(weight) = weight.trim().parse::<f64>() else {
                 continue;
             };
-            table.insert(name.trim().unaccent().to_lowercase(), weight);
+            let Some(gender) = Gender::parse(gender) else {
+                continue;
+            };
+            table
+                .entry(name.trim().unaccent().to_lowercase())
+                .or_default()
+                .push(NameEntry {
+                    country: country.trim().to_uppercase(),
+                    gender,
+                    weight,
+                });
         }
         table
     })
@@ -205,7 +340,7 @@ mod tests {
 
     #[test]
     fn simple_first_last() {
-        let e = extract("Quentin Richert");
+        let e = extract("Quentin Richert", None, None);
         assert_eq!(e.first_name.as_deref(), Some("Quentin"));
         assert!(e.confidence > 0.9, "confidence was {}", e.confidence);
     }
@@ -236,8 +371,63 @@ mod tests {
     }
 
     #[test]
+    fn unambiguous_name_reports_gender_and_country() {
+        let e = extract("Quentin Richert", None, None);
+        assert_eq!(e.gender, Some(Gender::Male));
+        assert_eq!(e.country.as_deref(), Some("FR"));
+    }
+
+    #[test]
+    fn ambiguous_gender_without_hint_is_none() {
+        // "Simone" is FR=F, IT=M — no signal to choose, so no gender is claimed.
+        let e = extract("Simone", None, None);
+        assert_eq!(e.first_name.as_deref(), Some("Simone"));
+        assert_eq!(e.gender, None);
+        assert_eq!(e.country.as_deref(), Some("FR")); // best weight: 0.70 > 0.65
+    }
+
+    #[test]
+    fn country_hint_resolves_gender() {
+        let it = extract("Simone", Some("IT"), None);
+        assert_eq!(it.gender, Some(Gender::Male));
+        assert_eq!(it.country.as_deref(), Some("IT"));
+        assert!((it.confidence - 0.65).abs() < 1e-9, "was {}", it.confidence);
+
+        let fr = extract("Simone", Some("fr"), None); // case-insensitive
+        assert_eq!(fr.gender, Some(Gender::Female));
+        assert_eq!(fr.country.as_deref(), Some("FR"));
+    }
+
+    #[test]
+    fn gender_hint_resolves_country() {
+        // Symmetric: knowing the gender pins the country for a unisex name.
+        let e = extract("Simone", None, Some("M"));
+        assert_eq!(e.gender, Some(Gender::Male));
+        assert_eq!(e.country.as_deref(), Some("IT"));
+    }
+
+    #[test]
+    fn gender_hint_accepts_long_form_and_ignores_garbage() {
+        assert_eq!(
+            extract("Simone", None, Some("female")).country.as_deref(),
+            Some("FR")
+        );
+        // Unparsable hint → treated as absent → still ambiguous.
+        assert_eq!(extract("Simone", None, Some("bogus")).gender, None);
+    }
+
+    #[test]
+    fn hint_that_matches_nothing_is_ignored() {
+        // No IT row for "Quentin" — a hint must not reject a name we know.
+        let e = extract("Quentin", Some("IT"), None);
+        assert_eq!(e.first_name.as_deref(), Some("Quentin"));
+        assert_eq!(e.gender, Some(Gender::Male));
+        assert_eq!(e.country.as_deref(), Some("FR"));
+    }
+
+    #[test]
     fn org_marker_crushes_confidence() {
-        let e = extract("Quentin Richert SAS");
+        let e = extract("Quentin Richert SAS", None, None);
         assert_eq!(e.first_name.as_deref(), Some("Quentin"));
         assert!(e.confidence < 0.2, "confidence was {}", e.confidence);
         assert!(e.greeting_name(DEFAULT_THRESHOLD).is_none());
@@ -245,7 +435,7 @@ mod tests {
 
     #[test]
     fn ampersand_is_org_evidence() {
-        let e = extract("Martin & Fils");
+        let e = extract("Martin & Fils", None, None);
         assert!(
             e.confidence < DEFAULT_THRESHOLD,
             "confidence was {}",
@@ -261,27 +451,29 @@ mod tests {
             "ACME Corporation",
             "Club de Tennis Strasbourg",
         ] {
-            let e = extract(input);
+            let e = extract(input, None, None);
             assert_eq!(e.first_name, None, "input: {input}");
+            assert_eq!(e.gender, None, "input: {input}");
+            assert_eq!(e.country, None, "input: {input}");
             assert!(e.confidence.abs() < f64::EPSILON, "input: {input}");
         }
     }
 
     #[test]
     fn greeting_name_respects_threshold() {
-        let e = extract("Quentin Richert");
+        let e = extract("Quentin Richert", None, None);
         assert_eq!(e.greeting_name(DEFAULT_THRESHOLD), Some("Quentin"));
         assert_eq!(e.greeting_name(0.99), None); // 0.95 < 0.99
     }
 
     #[test]
     fn empty_input_is_null() {
-        let e = extract("   ");
+        let e = extract("   ", None, None);
         assert_eq!(e.first_name, None);
         assert!(e.confidence.abs() < f64::EPSILON);
     }
 
     fn name_of(input: &str) -> Option<String> {
-        extract(input).first_name
+        extract(input, None, None).first_name
     }
 }
