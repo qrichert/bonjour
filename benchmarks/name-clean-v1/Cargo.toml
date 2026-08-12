@@ -1,0 +1,13 @@
+[package]
+name = "name-clean-v1"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+csv = "1.4.0"
+sha1 = "0.11.0"
+sha2 = "0.11.0"
+unicode-casefold = "0.2.0"
+unicode-general-category = "1.1.0"
+unicode-normalization = "0.1.25"

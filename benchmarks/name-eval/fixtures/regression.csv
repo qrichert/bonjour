@@ -1,0 +1,15 @@
+id,input,country_hint,locale_hint,expected_greeting,expected_gender,category,notes
+reg-001,Quentin Richert,FR,,Quentin,M,person_order,given name first
+reg-002,Richert Quentin,FR,,Quentin,M,person_order,family name first
+reg-003,Anne Marie Dupont,FR,,Anne Marie,F,person_compound,known compound given name remains atomic
+reg-004,Martin & Fils,,,,,organization_ampersand,ampersand and generic organization word
+reg-005,Baris Kebab,TR,,,,organization_generic,valid given name inside restaurant-like display name
+reg-006,Association Jean Moulin,FR,,,,organization_generic,association containing a valid given name
+reg-007,Élodie Durand,,fr-FR,Élodie,F,person_accent,accent-preserving input
+reg-008,JEAN-PIERRE DUPONT,FR,,JEAN-PIERRE,M,person_casing,uppercase compound given name
+reg-009,"Dupont, Quentin",FR,,Quentin,M,person_punctuation,family-name comma ordering
+reg-010,  Sophie   Bernard  ,FR,,Sophie,F,person_whitespace,repeated outer and inner whitespace
+reg-011,ACME GmbH,DE,,,,organization_legal,strong legal suffix
+reg-012,Alice LLC,US,,,,organization_legal,valid given name with legal suffix
+reg-013,Restaurant Nicolas,FR,,,,organization_generic,generic negative evidence
+reg-014,İbrahim,TR,,İbrahim,M,person_single,accent-preserving single token

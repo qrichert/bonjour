@@ -4,6 +4,9 @@
 /_wip/
 /target/
 /*.egg-info/
+/data/*.csv
+__pycache__/
+*.py[cod]
 
 .DS_Store
 *.swp
