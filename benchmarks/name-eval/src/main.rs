@@ -31,10 +31,13 @@ use corpus_audit::{LexicalAudit, audit_clean_v1};
 use dataset::{
     C0_TEST_GENERATOR_SEED, C0_TEST_SHA256, Case, DEV_TARGET, FRESH_TEST_GENERATOR_SEED,
     FRESH_TEST_SHA256, GENERATOR_SEED, INSPECTED_TEST_SHA256, LARGE_GENERATOR_SEED, SeedStats,
-    Split, TEST_TARGET, VALIDATION_TARGET, generate_cases, load_regression, load_sealed,
-    seed_stats,
+    Split, TEST_TARGET, VALIDATION_TARGET, generate_cases, load_regression, seed_stats,
 };
 use metrics::{CaseOutcome, Metrics, greeting_matches, outcome};
+use name_eval::holdout::{
+    FrozenHoldout, SealedDecision, SealedEvaluation, evaluate_sealed, load_frozen,
+    sealed_confidence_buckets_csv, sealed_summary_csv,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -64,6 +67,11 @@ struct RoleSummary {
     split: Split,
     role: &'static str,
     values: Vec<f64>,
+}
+
+struct SealedRun {
+    holdout: FrozenHoldout,
+    evaluation: SealedEvaluation,
 }
 
 fn main() {
@@ -117,69 +125,120 @@ fn run() -> Result<()> {
 
 struct Arguments {
     artifact: PathBuf,
-    clean_csv: PathBuf,
+    clean_csv: Option<PathBuf>,
     output: PathBuf,
-    sealed: PathBuf,
+    sealed: Option<PathBuf>,
+    sealed_manifest: Option<PathBuf>,
     reference_threshold: f64,
     development_only: bool,
+    sealed_only: bool,
 }
 
 fn parse_arguments() -> Result<Arguments> {
     let mut positional = Vec::new();
     let mut sealed = None;
+    let mut sealed_manifest = None;
     let mut reference_threshold = DEFAULT_REFERENCE_THRESHOLD;
+    let mut reference_threshold_set = false;
     let mut development_only = false;
+    let mut sealed_only = false;
     for argument in std::env::args_os().skip(1) {
         let text = argument.to_string_lossy();
         if let Some(value) = text.strip_prefix("--sealed=") {
             sealed = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("--sealed-manifest=") {
+            sealed_manifest = Some(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("--reference-threshold=") {
             reference_threshold = value.parse::<f64>()?;
+            reference_threshold_set = true;
             if !(0.0..=1.0).contains(&reference_threshold) {
                 return Err("reference threshold must lie in 0..=1".into());
             }
         } else if text == "--development-only" {
             development_only = true;
+        } else if text == "--sealed-only" {
+            sealed_only = true;
         } else if text.starts_with('-') {
             return Err(format!("unknown option: {text}").into());
         } else {
             positional.push(PathBuf::from(argument));
         }
     }
-    if positional.len() != 3 {
-        return Err(
-            "usage: name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE] [--reference-threshold=FLOAT] [--development-only]"
-                .into(),
-        );
+    if sealed.is_some() != sealed_manifest.is_some() {
+        return Err("--sealed and --sealed-manifest must be supplied together".into());
     }
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let (artifact, clean_csv, output) = if sealed_only {
+        if positional.len() != 2 {
+            return Err(usage().into());
+        }
+        if sealed.is_none() || development_only || reference_threshold_set {
+            return Err("--sealed-only requires both sealed files and cannot be combined with --development-only or --reference-threshold".into());
+        }
+        (positional.remove(0), None, positional.remove(0))
+    } else {
+        if positional.len() != 3 {
+            return Err(usage().into());
+        }
+        (
+            positional.remove(0),
+            Some(positional.remove(0)),
+            positional.remove(0),
+        )
+    };
     Ok(Arguments {
-        artifact: positional.remove(0),
-        clean_csv: positional.remove(0),
-        output: positional.remove(0),
-        sealed: sealed.unwrap_or_else(|| fixtures.join("sealed-holdout.example.csv")),
+        artifact,
+        clean_csv,
+        output,
+        sealed,
+        sealed_manifest,
         reference_threshold,
         development_only,
+        sealed_only,
     })
+}
+
+fn usage() -> &'static str {
+    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE"
 }
 
 #[allow(clippy::too_many_lines)]
 fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let frozen_holdout = arguments
+        .sealed
+        .as_deref()
+        .zip(arguments.sealed_manifest.as_deref())
+        .map(|(sealed, manifest)| load_frozen(sealed, manifest))
+        .transpose()?;
     let corpus = C32Artifact::open(
         &arguments.artifact,
         &fixtures.join("artifact-manifest.csv"),
         &fixtures.join("surname-artifact-manifest.csv"),
     )?;
-    let lexical_audit = audit_clean_v1(&arguments.clean_csv)?;
+    if arguments.sealed_only {
+        let holdout = frozen_holdout.ok_or("--sealed-only requires a frozen holdout")?;
+        let sealed_run = evaluate_frozen_holdout(&corpus, holdout)?;
+        fs::write(
+            output.join("sealed_summary_metrics.csv"),
+            sealed_summary_csv(&sealed_run.evaluation)?,
+        )?;
+        fs::write(
+            output.join("sealed_confidence_buckets.csv"),
+            sealed_confidence_buckets_csv(&sealed_run.evaluation)?,
+        )?;
+        return Ok(build_sealed_only_report(&sealed_run));
+    }
+    let clean_csv = arguments
+        .clean_csv
+        .as_deref()
+        .ok_or("normal evaluation requires clean-v1.csv")?;
+    let lexical_audit = audit_clean_v1(clean_csv)?;
     let seed_statistics = seed_stats(&fixtures)?;
     let regression = load_regression(&fixtures.join("regression.csv"))?;
     let generated = generate_cases(&fixtures, !arguments.development_only)?;
-    let sealed = load_sealed(&arguments.sealed)?;
-    let mut cases = Vec::with_capacity(regression.len() + generated.len() + sealed.len());
+    let mut cases = Vec::with_capacity(regression.len() + generated.len());
     cases.extend(regression);
     cases.extend(generated);
-    cases.extend(sealed);
 
     let algorithms = [ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1]
         .into_iter()
@@ -199,6 +258,20 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
                 .collect(),
         })
         .collect::<Vec<_>>();
+
+    let sealed_run = frozen_holdout
+        .map(|holdout| evaluate_frozen_holdout(&corpus, holdout))
+        .transpose()?;
+    if let Some(sealed_run) = &sealed_run {
+        fs::write(
+            output.join("sealed_summary_metrics.csv"),
+            sealed_summary_csv(&sealed_run.evaluation)?,
+        )?;
+        fs::write(
+            output.join("sealed_confidence_buckets.csv"),
+            sealed_confidence_buckets_csv(&sealed_run.evaluation)?,
+        )?;
+    }
 
     write_generated_cases(output, &cases)?;
     write_lexical_audit(output, lexical_audit)?;
@@ -287,7 +360,40 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
         &cases,
         &algorithms,
         &role_summaries,
+        sealed_run.as_ref(),
     ))
+}
+
+fn evaluate_frozen_holdout(corpus: &C32Artifact, holdout: FrozenHoldout) -> Result<SealedRun> {
+    let decisions = holdout
+        .cases
+        .iter()
+        .map(|case| {
+            if !case.is_evaluable() {
+                return None;
+            }
+            let inference = infer_prethreshold(
+                corpus,
+                ALGORITHM_C1,
+                &case.display_name,
+                nonempty(&case.country_hint),
+                nonempty(&case.locale_hint),
+            );
+            Some(SealedDecision {
+                greeting_candidate: inference.greeting_candidate,
+                confidence: inference.confidence,
+            })
+        })
+        .collect::<Vec<_>>();
+    let evaluation = evaluate_sealed(&holdout, &decisions, C1_SELECTED_THRESHOLD)?;
+    Ok(SealedRun {
+        holdout,
+        evaluation,
+    })
+}
+
+fn nonempty(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
 }
 
 fn indices_for(cases: &[Case], predicate: impl Fn(&Case) -> bool) -> Vec<usize> {
@@ -669,7 +775,6 @@ fn write_metrics(
         Split::InspectedTest,
         Split::C0Test,
         Split::Test,
-        Split::Sealed,
     ] {
         let indices = indices_for(cases, |case| case.split == split);
         if !indices.is_empty() {
@@ -678,9 +783,6 @@ fn write_metrics(
     }
     let mut categories = BTreeMap::<(Split, String), Vec<usize>>::new();
     for (index, case) in cases.iter().enumerate() {
-        if case.split == Split::Sealed {
-            continue;
-        }
         categories
             .entry((case.split, case.category.clone()))
             .or_default()
@@ -713,7 +815,7 @@ fn write_threshold_curves(
     let mut writer = csv::Writer::from_path(output.join("threshold_curves.csv"))?;
     writer.write_record(metric_header())?;
     for algorithm in algorithms {
-        for split in [Split::Dev, Split::Validation, Split::Test, Split::Sealed] {
+        for split in [Split::Dev, Split::Validation, Split::Test] {
             let indices = indices_for(cases, |case| case.split == split);
             if indices.is_empty() {
                 continue;
@@ -809,7 +911,7 @@ fn write_precision_targets(
         "target_substantiated",
     ])?;
     for algorithm in algorithms {
-        for split in [Split::Dev, Split::Validation, Split::Test, Split::Sealed] {
+        for split in [Split::Dev, Split::Validation, Split::Test] {
             let indices = indices_for(cases, |case| case.split == split);
             if indices.is_empty() {
                 continue;
@@ -1130,7 +1232,7 @@ fn write_comparison(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn build_report(
     arguments: &Arguments,
     corpus: &C32Artifact,
@@ -1139,6 +1241,7 @@ fn build_report(
     cases: &[Case],
     algorithms: &[AlgorithmRun],
     role_summaries: &[RoleSummary],
+    sealed_run: Option<&SealedRun>,
 ) -> String {
     let mut report = String::new();
     writeln!(report, "# Greeting-name classifier evaluation\n").unwrap();
@@ -1183,10 +1286,9 @@ fn build_report(
         Split::InspectedTest,
         Split::C0Test,
         Split::Test,
-        Split::Sealed,
     ] {
         let indices = indices_for(cases, |case| case.split == split);
-        if indices.is_empty() && split != Split::Sealed {
+        if indices.is_empty() {
             continue;
         }
         let people = indices
@@ -1201,7 +1303,6 @@ fn build_report(
             Split::InspectedTest => "previous generated TEST; inspected regression evidence only",
             Split::C0Test => "C0 generated TEST; now inspected regression evidence only",
             Split::Test => "fresh C1 held-out name partition",
-            Split::Sealed => "manually labeled real-world holdout; aggregate-only output",
         };
         writeln!(
             report,
@@ -1251,7 +1352,6 @@ fn build_report(
             Split::InspectedTest,
             Split::C0Test,
             Split::Test,
-            Split::Sealed,
         ] {
             let indices = indices_for(cases, |case| case.split == split);
             if indices.is_empty() {
@@ -1423,12 +1523,13 @@ fn build_report(
     write_category_report(&mut report, arguments, cases, algorithms);
     write_failure_report(&mut report, arguments, cases, algorithms);
     write_configuration_report(&mut report, algorithms);
+    write_sealed_report(&mut report, sealed_run);
     writeln!(report, "\n## Interpretation boundaries\n").unwrap();
     writeln!(report, "- Regression metrics are behavior checks and are never pooled into DEV/VALIDATION/TEST quality metrics.").unwrap();
     writeln!(report, "- LEGACY_TEST, INSPECTED_TEST, and C0_TEST are frozen, inspected snapshots retained only as regression/debug evidence and excluded from primary TEST quality claims.").unwrap();
     writeln!(report, "- Fresh generated TEST was snapshotted before any classifier evaluation and was evaluated once after C1 and its threshold were frozen from DEV/VALIDATION. Its cases and failure rows are not written to the output. It is independent at the labeled-name atom level, but synthetic performance is not a substitute for a sealed real-world corpus.").unwrap();
     writeln!(report, "- Generated transformations share fixture atoms, so Wilson bounds are case-level diagnostics under an independence approximation; they do not measure uncertainty over the universe of names.").unwrap();
-    writeln!(report, "- Sealed rows are reported only in aggregate and are excluded from failure and A/B detail files. If a row is inspected to alter the algorithm, remove it from the sealed file and add it to DEV or regression before evaluating again.").unwrap();
+    writeln!(report, "- A sealed holdout is checksum-verified before inference, evaluated only with frozen C1 at `0.93`, and reported only through aggregate metrics and coarse confidence buckets. It never enters synthetic result, failure, comparison, threshold-sweep, or trace outputs.").unwrap();
     writeln!(report, "- Person false-negative rate counts person cases where the classifier abstains. Wrong emitted names are reported separately and also reduce greeting recall.").unwrap();
     writeln!(report, "- Precision-target rows are descriptive per split. `Supported=no` explicitly means that the emission count/error rate does not substantiate the target at a one-sided 95% Wilson bound. A production threshold must be selected on DEV/VALIDATION and confirmed once on genuinely sealed data.").unwrap();
     report
@@ -1457,6 +1558,73 @@ fn write_role_distribution_report(report: &mut String, summaries: &[RoleSummary]
         )
         .unwrap();
     }
+}
+
+fn build_sealed_only_report(sealed_run: &SealedRun) -> String {
+    let mut report = String::new();
+    writeln!(report, "# Sealed greeting-name evaluation\n").unwrap();
+    writeln!(report, "This aggregate-only run did not generate or evaluate synthetic cases, Algorithms A/B/C0, threshold curves, comparisons, candidate traces, or row-level predictions.\n").unwrap();
+    write_sealed_report(&mut report, Some(sealed_run));
+    writeln!(report, "## Interpretation boundary\n").unwrap();
+    writeln!(report, "This command evaluates only frozen C1 at `0.93`. Run the first real holdout evaluation once, and do not inspect individual rows or use these aggregates to retune its threshold. If a row is inspected to design a future algorithm, move it to DEV/regression and do not continue treating this holdout as sealed evidence.\n").unwrap();
+    report
+}
+
+fn write_sealed_report(report: &mut String, sealed_run: Option<&SealedRun>) {
+    writeln!(report, "## Sealed real-world holdout\n").unwrap();
+    let Some(sealed_run) = sealed_run else {
+        writeln!(report, "No sealed holdout was supplied. Use `--sealed=FILE --sealed-manifest=FILE` only after human labeling and checksum freezing are complete.\n").unwrap();
+        return;
+    };
+    let manifest = &sealed_run.holdout.manifest;
+    let evaluation = &sealed_run.evaluation;
+    let metrics = evaluation.metrics;
+    writeln!(
+        report,
+        "The holdout was checksum-verified as `{}` before inference. Provenance: {}. Only frozen `{}` at threshold `{:.2}` was evaluated; no row-level output was generated.\n",
+        manifest.holdout_sha256,
+        markdown(&manifest.provenance),
+        ALGORITHM_C1.name,
+        evaluation.threshold,
+    )
+    .unwrap();
+    writeln!(report, "| Total labeled | Evaluable | Skipped | Expected greetings | Expected abstentions | Emitted | Correct | Wrong | Expected greetings missed | False emissions on expected abstentions | Precision | Recall | Abstention | Non-person cases | Non-person false positives | Non-person FPR |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|").unwrap();
+    writeln!(
+        report,
+        "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+        metrics.total_labeled_cases,
+        metrics.evaluable_cases,
+        metrics.skipped_cases,
+        metrics.expected_greetings,
+        metrics.expected_abstentions,
+        metrics.emitted_greetings,
+        metrics.correct_greetings,
+        metrics.wrong_greetings,
+        metrics.expected_greetings_missed,
+        metrics.false_emissions_on_expected_abstentions,
+        percent(metrics.greeting_precision()),
+        percent(metrics.greeting_recall()),
+        percent(metrics.abstention_rate()),
+        metrics.non_person_cases,
+        metrics.non_person_false_positives,
+        percent(metrics.non_person_false_positive_rate()),
+    )
+    .unwrap();
+    writeln!(report, "\nCoarse emitted-confidence distribution (diagnostic only; the sealed data must not be used to retune the threshold):\n").unwrap();
+    writeln!(
+        report,
+        "| Confidence | Emitted | Correct | Wrong |\n|---|---:|---:|---:|"
+    )
+    .unwrap();
+    for bucket in evaluation.confidence_buckets {
+        writeln!(
+            report,
+            "| {} | {} | {} | {} |",
+            bucket.label, bucket.emitted, bucket.correct, bucket.wrong
+        )
+        .unwrap();
+    }
+    writeln!(report).unwrap();
 }
 
 fn write_comparison_report(
@@ -1766,5 +1934,89 @@ fn outcome_name(outcome: CaseOutcome) -> &'static str {
         CaseOutcome::Correct => "correct",
         CaseOutcome::Wrong => "wrong",
         CaseOutcome::Abstained => "abstained",
+    }
+}
+
+#[cfg(test)]
+mod sealed_report_tests {
+    use name_eval::holdout::{
+        CaseKind, ConfidenceBucket, HoldoutCase, HoldoutManifest, LabelStatus, SealedMetrics,
+    };
+
+    use super::*;
+
+    #[test]
+    fn sealed_report_contains_aggregates_but_no_case_rows() {
+        let private_name = "Private Display Name";
+        let sealed = SealedRun {
+            holdout: FrozenHoldout {
+                cases: vec![HoldoutCase {
+                    id: "case-00000000".to_string(),
+                    display_name: private_name.to_string(),
+                    country_hint: String::new(),
+                    locale_hint: String::new(),
+                    label_status: LabelStatus::Greeting,
+                    expected_greeting: "Private".to_string(),
+                    span_start: Some(0),
+                    span_end: Some(7),
+                    case_kind: CaseKind::Person,
+                }],
+                manifest: HoldoutManifest {
+                    format_version: 1,
+                    holdout_sha256: "0123456789abcdef".to_string(),
+                    total_cases: 1,
+                    evaluable_cases: 1,
+                    skipped_cases: 0,
+                    expected_greetings: 1,
+                    expected_abstentions: 0,
+                    person_cases: 1,
+                    non_person_cases: 0,
+                    unknown_kind_cases: 0,
+                    provenance: "authorized test source".to_string(),
+                },
+            },
+            evaluation: SealedEvaluation {
+                threshold: 0.93,
+                metrics: SealedMetrics {
+                    total_labeled_cases: 1,
+                    evaluable_cases: 1,
+                    emitted_greetings: 1,
+                    correct_greetings: 1,
+                    expected_greetings: 1,
+                    ..SealedMetrics::default()
+                },
+                confidence_buckets: [
+                    ConfidenceBucket {
+                        label: "0.93–0.95",
+                        emitted: 1,
+                        correct: 1,
+                        wrong: 0,
+                    },
+                    ConfidenceBucket {
+                        label: "0.95–0.97",
+                        emitted: 0,
+                        correct: 0,
+                        wrong: 0,
+                    },
+                    ConfidenceBucket {
+                        label: "0.97–0.99",
+                        emitted: 0,
+                        correct: 0,
+                        wrong: 0,
+                    },
+                    ConfidenceBucket {
+                        label: "0.99–1.00",
+                        emitted: 0,
+                        correct: 0,
+                        wrong: 0,
+                    },
+                ],
+            },
+        };
+        let mut report = String::new();
+        write_sealed_report(&mut report, Some(&sealed));
+        assert!(report.contains("| 1 | 1 | 0 | 1 |"));
+        assert!(!report.contains(private_name));
+        assert!(!report.contains("case-00000000"));
     }
 }

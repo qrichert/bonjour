@@ -27,7 +27,9 @@ spelling, case, whitespace, accents, and separators.
 statistically weak long tail. `name-clean-v1` established a conservative
 reusable corpus policy. `name-surname-v2` augmented only retained
 first-name keys with surname usage. `name-eval` tests greeting inference
-against labels independent of the corpus.
+against labels independent of the corpus and provides an
+artifact-independent workflow for manually labeling, checksum-freezing,
+and aggregate-only evaluation of a locally retained real-world holdout.
 
 ## What was tried
 
@@ -238,6 +240,14 @@ compound recall was 29.69%, and hyphenated recall was 31.49%. These
 aggregate findings were preserved without inspecting or tuning against
 TEST failure rows. A sealed, representative real-world holdout remains
 the next evidence milestone.
+
+The holdout workflow accepts only display name plus optional country and
+locale hints, stores exact original-text spans, supports intentional
+abstention and skipped labels, and freezes deterministic serialization
+with a SHA-256 manifest before inference. Labeling cannot access C1 or
+corpus evidence. Sealed evaluation is restricted to C1 at `0.93` and
+emits aggregate metrics and coarse confidence buckets only. No real
+holdout or personal-data source is included in the repository.
 
 ## Current storage choice
 

@@ -1,1 +1,1 @@
-id,input,country_hint,locale_hint,expected_greeting,expected_gender,category,notes
+id,display_name,country_hint,locale_hint,label_status,expected_greeting,span_start,span_end,case_kind

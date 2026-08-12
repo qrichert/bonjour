@@ -63,13 +63,9 @@ It retains its original seed `0x6576616c2d763031`.
 `fixtures/regression.csv` is inspectable and may be optimized against.
 Its metrics are never pooled into generated or sealed quality metrics.
 
-`fixtures/sealed-holdout.example.csv` defines the manually labeled
-holdout format. Keep the real file outside the repository if its
-contents must remain sealed. The default report emits aggregate sealed
-metrics only: no sealed row is written to result, failure, or comparison
-files. If a row is inspected in order to alter an algorithm, remove it
-from the sealed file and add it to DEV or the regression corpus before
-the next evaluation.
+The real-world holdout is a separate layer. It is never pooled into
+synthetic metrics or exposed to Algorithms A/B/C0. The complete labeling
+and freezing workflow is documented below.
 
 Both generators use SplitMix64 with the fixed seeds documented above,
 with additional domain separation by split.
@@ -103,7 +99,8 @@ Optional arguments:
 
 ```text
 --reference-threshold=0.80
---sealed=/path/to/manually-labeled-holdout.csv
+--sealed=/path/to/frozen-holdout.csv
+--sealed-manifest=/path/to/frozen-holdout.manifest.csv
 --development-only
 ```
 
@@ -114,6 +111,108 @@ on VALIDATION; it is not yet a production recommendation. The
 
 The clean-v1 CSV is opened read-only to report how many exact keys and
 observations would fail the lexical rule. It is never rewritten.
+
+## Sealed real-world holdout workflow
+
+The labeling CLI is artifact-independent: it neither loads nor links to
+classifier code, clean-v1, clean-v2, or the public-data-derived corpus.
+It cannot display C1 output, confidence, frequency, membership, or role
+LLR. Do not run the evaluator until labeling is complete and the holdout
+has been frozen.
+
+Prepare a local UTF-8 CSV with this header:
+
+```csv
+display_name,country_hint,locale_hint
+```
+
+Only `display_name` is required. Preserve source spelling and casing. Do
+not include email addresses, phone numbers, account identifiers,
+addresses, or other user attributes. Use inputs whose collection and
+review are authorized; the loader rejects any column other than the
+three shown above. This task provides no scraper or personal-data
+ingestion. A header-only template is checked in as
+`fixtures/holdout-source.example.csv`.
+
+Keep private source, draft, frozen, and manifest files under `_wip/` or
+another access-controlled, ignored location. Start or resume labeling:
+
+```console
+cargo run --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-holdout -- \
+  label \
+  _wip/name-holdout/source.csv \
+  _wip/name-holdout/draft.csv
+```
+
+The CLI presents one original display name at a time. It offers
+contiguous spans delimited by whitespace and non-name punctuation, while
+retaining apostrophes, hyphens, Unicode letters, and combining marks
+inside a span. Multi-token spans are also offered. Choose a span,
+`NULL`, `SKIP`, or save and quit. For a `NULL` label, optionally mark
+the case as person, organization/non-person, or unknown; this supports a
+non-person false-positive rate without forcing an uncertain type.
+Progress is written after every decision. Opaque IDs are deterministic
+ordinals and do not encode an account identity.
+
+The draft schema is:
+
+```csv
+id,display_name,country_hint,locale_hint,label_status,expected_greeting,span_start,span_end,case_kind
+```
+
+Greeting labels store exact UTF-8 byte offsets into the original
+`display_name`; validation rejects any label whose text is not exactly
+that original span. Empty `expected_greeting` with `abstain` means an
+intentional `NULL`. `skip` means undecidable and is excluded from metric
+denominators.
+
+Once all rows are labeled or skipped, freeze the holdout before any
+classifier evaluation:
+
+```console
+cargo run --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-holdout -- \
+  freeze \
+  _wip/name-holdout/draft.csv \
+  _wip/name-holdout/sealed.csv \
+  _wip/name-holdout/sealed.manifest.csv \
+  --provenance="brief non-identifying description of the authorized source"
+```
+
+Freeze refuses to overwrite existing outputs. It sorts and serializes
+the labeled rows deterministically, records SHA-256 and counts, and
+writes a one-row manifest containing provenance, total/evaluable/skipped
+cases, greeting/abstention labels, and optional case-kind counts. The
+evaluator rejects a changed checksum, non-canonical serialization, or
+counts that differ from the manifest.
+
+Run the first sealed evaluation with both frozen files:
+
+```console
+cargo run --release --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-eval -- \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-sealed-first \
+  --sealed-only \
+  --sealed=_wip/name-holdout/sealed.csv \
+  --sealed-manifest=_wip/name-holdout/sealed.manifest.csv
+```
+
+Supplying only one sealed argument is an error. Sealed evaluation uses
+exactly frozen `C1-compositional-role-v1` at `0.93`; the reference
+threshold and development options are rejected in `--sealed-only` mode.
+This mode does not load clean-v1 or generate synthetic cases. It writes
+only `sealed_summary_metrics.csv`, `sealed_confidence_buckets.csv`, and
+the same aggregate tables in `report.md`. It never writes sealed cases,
+failures, comparisons, traces, predictions, or threshold sweeps. The
+confidence buckets are `0.93–0.95`, `0.95–0.97`, `0.97–0.99`, and
+`0.99–1.00` and must not be used to retune C1.
+
+If an individual sealed row is later inspected to design a classifier
+change, it is no longer sealed evidence. Move it into DEV or regression
+before evaluating a future algorithm. Do not report the same inspected
+holdout as an unbiased test.
 
 ## Metric definitions
 

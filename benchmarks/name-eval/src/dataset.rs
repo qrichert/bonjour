@@ -33,7 +33,6 @@ pub enum Split {
     InspectedTest,
     C0Test,
     Test,
-    Sealed,
 }
 
 impl Split {
@@ -46,7 +45,6 @@ impl Split {
             Self::InspectedTest => "INSPECTED_TEST",
             Self::C0Test => "C0_TEST",
             Self::Test => "TEST",
-            Self::Sealed => "SEALED",
         }
     }
 
@@ -59,7 +57,6 @@ impl Split {
             Self::InspectedTest => 4,
             Self::C0Test => 5,
             Self::Test => 6,
-            Self::Sealed => 7,
         }
     }
 }
@@ -144,10 +141,6 @@ struct OrganizationRow {
 
 pub fn load_regression(path: &Path) -> Result<Vec<Case>> {
     load_labeled(path, Split::Regression)
-}
-
-pub fn load_sealed(path: &Path) -> Result<Vec<Case>> {
-    load_labeled(path, Split::Sealed)
 }
 
 fn load_labeled(path: &Path, split: Split) -> Result<Vec<Case>> {
