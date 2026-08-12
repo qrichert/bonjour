@@ -64,6 +64,9 @@ pub struct AlgorithmConfig {
     pub role_reliability_weight: f64,
     pub compound_evidence_weight: f64,
     pub remainder_role_weight: f64,
+    pub compositional_role_floor: f64,
+    pub compositional_evidence_weight: f64,
+    pub hyphen_structure_bonus: f64,
     pub hard_legal_abstention: bool,
 }
 
@@ -71,6 +74,7 @@ pub struct AlgorithmConfig {
 pub enum AlgorithmKind {
     Legacy,
     RoleHypothesis,
+    RoleCompositional,
 }
 
 pub const ALGORITHM_A: AlgorithmConfig = AlgorithmConfig {
@@ -95,6 +99,9 @@ pub const ALGORITHM_A: AlgorithmConfig = AlgorithmConfig {
     role_reliability_weight: 0.0,
     compound_evidence_weight: 0.0,
     remainder_role_weight: 0.0,
+    compositional_role_floor: 0.0,
+    compositional_evidence_weight: 0.0,
+    hyphen_structure_bonus: 0.0,
     hard_legal_abstention: false,
 };
 
@@ -120,6 +127,9 @@ pub const ALGORITHM_B: AlgorithmConfig = AlgorithmConfig {
     role_reliability_weight: 0.0,
     compound_evidence_weight: 0.0,
     remainder_role_weight: 0.0,
+    compositional_role_floor: 0.0,
+    compositional_evidence_weight: 0.0,
+    hyphen_structure_bonus: 0.0,
     hard_legal_abstention: false,
 };
 
@@ -145,7 +155,19 @@ pub const ALGORITHM_C: AlgorithmConfig = AlgorithmConfig {
     role_reliability_weight: 0.10,
     compound_evidence_weight: 0.18,
     remainder_role_weight: 0.12,
+    compositional_role_floor: 0.0,
+    compositional_evidence_weight: 0.0,
+    hyphen_structure_bonus: 0.0,
     hard_legal_abstention: true,
+};
+
+pub const ALGORITHM_C1: AlgorithmConfig = AlgorithmConfig {
+    name: "C1-compositional-role-v1",
+    kind: AlgorithmKind::RoleCompositional,
+    compositional_role_floor: 0.75,
+    compositional_evidence_weight: 0.20,
+    hyphen_structure_bonus: 0.04,
+    ..ALGORITHM_C
 };
 
 #[derive(Clone, Debug)]
@@ -186,8 +208,27 @@ struct RoleCandidate {
     reliability: f64,
     country_support: f64,
     compound_evidence: f64,
+    compositional_evidence: f64,
     remainder_evidence: f64,
+    origin: CandidateOrigin,
     evidence: Evidence,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidateOrigin {
+    Exact,
+    ComposedWhitespace,
+    ComposedHyphen,
+}
+
+impl CandidateOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::ComposedWhitespace => "composed_whitespace",
+            Self::ComposedHyphen => "composed_hyphen",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -203,7 +244,9 @@ pub struct CandidateDiagnostic {
     pub reliability: f64,
     pub country_support: f64,
     pub compound_evidence: f64,
+    pub compositional_evidence: f64,
     pub remainder_evidence: f64,
+    pub origin: &'static str,
     pub score: f64,
     pub algorithm_a_score: f64,
     pub algorithm_b_score: f64,
@@ -216,7 +259,10 @@ pub fn infer_prethreshold(
     country_hint: Option<&str>,
     locale_hint: Option<&str>,
 ) -> RawInference {
-    if config.kind == AlgorithmKind::RoleHypothesis {
+    if matches!(
+        config.kind,
+        AlgorithmKind::RoleHypothesis | AlgorithmKind::RoleCompositional
+    ) {
         return infer_role_prethreshold(corpus, config, display_name, country_hint, locale_hint);
     }
     infer_legacy_prethreshold(corpus, config, display_name, country_hint, locale_hint)
@@ -351,7 +397,23 @@ fn role_candidates(
 ) -> Vec<RoleCandidate> {
     let country = resolve_country(country_hint, locale_hint);
     let tokens = tokenize(display_name);
-    let mut candidates = Vec::<RoleCandidate>::new();
+    let mut candidates = exact_role_candidates(corpus, config, &tokens, country);
+    if config.kind == AlgorithmKind::RoleCompositional {
+        add_compositional_candidates(corpus, config, &tokens, country, &mut candidates);
+    }
+
+    add_direct_compound_evidence(config, &mut candidates);
+    add_remainder_evidence(config, &mut candidates);
+    candidates
+}
+
+fn exact_role_candidates(
+    corpus: &impl EvidenceSource,
+    config: AlgorithmConfig,
+    tokens: &[String],
+    country: Option<[u8; 2]>,
+) -> Vec<RoleCandidate> {
+    let mut candidates = Vec::new();
     for start in 0..tokens.len() {
         for length in 1..=2.min(tokens.len() - start) {
             let display = tokens[start..start + length].join(" ");
@@ -379,14 +441,19 @@ fn role_candidates(
                 reliability,
                 country_support,
                 compound_evidence: 0.0,
+                compositional_evidence: 0.0,
                 remainder_evidence: 0.0,
+                origin: CandidateOrigin::Exact,
                 evidence,
             });
         }
     }
+    candidates
+}
 
+fn add_direct_compound_evidence(config: AlgorithmConfig, candidates: &mut [RoleCandidate]) {
     for index in 0..candidates.len() {
-        if candidates[index].length == 2 {
+        if candidates[index].origin == CandidateOrigin::Exact && candidates[index].length == 2 {
             let component_max = candidates
                 .iter()
                 .filter(|candidate| {
@@ -405,7 +472,9 @@ fn role_candidates(
                 config.compound_evidence_weight * candidates[index].compound_evidence;
         }
     }
+}
 
+fn add_remainder_evidence(config: AlgorithmConfig, candidates: &mut [RoleCandidate]) {
     for index in 0..candidates.len() {
         let strongest_disjoint = candidates
             .iter()
@@ -429,7 +498,168 @@ fn role_candidates(
         }
         candidates[index].score = candidates[index].score.clamp(0.0, 1.0);
     }
-    candidates
+}
+
+fn add_compositional_candidates(
+    corpus: &impl EvidenceSource,
+    config: AlgorithmConfig,
+    tokens: &[String],
+    country: Option<[u8; 2]>,
+    candidates: &mut Vec<RoleCandidate>,
+) {
+    // Without direct phrase evidence, a two-token input is inherently ambiguous
+    // between a compound greeting name and given + surname. Require a remainder
+    // token before synthesizing a whitespace compound.
+    if tokens.len() >= 3 {
+        for start in 0..tokens.len() - 1 {
+            if candidates
+                .iter()
+                .any(|candidate| candidate.start == start && candidate.length == 2)
+            {
+                continue;
+            }
+            let Some(left) = component_evidence(corpus, config, &tokens[start], country) else {
+                continue;
+            };
+            let Some(right) = component_evidence(corpus, config, &tokens[start + 1], country)
+            else {
+                continue;
+            };
+            if let Some(candidate) = composed_candidate(
+                config,
+                tokens[start..=start + 1].join(" "),
+                start,
+                2,
+                CandidateOrigin::ComposedWhitespace,
+                left,
+                right,
+            ) {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    for (start, token) in tokens.iter().enumerate() {
+        if candidates.iter().any(|candidate| {
+            candidate.start == start
+                && candidate.length == 1
+                && candidate.display.eq_ignore_ascii_case(token)
+        }) {
+            continue;
+        }
+        let mut components = token.split('-');
+        let (Some(left_display), Some(right_display), None) =
+            (components.next(), components.next(), components.next())
+        else {
+            continue;
+        };
+        if left_display.is_empty() || right_display.is_empty() {
+            continue;
+        }
+        let Some(left) = component_evidence(corpus, config, left_display, country) else {
+            continue;
+        };
+        let Some(right) = component_evidence(corpus, config, right_display, country) else {
+            continue;
+        };
+        if let Some(candidate) = composed_candidate(
+            config,
+            token.clone(),
+            start,
+            1,
+            CandidateOrigin::ComposedHyphen,
+            left,
+            right,
+        ) {
+            candidates.push(candidate);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ComponentEvidence {
+    evidence: Evidence,
+    role_llr: f64,
+    role_signal: f64,
+    reliability: f64,
+    country_support: f64,
+}
+
+fn component_evidence(
+    corpus: &impl EvidenceSource,
+    config: AlgorithmConfig,
+    display: &str,
+    country: Option<[u8; 2]>,
+) -> Option<ComponentEvidence> {
+    let evidence = lookup_with_variants(corpus, display, country)?;
+    let role_llr = role_llr(evidence, config.role_smoothing);
+    Some(ComponentEvidence {
+        evidence,
+        role_llr,
+        role_signal: logistic((role_llr - config.role_center) / config.role_scale),
+        reliability: count_reliability(evidence.global_count),
+        country_support: country_support(evidence),
+    })
+}
+
+fn composed_candidate(
+    config: AlgorithmConfig,
+    display: String,
+    start: usize,
+    length: usize,
+    origin: CandidateOrigin,
+    left: ComponentEvidence,
+    right: ComponentEvidence,
+) -> Option<RoleCandidate> {
+    if left.role_llr < config.compositional_role_floor
+        || right.role_llr < config.compositional_role_floor
+    {
+        return None;
+    }
+    let role_llr = left.role_llr.min(right.role_llr);
+    let role_signal = left.role_signal.min(right.role_signal);
+    let reliability = (left.reliability * right.reliability).sqrt();
+    let country_support = (left.country_support * right.country_support).sqrt();
+    let compositional_evidence = (left.role_signal * right.role_signal).sqrt();
+    let structure_bonus = if origin == CandidateOrigin::ComposedHyphen {
+        config.hyphen_structure_bonus
+    } else {
+        0.0
+    };
+    let score = config.role_score_floor
+        + config.role_weight * role_signal
+        + config.role_reliability_weight * reliability
+        + config.country_weight * country_support
+        + config.compositional_evidence_weight * compositional_evidence
+        + structure_bonus;
+    Some(RoleCandidate {
+        display,
+        start,
+        length,
+        score,
+        role_llr,
+        role_signal,
+        reliability,
+        country_support,
+        compound_evidence: 0.0,
+        compositional_evidence,
+        remainder_evidence: 0.0,
+        origin,
+        evidence: combine_component_evidence(left.evidence, right.evidence),
+    })
+}
+
+fn combine_component_evidence(left: Evidence, right: Evidence) -> Evidence {
+    Evidence {
+        global_count: left.global_count.min(right.global_count),
+        country_count: left.country_count.min(right.country_count),
+        effective_count: left.effective_count.saturating_add(right.effective_count),
+        female_count: left.female_count.saturating_add(right.female_count),
+        male_count: left.male_count.saturating_add(right.male_count),
+        surname_count: left.surname_count.min(right.surname_count),
+        given_total: left.given_total,
+        surname_total: left.surname_total,
+    }
 }
 
 pub fn candidate_diagnostics(
@@ -453,7 +683,9 @@ pub fn candidate_diagnostics(
             reliability: candidate.reliability,
             country_support: candidate.country_support,
             compound_evidence: candidate.compound_evidence,
+            compositional_evidence: candidate.compositional_evidence,
             remainder_evidence: candidate.remainder_evidence,
+            origin: candidate.origin.as_str(),
             score: candidate.score,
             algorithm_a_score: legacy_candidate_score(
                 candidate.evidence,
@@ -872,6 +1104,65 @@ mod tests {
         ]));
         let inference = infer_prethreshold(&corpus, ALGORITHM_C, "Anne Marie Dupont", None, None);
         assert_eq!(inference.greeting_candidate.as_deref(), Some("Anne Marie"));
+    }
+
+    #[test]
+    fn c1_composes_unsupported_whitespace_compound_from_given_like_components() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Mary".to_string(), role_evidence(40_000, 200)),
+            ("Jane".to_string(), role_evidence(30_000, 150)),
+        ]));
+        let c0 = infer_prethreshold(&corpus, ALGORITHM_C, "Mary Jane Watson", None, None);
+        let c1 = infer_prethreshold(&corpus, ALGORITHM_C1, "Mary Jane Watson", None, None);
+        assert_ne!(c0.greeting_candidate.as_deref(), Some("Mary Jane"));
+        assert_eq!(c1.greeting_candidate.as_deref(), Some("Mary Jane"));
+    }
+
+    #[test]
+    fn c1_does_not_invent_whitespace_compound_for_ambiguous_two_token_input() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Mary".to_string(), role_evidence(40_000, 200)),
+            ("Jane".to_string(), role_evidence(30_000, 150)),
+        ]));
+        let diagnostics = candidate_diagnostics(&corpus, ALGORITHM_C1, "Mary Jane", None, None);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|candidate| candidate.origin != "composed_whitespace")
+        );
+    }
+
+    #[test]
+    fn c1_composes_unsupported_hyphenated_name_from_given_like_components() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Jean".to_string(), role_evidence(60_000, 1_000)),
+            ("Pierre".to_string(), role_evidence(45_000, 800)),
+        ]));
+        let c0 = infer_prethreshold(&corpus, ALGORITHM_C, "Jean-Pierre Martin", None, None);
+        let c1 = infer_prethreshold(&corpus, ALGORITHM_C1, "Jean-Pierre Martin", None, None);
+        assert_eq!(c0.greeting_candidate, None);
+        assert_eq!(c1.greeting_candidate.as_deref(), Some("Jean-Pierre"));
+    }
+
+    #[test]
+    fn c1_does_not_compose_given_and_surname_like_candidates() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Jean".to_string(), role_evidence(58_545, 9_796)),
+            ("Martin".to_string(), role_evidence(14_544, 46_409)),
+        ]));
+        for input in ["Jean Martin", "Martin Jean"] {
+            let inference = infer_prethreshold(&corpus, ALGORITHM_C1, input, None, None);
+            assert_eq!(
+                inference.greeting_candidate.as_deref(),
+                Some("Jean"),
+                "{input}"
+            );
+            assert!(
+                candidate_diagnostics(&corpus, ALGORITHM_C1, input, None, None)
+                    .iter()
+                    .all(|candidate| candidate.origin != "composed_whitespace")
+            );
+        }
     }
 
     #[test]

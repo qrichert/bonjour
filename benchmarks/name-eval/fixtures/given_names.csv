@@ -31,6 +31,22 @@ DEV,Viktor,M,UA,false
 DEV,Iryna,F,UA,false
 DEV,Rahul,M,IN,false
 DEV,Kavita,F,IN,false
+DEV,Lou Ann,F,US,true
+DEV,Lou-Ann,F,US,true
+DEV,Jean Luc,M,FR,true
+DEV,Jean-Luc,M,FR,true
+DEV,Anne Sophie,F,FR,true
+DEV,Anne-Sophie,F,FR,true
+DEV,Ana Lucia,F,ES,true
+DEV,Ana-Lucia,F,ES,true
+DEV,Mohamed Amine,M,MA,true
+DEV,Mohamed-Amine,M,MA,true
+DEV,Fatima Zahra,F,MA,true
+DEV,Fatima-Zahra,F,MA,true
+DEV,Marco Antonio,M,IT,true
+DEV,Marco-Antonio,M,IT,true
+DEV,Mehmet Ali,M,TR,true
+DEV,Mehmet-Ali,M,TR,true
 VALIDATION,Alice,F,GB,false
 VALIDATION,Hugo,M,FR,false
 VALIDATION,María José,F,ES,true
@@ -66,6 +82,20 @@ VALIDATION,Vikram,M,IN,false
 VALIDATION,Neha,F,IN,false
 VALIDATION,Lily-Rose,F,GB,false
 VALIDATION,Léo-Paul,M,FR,false
+VALIDATION,Alice May,F,GB,true
+VALIDATION,Alice-May,F,GB,true
+VALIDATION,Hugo Rémi,M,FR,true
+VALIDATION,Hugo-Rémi,M,FR,true
+VALIDATION,João Pedro,M,PT,true
+VALIDATION,João-Pedro,M,PT,true
+VALIDATION,Aylin Su,F,TR,true
+VALIDATION,Aylin-Su,F,TR,true
+VALIDATION,Matteo Luca,M,IT,true
+VALIDATION,Matteo-Luca,M,IT,true
+VALIDATION,Mei Ling,F,CN,true
+VALIDATION,Mei-Ling,F,CN,true
+VALIDATION,Lily Rose,F,GB,true
+VALIDATION,Léo Paul,M,FR,true
 LEGACY_TEST,Claire,F,FR,false
 LEGACY_TEST,Antoine,M,FR,false
 LEGACY_TEST,Luís Miguel,M,PT,true
@@ -118,41 +148,79 @@ INSPECTED_TEST,M'Baye,M,SN,false
 INSPECTED_TEST,Anaïs,F,FR,false
 INSPECTED_TEST,Abdoulaye,M,SN,false
 INSPECTED_TEST,Awa,F,SN,false
-TEST,Florence,F,FR,false
-TEST,Gaspard,M,FR,false
-TEST,Noémie,F,FR,false
-TEST,Maxime,M,FR,false
-TEST,Chiara,F,IT,false
-TEST,Davide,M,IT,false
-TEST,Alejandra,F,ES,false
-TEST,Esteban,M,ES,false
-TEST,Elif,F,TR,false
-TEST,Burak,M,TR,false
-TEST,Imane,F,MA,false
-TEST,Rachid,M,MA,false
-TEST,Oksana,F,UA,false
-TEST,Taras,M,UA,false
-TEST,Ishita,F,IN,false
-TEST,Rohan,M,IN,false
-TEST,Aiko,F,JP,false
-TEST,Daiki,M,JP,false
-TEST,Hye-jin,F,KR,false
-TEST,Seung-ho,M,KR,false
-TEST,Jing,,CN,false
-TEST,Wei,,CN,false
-TEST,Niamh,F,IE,false
-TEST,Eoin,M,IE,false
-TEST,Ingrid,F,NO,false
-TEST,Håkon,M,NO,false
-TEST,Agnieszka,F,PL,false
-TEST,Łukasz,M,PL,false
-TEST,Femke,F,NL,false
-TEST,Daan,M,NL,false
-TEST,Lina Maude,F,FR,true
-TEST,Louis-Charles,M,FR,true
-TEST,Sha'Carri,F,US,false
-TEST,Adama,,SN,false
-TEST,Mamadou,M,SN,false
-TEST,Robin,,GB,false
-TEST,Zuri,F,ZA,false
-TEST,Thabo,M,ZA,false
+C0_TEST,Florence,F,FR,false
+C0_TEST,Gaspard,M,FR,false
+C0_TEST,Noémie,F,FR,false
+C0_TEST,Maxime,M,FR,false
+C0_TEST,Chiara,F,IT,false
+C0_TEST,Davide,M,IT,false
+C0_TEST,Alejandra,F,ES,false
+C0_TEST,Esteban,M,ES,false
+C0_TEST,Elif,F,TR,false
+C0_TEST,Burak,M,TR,false
+C0_TEST,Imane,F,MA,false
+C0_TEST,Rachid,M,MA,false
+C0_TEST,Oksana,F,UA,false
+C0_TEST,Taras,M,UA,false
+C0_TEST,Ishita,F,IN,false
+C0_TEST,Rohan,M,IN,false
+C0_TEST,Aiko,F,JP,false
+C0_TEST,Daiki,M,JP,false
+C0_TEST,Hye-jin,F,KR,false
+C0_TEST,Seung-ho,M,KR,false
+C0_TEST,Jing,,CN,false
+C0_TEST,Wei,,CN,false
+C0_TEST,Niamh,F,IE,false
+C0_TEST,Eoin,M,IE,false
+C0_TEST,Ingrid,F,NO,false
+C0_TEST,Håkon,M,NO,false
+C0_TEST,Agnieszka,F,PL,false
+C0_TEST,Łukasz,M,PL,false
+C0_TEST,Femke,F,NL,false
+C0_TEST,Daan,M,NL,false
+C0_TEST,Lina Maude,F,FR,true
+C0_TEST,Louis-Charles,M,FR,true
+C0_TEST,Sha'Carri,F,US,false
+C0_TEST,Adama,,SN,false
+C0_TEST,Mamadou,M,SN,false
+C0_TEST,Robin,,GB,false
+C0_TEST,Zuri,F,ZA,false
+C0_TEST,Thabo,M,ZA,false
+TEST,Maëlys,F,FR,false
+TEST,Bastien,M,FR,false
+TEST,Alessia,F,IT,false
+TEST,Emanuele,M,IT,false
+TEST,Nuria,F,ES,false
+TEST,Joaquín,M,ES,false
+TEST,Ceren,F,TR,false
+TEST,Kaan,M,TR,false
+TEST,Khadija,F,MA,false
+TEST,Anas,M,MA,false
+TEST,Svitlana,F,UA,false
+TEST,Bohdan,M,UA,false
+TEST,Pooja,F,IN,false
+TEST,Arnav,M,IN,false
+TEST,Haruka,F,JP,false
+TEST,Takumi,M,JP,false
+TEST,Ye-seul,F,KR,false
+TEST,Hyun-woo,M,KR,false
+TEST,Lihua,,CN,false
+TEST,Zhen,,CN,false
+TEST,Aoife,F,IE,false
+TEST,Oisín,M,IE,false
+TEST,Astrid,F,NO,false
+TEST,Sindre,M,NO,false
+TEST,Zofia,F,PL,false
+TEST,Jakub,M,PL,false
+TEST,Anouk,F,NL,false
+TEST,Jeroen,M,NL,false
+TEST,Ella Louise,F,GB,true
+TEST,Karl-Heinz,M,DE,true
+TEST,Siti Nur,F,ID,true
+TEST,Ka'Ron,M,US,false
+TEST,Nkosazana,F,ZA,false
+TEST,Sipho,M,ZA,false
+TEST,Abena,F,GH,false
+TEST,Kwame,M,GH,false
+TEST,Thandiwe,F,ZA,false
+TEST,Deniz,,TR,false

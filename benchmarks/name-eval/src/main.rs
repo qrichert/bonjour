@@ -24,24 +24,28 @@ use std::path::{Path, PathBuf};
 
 use artifact::C32Artifact;
 use classifier::{
-    ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, AlgorithmConfig, RawInference, candidate_diagnostics,
-    infer_prethreshold,
+    ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, AlgorithmConfig, RawInference,
+    candidate_diagnostics, infer_prethreshold,
 };
 use corpus_audit::{LexicalAudit, audit_clean_v1};
 use dataset::{
-    Case, DEV_TARGET, FRESH_TEST_GENERATOR_SEED, FRESH_TEST_SHA256, GENERATOR_SEED,
-    INSPECTED_TEST_SHA256, LARGE_GENERATOR_SEED, SeedStats, Split, TEST_TARGET, VALIDATION_TARGET,
-    generate_cases, load_regression, load_sealed, seed_stats,
+    C0_TEST_GENERATOR_SEED, C0_TEST_SHA256, Case, DEV_TARGET, FRESH_TEST_GENERATOR_SEED,
+    FRESH_TEST_SHA256, GENERATOR_SEED, INSPECTED_TEST_SHA256, LARGE_GENERATOR_SEED, SeedStats,
+    Split, TEST_TARGET, VALIDATION_TARGET, generate_cases, load_regression, load_sealed,
+    seed_stats,
 };
 use metrics::{CaseOutcome, Metrics, greeting_matches, outcome};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const DEFAULT_REFERENCE_THRESHOLD: f64 = 0.80;
+const C0_FROZEN_THRESHOLD: f64 = 0.80;
+const C1_SELECTED_THRESHOLD: f64 = 0.93;
 const THRESHOLD_SWEEP: [f64; 12] = [
     0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.99, 1.00,
 ];
 const PRECISION_TARGETS: [f64; 3] = [0.990, 0.995, 0.999];
+const ERROR_BUDGETS: [usize; 5] = [0, 1, 5, 10, 25];
 
 struct AlgorithmRun {
     config: AlgorithmConfig,
@@ -56,6 +60,7 @@ struct TargetResult {
 
 #[derive(Clone)]
 struct RoleSummary {
+    algorithm: &'static str,
     split: Split,
     role: &'static str,
     values: Vec<f64>,
@@ -176,7 +181,7 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
     cases.extend(generated);
     cases.extend(sealed);
 
-    let algorithms = [ALGORITHM_A, ALGORITHM_B, ALGORITHM_C]
+    let algorithms = [ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1]
         .into_iter()
         .map(|config| AlgorithmRun {
             config,
@@ -201,6 +206,7 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
     write_metrics(output, &cases, &algorithms, arguments.reference_threshold)?;
     write_threshold_curves(output, &cases, &algorithms)?;
     write_precision_targets(output, &cases, &algorithms)?;
+    write_error_budget_operating_points(output, &cases, &algorithms)?;
     let role_summaries = write_role_llr_distribution(output, &corpus, &cases)?;
     write_results(
         &output.join("regression_results.csv"),
@@ -231,9 +237,16 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
         |case| matches!(case.split, Split::Dev | Split::Validation),
     )?;
     write_comparison(
-        &output.join("generated_comparison_bc.csv"),
+        &output.join("generated_comparison_b_c0.csv"),
         &cases,
-        &algorithms[1..],
+        &algorithms[1..3],
+        arguments.reference_threshold,
+        |case| matches!(case.split, Split::Dev | Split::Validation),
+    )?;
+    write_comparison(
+        &output.join("generated_comparison_c0_c1.csv"),
+        &cases,
+        &algorithms[2..4],
         arguments.reference_threshold,
         |case| matches!(case.split, Split::Dev | Split::Validation),
     )?;
@@ -245,9 +258,16 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
         |case| case.split == Split::Regression,
     )?;
     write_comparison(
-        &output.join("regression_comparison_bc.csv"),
+        &output.join("regression_comparison_b_c0.csv"),
         &cases,
-        &algorithms[1..],
+        &algorithms[1..3],
+        arguments.reference_threshold,
+        |case| case.split == Split::Regression,
+    )?;
+    write_comparison(
+        &output.join("regression_comparison_c0_c1.csv"),
+        &cases,
+        &algorithms[2..4],
         arguments.reference_threshold,
         |case| case.split == Split::Regression,
     )?;
@@ -295,6 +315,14 @@ fn metrics_for(
     Metrics::evaluate(&case_refs, &prediction_refs, threshold)
 }
 
+fn reported_threshold(algorithm: &AlgorithmRun, reference_threshold: f64) -> f64 {
+    if algorithm.config.name == ALGORITHM_C1.name {
+        C1_SELECTED_THRESHOLD
+    } else {
+        reference_threshold
+    }
+}
+
 fn write_generated_cases(output: &Path, cases: &[Case]) -> Result<()> {
     let mut writer = csv::Writer::from_path(output.join("generated_cases.csv"))?;
     writer.write_record([
@@ -333,51 +361,62 @@ fn write_role_llr_distribution(
     corpus: &C32Artifact,
     cases: &[Case],
 ) -> Result<Vec<RoleSummary>> {
-    let mut grouped = BTreeMap::<(Split, &'static str), Vec<f64>>::new();
-    for case in cases.iter().filter(|case| {
-        case.is_person()
-            && matches!(
-                case.split,
-                Split::Dev | Split::Validation | Split::InspectedTest | Split::Test
-            )
-    }) {
-        let diagnostics = candidate_diagnostics(
-            corpus,
-            ALGORITHM_C,
-            &case.input,
-            case.country_hint.as_deref(),
-            case.locale_hint.as_deref(),
-        );
-        let Some(expected) = case.expected_greeting.as_deref() else {
-            continue;
-        };
-        let Some(expected_candidate) = diagnostics
-            .iter()
-            .find(|candidate| greeting_matches(Some(expected), Some(&candidate.display)))
-        else {
-            continue;
-        };
-        grouped
-            .entry((case.split, "expected_given_candidate"))
-            .or_default()
-            .push(expected_candidate.role_llr);
-        let expected_end = expected_candidate.start + expected_candidate.length;
-        for candidate in diagnostics.iter().filter(|candidate| {
-            let candidate_end = candidate.start + candidate.length;
-            candidate_end <= expected_candidate.start || candidate.start >= expected_end
+    let mut grouped = BTreeMap::<(&'static str, Split, &'static str), Vec<f64>>::new();
+    for config in [ALGORITHM_C, ALGORITHM_C1] {
+        for case in cases.iter().filter(|case| {
+            case.is_person()
+                && matches!(
+                    case.split,
+                    Split::Dev
+                        | Split::Validation
+                        | Split::InspectedTest
+                        | Split::C0Test
+                        | Split::Test
+                )
         }) {
+            let diagnostics = candidate_diagnostics(
+                corpus,
+                config,
+                &case.input,
+                case.country_hint.as_deref(),
+                case.locale_hint.as_deref(),
+            );
+            let Some(expected) = case.expected_greeting.as_deref() else {
+                continue;
+            };
+            let Some(expected_candidate) = diagnostics
+                .iter()
+                .find(|candidate| greeting_matches(Some(expected), Some(&candidate.display)))
+            else {
+                continue;
+            };
             grouped
-                .entry((case.split, "disjoint_competing_first_name_candidate"))
+                .entry((config.name, case.split, "expected_given_candidate"))
                 .or_default()
-                .push(candidate.role_llr);
+                .push(expected_candidate.role_llr);
+            let expected_end = expected_candidate.start + expected_candidate.length;
+            for candidate in diagnostics.iter().filter(|candidate| {
+                let candidate_end = candidate.start + candidate.length;
+                candidate_end <= expected_candidate.start || candidate.start >= expected_end
+            }) {
+                grouped
+                    .entry((
+                        config.name,
+                        case.split,
+                        "disjoint_competing_first_name_candidate",
+                    ))
+                    .or_default()
+                    .push(candidate.role_llr);
+            }
         }
     }
 
     let summaries = grouped
         .into_iter()
-        .map(|((split, role), mut values)| {
+        .map(|((algorithm, split, role), mut values)| {
             values.sort_by(f64::total_cmp);
             RoleSummary {
+                algorithm,
                 split,
                 role,
                 values,
@@ -385,9 +424,19 @@ fn write_role_llr_distribution(
         })
         .collect::<Vec<_>>();
     let mut writer = csv::Writer::from_path(output.join("role_llr_distribution.csv"))?;
-    writer.write_record(["split", "role", "n", "mean", "p10", "p50", "p90"])?;
+    writer.write_record([
+        "algorithm",
+        "split",
+        "role",
+        "n",
+        "mean",
+        "p10",
+        "p50",
+        "p90",
+    ])?;
     for summary in &summaries {
         writer.write_record([
+            summary.algorithm.to_string(),
             summary.split.as_str().to_string(),
             summary.role.to_string(),
             summary.values.len().to_string(),
@@ -439,7 +488,7 @@ fn write_dev_candidate_traces(
                 case.split == Split::Dev
                     && outcome(
                         case,
-                        &algorithms[2].predictions[*index],
+                        &algorithms[3].predictions[*index],
                         DEFAULT_REFERENCE_THRESHOLD,
                     ) == CaseOutcome::Wrong
             })
@@ -458,9 +507,12 @@ fn write_dev_candidate_traces(
         "a_confidence",
         "b_result",
         "b_confidence",
-        "c_result",
-        "c_confidence",
+        "c0_result",
+        "c0_confidence",
+        "c1_result",
+        "c1_confidence",
         "candidate",
+        "origin",
         "token_start",
         "token_length",
         "global_given_count",
@@ -471,22 +523,23 @@ fn write_dev_candidate_traces(
         "reliability",
         "country_support",
         "compound_evidence",
+        "compositional_evidence",
         "remainder_evidence",
         "a_candidate_score",
         "b_candidate_score",
-        "c_candidate_score",
+        "c1_candidate_score",
     ])?;
     for index in selected {
         let case = &cases[index];
         let diagnostics = candidate_diagnostics(
             corpus,
-            ALGORITHM_C,
+            ALGORITHM_C1,
             &case.input,
             case.country_hint.as_deref(),
             case.locale_hint.as_deref(),
         );
         if diagnostics.is_empty() {
-            writer.write_record([
+            let mut row = vec![
                 case.id.clone(),
                 case.category.clone(),
                 case.input.clone(),
@@ -508,22 +561,15 @@ fn write_dev_candidate_traces(
                     .clone()
                     .unwrap_or_else(|| "NULL".to_string()),
                 format!("{:.6}", algorithms[2].predictions[index].confidence),
+                algorithms[3].predictions[index]
+                    .greeting_candidate
+                    .clone()
+                    .unwrap_or_else(|| "NULL".to_string()),
+                format!("{:.6}", algorithms[3].predictions[index].confidence),
                 "NO_ELIGIBLE_LOOKUP".to_string(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-            ])?;
+            ];
+            row.resize(29, String::new());
+            writer.write_record(row)?;
             continue;
         }
         for diagnostic in diagnostics {
@@ -549,7 +595,13 @@ fn write_dev_candidate_traces(
                     .clone()
                     .unwrap_or_else(|| "NULL".to_string()),
                 format!("{:.6}", algorithms[2].predictions[index].confidence),
+                algorithms[3].predictions[index]
+                    .greeting_candidate
+                    .clone()
+                    .unwrap_or_else(|| "NULL".to_string()),
+                format!("{:.6}", algorithms[3].predictions[index].confidence),
                 diagnostic.display,
+                diagnostic.origin.to_string(),
                 diagnostic.start.to_string(),
                 diagnostic.length.to_string(),
                 diagnostic.global_given_count.to_string(),
@@ -560,6 +612,7 @@ fn write_dev_candidate_traces(
                 format!("{:.6}", diagnostic.reliability),
                 format!("{:.6}", diagnostic.country_support),
                 format!("{:.6}", diagnostic.compound_evidence),
+                format!("{:.6}", diagnostic.compositional_evidence),
                 format!("{:.6}", diagnostic.remainder_evidence),
                 format!("{:.6}", diagnostic.algorithm_a_score),
                 format!("{:.6}", diagnostic.algorithm_b_score),
@@ -614,6 +667,7 @@ fn write_metrics(
         Split::Validation,
         Split::LegacyTest,
         Split::InspectedTest,
+        Split::C0Test,
         Split::Test,
         Split::Sealed,
     ] {
@@ -794,6 +848,57 @@ fn write_precision_targets(
     Ok(())
 }
 
+fn write_error_budget_operating_points(
+    output: &Path,
+    cases: &[Case],
+    algorithms: &[AlgorithmRun],
+) -> Result<()> {
+    let mut writer = csv::Writer::from_path(output.join("error_budget_operating_points.csv"))?;
+    writer.write_record([
+        "algorithm",
+        "split",
+        "wrong_greeting_budget",
+        "threshold",
+        "emitted",
+        "correct_greetings",
+        "wrong_greetings",
+        "greeting_precision",
+        "greeting_recall",
+    ])?;
+    for algorithm in algorithms {
+        for split in [Split::Dev, Split::Validation, Split::Test] {
+            let indices = indices_for(cases, |case| case.split == split);
+            if indices.is_empty() {
+                continue;
+            }
+            for budget in ERROR_BUDGETS {
+                let result = find_error_budget(cases, &algorithm.predictions, &indices, budget);
+                writer.write_record([
+                    algorithm.config.name.to_string(),
+                    split.as_str().to_string(),
+                    budget.to_string(),
+                    result.map_or_else(String::new, |result| format!("{:.9}", result.threshold)),
+                    result.map_or_else(String::new, |result| result.metrics.emitted.to_string()),
+                    result.map_or_else(String::new, |result| {
+                        result.metrics.correct_greetings.to_string()
+                    }),
+                    result.map_or_else(String::new, |result| {
+                        result.metrics.wrong_greetings.to_string()
+                    }),
+                    result.map_or_else(String::new, |result| {
+                        format_optional(result.metrics.greeting_precision())
+                    }),
+                    result.map_or_else(String::new, |result| {
+                        format_optional(result.metrics.greeting_recall())
+                    }),
+                ])?;
+            }
+        }
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 fn precision_lower_bound(metrics: Metrics) -> f64 {
     precision_lower_bound_counts(metrics.correct_greetings, metrics.emitted)
 }
@@ -856,6 +961,57 @@ fn find_precision_target(
         position = end;
     }
     best.map(|(threshold, _)| TargetResult {
+        threshold,
+        metrics: metrics_for(cases, predictions, indices, threshold),
+    })
+}
+
+fn find_error_budget(
+    cases: &[Case],
+    predictions: &[RawInference],
+    indices: &[usize],
+    wrong_budget: usize,
+) -> Option<TargetResult> {
+    let mut entries = indices
+        .iter()
+        .filter_map(|&index| {
+            predictions[index]
+                .greeting_candidate
+                .as_ref()
+                .map(|candidate| {
+                    (
+                        predictions[index].confidence,
+                        greeting_matches(
+                            cases[index].expected_greeting.as_deref(),
+                            Some(candidate),
+                        ),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| right.0.total_cmp(&left.0));
+    let mut correct = 0_usize;
+    let mut wrong = 0_usize;
+    let mut best = None::<(f64, usize, usize)>;
+    let mut position = 0_usize;
+    while position < entries.len() {
+        let threshold = entries[position].0;
+        let mut end = position;
+        while end < entries.len() && entries[end].0.total_cmp(&threshold).is_eq() {
+            correct += usize::from(entries[end].1);
+            wrong += usize::from(!entries[end].1);
+            end += 1;
+        }
+        if wrong <= wrong_budget
+            && best.is_none_or(|(_, best_correct, best_wrong)| {
+                correct > best_correct || (correct == best_correct && wrong < best_wrong)
+            })
+        {
+            best = Some((threshold, correct, wrong));
+        }
+        position = end;
+    }
+    best.map(|(threshold, _, _)| TargetResult {
         threshold,
         metrics: metrics_for(cases, predictions, indices, threshold),
     })
@@ -1025,6 +1181,7 @@ fn build_report(
         Split::Validation,
         Split::LegacyTest,
         Split::InspectedTest,
+        Split::C0Test,
         Split::Test,
         Split::Sealed,
     ] {
@@ -1042,7 +1199,8 @@ fn build_report(
             Split::Validation => "generated model-selection check",
             Split::LegacyTest => "frozen inspected TEST; regression/debug evidence only",
             Split::InspectedTest => "previous generated TEST; inspected regression evidence only",
-            Split::Test => "generated held-out name partition",
+            Split::C0Test => "C0 generated TEST; now inspected regression evidence only",
+            Split::Test => "fresh C1 held-out name partition",
             Split::Sealed => "manually labeled real-world holdout; aggregate-only output",
         };
         writeln!(
@@ -1072,7 +1230,7 @@ fn build_report(
     }
     writeln!(
         report,
-        "\nThe frozen 116-case LEGACY_TEST uses SplitMix64 seed `0x{GENERATOR_SEED:016x}`. The large DEV/VALIDATION and now-inspected former TEST use seed `0x{LARGE_GENERATOR_SEED:016x}`; the former TEST is guarded by SHA-256 `{INSPECTED_TEST_SHA256}`. The fresh TEST was generated only after C was frozen, uses seed `0x{FRESH_TEST_GENERATOR_SEED:016x}`, and is guarded by SHA-256 `{FRESH_TEST_SHA256}`. Targets are DEV={DEV_TARGET}, VALIDATION={VALIDATION_TARGET}, and each generated test={TEST_TARGET}. Given-name and surname atoms are assigned before generation; the loader rejects cross-split atom reuse. The seed labels are manually curated and were not extracted from clean-v1.\n"
+        "\nThe frozen 116-case LEGACY_TEST uses SplitMix64 seed `0x{GENERATOR_SEED:016x}`. The large DEV/VALIDATION and INSPECTED_TEST use seed `0x{LARGE_GENERATOR_SEED:016x}`; INSPECTED_TEST is guarded by SHA-256 `{INSPECTED_TEST_SHA256}`. C0_TEST preserves C0's already-evaluated TEST using seed `0x{C0_TEST_GENERATOR_SEED:016x}` and SHA-256 `{C0_TEST_SHA256}`. The new TEST was snapshotted only after C1 and threshold `{C1_SELECTED_THRESHOLD:.2}` were frozen from DEV/VALIDATION; it uses seed `0x{FRESH_TEST_GENERATOR_SEED:016x}` and SHA-256 `{FRESH_TEST_SHA256}`. Targets are DEV={DEV_TARGET}, VALIDATION={VALIDATION_TARGET}, and each generated test={TEST_TARGET}. Given-name and surname atoms are assigned before generation; the loader rejects cross-split atom reuse. The seed labels are manually curated and were not extracted from clean-v1.\n"
     )
     .unwrap();
 
@@ -1091,6 +1249,7 @@ fn build_report(
             Split::Validation,
             Split::LegacyTest,
             Split::InspectedTest,
+            Split::C0Test,
             Split::Test,
             Split::Sealed,
         ] {
@@ -1120,6 +1279,40 @@ fn build_report(
                 percent(metrics.gender_precision()),
                 percent(metrics.gender_coverage()),
                 percent(metrics.gender_abstention_rate()),
+            )
+            .unwrap();
+        }
+    }
+
+    writeln!(
+        report,
+        "\n## Frozen baseline and selected C1 operating points\n"
+    )
+    .unwrap();
+    writeln!(report, "C0 remains frozen at `{C0_FROZEN_THRESHOLD:.2}`. C1's rounded `{C1_SELECTED_THRESHOLD:.2}` threshold was selected on VALIDATION before the new TEST snapshot was evaluated.\n").unwrap();
+    writeln!(report, "| Algorithm | Split | Threshold | Emitted | Correct | Wrong | Precision | Recall | Org FPR |\n|---|---|---:|---:|---:|---:|---:|---:|---:|").unwrap();
+    for (algorithm, threshold) in [
+        (&algorithms[2], C0_FROZEN_THRESHOLD),
+        (&algorithms[3], C1_SELECTED_THRESHOLD),
+    ] {
+        for split in [Split::Validation, Split::C0Test, Split::Test] {
+            let indices = indices_for(cases, |case| case.split == split);
+            if indices.is_empty() {
+                continue;
+            }
+            let metrics = metrics_for(cases, &algorithm.predictions, &indices, threshold);
+            writeln!(
+                report,
+                "| {} | {} | {:.2} | {} | {} | {} | {} | {} | {} |",
+                algorithm.config.name,
+                split.as_str(),
+                threshold,
+                metrics.emitted,
+                metrics.correct_greetings,
+                metrics.wrong_greetings,
+                percent(metrics.greeting_precision()),
+                percent(metrics.greeting_recall()),
+                percent(metrics.organization_false_positive_rate()),
             )
             .unwrap();
         }
@@ -1192,6 +1385,39 @@ fn build_report(
         }
     }
 
+    writeln!(report, "\n## Error-budget operating points\n").unwrap();
+    writeln!(report, "Each row selects the threshold with maximum correct recall while allowing at most the stated number of wrong greetings. Model selection uses VALIDATION; TEST rows are confirmation only.\n").unwrap();
+    writeln!(report, "| Algorithm | Split | Wrong budget | Threshold | Emitted | Correct | Wrong | Precision | Recall |\n|---|---|---:|---:|---:|---:|---:|---:|---:|").unwrap();
+    for algorithm in algorithms {
+        for split in [Split::Dev, Split::Validation, Split::Test] {
+            let indices = indices_for(cases, |case| case.split == split);
+            if indices.is_empty() {
+                continue;
+            }
+            for budget in ERROR_BUDGETS {
+                let Some(result) =
+                    find_error_budget(cases, &algorithm.predictions, &indices, budget)
+                else {
+                    continue;
+                };
+                writeln!(
+                    report,
+                    "| {} | {} | {} | {:.6} | {} | {} | {} | {} | {} |",
+                    algorithm.config.name,
+                    split.as_str(),
+                    budget,
+                    result.threshold,
+                    result.metrics.emitted,
+                    result.metrics.correct_greetings,
+                    result.metrics.wrong_greetings,
+                    percent(result.metrics.greeting_precision()),
+                    percent(result.metrics.greeting_recall()),
+                )
+                .unwrap();
+            }
+        }
+    }
+
     write_role_distribution_report(&mut report, role_summaries);
     write_comparison_report(&mut report, arguments, cases, algorithms);
     write_category_report(&mut report, arguments, cases, algorithms);
@@ -1199,8 +1425,8 @@ fn build_report(
     write_configuration_report(&mut report, algorithms);
     writeln!(report, "\n## Interpretation boundaries\n").unwrap();
     writeln!(report, "- Regression metrics are behavior checks and are never pooled into DEV/VALIDATION/TEST quality metrics.").unwrap();
-    writeln!(report, "- LEGACY_TEST and INSPECTED_TEST are frozen, inspected snapshots retained only as regression/debug evidence and excluded from primary TEST quality claims.").unwrap();
-    writeln!(report, "- Fresh generated TEST was snapshotted before any classifier evaluation and was evaluated once after C was frozen from DEV/VALIDATION. Its cases and failure rows are not written to the output. It is independent at the labeled-name atom level, but synthetic performance is not a substitute for a sealed real-world corpus.").unwrap();
+    writeln!(report, "- LEGACY_TEST, INSPECTED_TEST, and C0_TEST are frozen, inspected snapshots retained only as regression/debug evidence and excluded from primary TEST quality claims.").unwrap();
+    writeln!(report, "- Fresh generated TEST was snapshotted before any classifier evaluation and was evaluated once after C1 and its threshold were frozen from DEV/VALIDATION. Its cases and failure rows are not written to the output. It is independent at the labeled-name atom level, but synthetic performance is not a substitute for a sealed real-world corpus.").unwrap();
     writeln!(report, "- Generated transformations share fixture atoms, so Wilson bounds are case-level diagnostics under an independence approximation; they do not measure uncertainty over the universe of names.").unwrap();
     writeln!(report, "- Sealed rows are reported only in aggregate and are excluded from failure and A/B detail files. If a row is inspected to alter the algorithm, remove it from the sealed file and add it to DEV or regression before evaluating again.").unwrap();
     writeln!(report, "- Person false-negative rate counts person cases where the classifier abstains. Wrong emitted names are reported separately and also reduce greeting recall.").unwrap();
@@ -1213,13 +1439,14 @@ fn write_role_distribution_report(report: &mut String, summaries: &[RoleSummary]
     writeln!(report, "`role_llr = ln P(name|given) - ln P(name|surname)` with add-0.5 smoothing and the full given/surname observation denominators. Competitors below are first-name-index candidates occupying spans disjoint from the independently labeled greeting span.\n").unwrap();
     writeln!(
         report,
-        "| Split | Role | n | Mean | p10 | p50 | p90 |\n|---|---|---:|---:|---:|---:|---:|"
+        "| Algorithm | Split | Role | n | Mean | p10 | p50 | p90 |\n|---|---|---|---:|---:|---:|---:|---:|"
     )
     .unwrap();
     for summary in summaries {
         writeln!(
             report,
-            "| {} | {} | {} | {:.3} | {:.3} | {:.3} | {:.3} |",
+            "| {} | {} | {} | {} | {:.3} | {:.3} | {:.3} | {:.3} |",
+            summary.algorithm,
             summary.split.as_str(),
             summary.role,
             summary.values.len(),
@@ -1238,10 +1465,10 @@ fn write_comparison_report(
     cases: &[Case],
     algorithms: &[AlgorithmRun],
 ) {
-    let [a, b, c] = algorithms else { return };
+    let [a, b, c0, c1] = algorithms else { return };
     writeln!(
         report,
-        "\n## A/B/C comparison at {:.2}\n",
+        "\n## A/B/C0/C1 comparison at {:.2}\n",
         arguments.reference_threshold
     )
     .unwrap();
@@ -1250,13 +1477,14 @@ fn write_comparison_report(
         "| Comparison | Split | Improvements | Regressions | Other changed decisions |\n|---|---|---:|---:|---:|"
     )
     .unwrap();
-    for (label, old, new) in [("A→B", a, b), ("B→C", b, c)] {
+    for (label, old, new) in [("A→B", a, b), ("B→C0", b, c0), ("C0→C1", c0, c1)] {
         for split in [
             Split::Regression,
             Split::Dev,
             Split::Validation,
             Split::LegacyTest,
             Split::InspectedTest,
+            Split::C0Test,
             Split::Test,
         ] {
             let mut improvements = 0;
@@ -1293,20 +1521,20 @@ fn write_comparison_report(
 
     writeln!(
         report,
-        "\nB→C changed-case samples (DEV/VALIDATION only):\n"
+        "\nC0→C1 changed-case samples (DEV/VALIDATION only):\n"
     )
     .unwrap();
-    writeln!(report, "| Change | Input | Expected | B result / confidence | C result / confidence |\n|---|---|---|---|---|").unwrap();
+    writeln!(report, "| Change | Input | Expected | C0 result / confidence | C1 result / confidence |\n|---|---|---|---|---|").unwrap();
     let mut shown = 0;
     for (index, case) in cases
         .iter()
         .enumerate()
         .filter(|(_, case)| matches!(case.split, Split::Dev | Split::Validation))
     {
-        let old_outcome = outcome(case, &b.predictions[index], arguments.reference_threshold);
-        let new_outcome = outcome(case, &c.predictions[index], arguments.reference_threshold);
-        let old_result = b.predictions[index].greeting_at(arguments.reference_threshold);
-        let new_result = c.predictions[index].greeting_at(arguments.reference_threshold);
+        let old_outcome = outcome(case, &c0.predictions[index], arguments.reference_threshold);
+        let new_outcome = outcome(case, &c1.predictions[index], arguments.reference_threshold);
+        let old_result = c0.predictions[index].greeting_at(arguments.reference_threshold);
+        let new_result = c1.predictions[index].greeting_at(arguments.reference_threshold);
         if old_result == new_result && old_outcome == new_outcome {
             continue;
         }
@@ -1323,9 +1551,9 @@ fn write_comparison_report(
             markdown(&case.input),
             markdown(case.expected_greeting.as_deref().unwrap_or("NULL")),
             markdown(old_result.unwrap_or("NULL")),
-            b.predictions[index].confidence,
+            c0.predictions[index].confidence,
             markdown(new_result.unwrap_or("NULL")),
-            c.predictions[index].confidence,
+            c1.predictions[index].confidence,
         )
         .unwrap();
         shown += 1;
@@ -1371,6 +1599,7 @@ fn write_category_report(
     algorithms: &[AlgorithmRun],
 ) {
     writeln!(report, "## Metrics by new generated TEST category\n").unwrap();
+    writeln!(report, "A/B/C0 use the reference threshold; C1 uses its VALIDATION-selected `{C1_SELECTED_THRESHOLD:.2}` operating threshold.\n").unwrap();
     let mut categories = BTreeMap::<String, Vec<usize>>::new();
     for (index, case) in cases
         .iter()
@@ -1383,15 +1612,16 @@ fn write_category_report(
             .push(index);
     }
     for algorithm in algorithms {
-        writeln!(report, "### {}\n", algorithm.config.name).unwrap();
+        let threshold = reported_threshold(algorithm, arguments.reference_threshold);
+        writeln!(
+            report,
+            "### {} at {:.2}\n",
+            algorithm.config.name, threshold
+        )
+        .unwrap();
         writeln!(report, "| Category | Cases | Emitted | Correct | Wrong | Precision | Recall | Abstention | Org FPR |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|").unwrap();
         for (category, indices) in &categories {
-            let metrics = metrics_for(
-                cases,
-                &algorithm.predictions,
-                indices,
-                arguments.reference_threshold,
-            );
+            let metrics = metrics_for(cases, &algorithm.predictions, indices, threshold);
             writeln!(
                 report,
                 "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
@@ -1420,7 +1650,12 @@ fn write_failure_report(
     let Some(algorithm) = algorithms.last() else {
         return;
     };
-    writeln!(report, "## Algorithm C DEV failure samples\n").unwrap();
+    let threshold = reported_threshold(algorithm, arguments.reference_threshold);
+    writeln!(
+        report,
+        "## Algorithm C1 DEV failure samples at {threshold:.2}\n"
+    )
+    .unwrap();
     writeln!(
         report,
         "| Input | Expected | Result | Confidence | Category |\n|---|---|---|---:|---|"
@@ -1433,7 +1668,7 @@ fn write_failure_report(
         .filter(|(_, case)| case.split == Split::Dev)
     {
         let prediction = &algorithm.predictions[index];
-        if outcome(case, prediction, arguments.reference_threshold) == CaseOutcome::Correct {
+        if outcome(case, prediction, threshold) == CaseOutcome::Correct {
             continue;
         }
         writeln!(
@@ -1441,11 +1676,7 @@ fn write_failure_report(
             "| {} | {} | {} | {:.3} | {} |",
             markdown(&case.input),
             markdown(case.expected_greeting.as_deref().unwrap_or("NULL")),
-            markdown(
-                prediction
-                    .greeting_at(arguments.reference_threshold)
-                    .unwrap_or("NULL")
-            ),
+            markdown(prediction.greeting_at(threshold).unwrap_or("NULL")),
             prediction.confidence,
             markdown(&case.category)
         )
@@ -1463,128 +1694,49 @@ fn write_failure_report(
 
 fn write_configuration_report(report: &mut String, algorithms: &[AlgorithmRun]) {
     writeln!(report, "## Algorithm configuration\n").unwrap();
-    writeln!(report, "All algorithms return an uncalibrated score before thresholding. A and B are byte-for-byte unchanged in configuration and retain their legacy frequency-led candidate scoring. C was developed on DEV, checked and frozen on VALIDATION before fresh TEST generation/evaluation, and uses global role evidence plus whole-input organization evidence. No TEST failure row was inspected or emitted.\n").unwrap();
-    writeln!(report, "| Parameter | A | B | C |\n|---|---:|---:|---:|").unwrap();
-    let [a, b, c] = algorithms else { return };
-    for (name, left, middle, right) in [
-        (
-            "frequency floor",
-            a.config.frequency_floor,
-            b.config.frequency_floor,
-            c.config.frequency_floor,
-        ),
-        (
-            "frequency weight",
-            a.config.frequency_weight,
-            b.config.frequency_weight,
-            c.config.frequency_weight,
-        ),
-        (
-            "country weight",
-            a.config.country_weight,
-            b.config.country_weight,
-            c.config.country_weight,
-        ),
-        (
-            "first-position bonus",
-            a.config.first_position_bonus,
-            b.config.first_position_bonus,
-            c.config.first_position_bonus,
-        ),
-        (
-            "last-position bonus",
-            a.config.last_position_bonus,
-            b.config.last_position_bonus,
-            c.config.last_position_bonus,
-        ),
-        (
-            "multi-token bonus",
-            a.config.multi_token_bonus,
-            b.config.multi_token_bonus,
-            c.config.multi_token_bonus,
-        ),
-        (
-            "single-display bonus",
-            a.config.single_display_bonus,
-            b.config.single_display_bonus,
-            c.config.single_display_bonus,
-        ),
-        (
-            "competition penalty",
-            a.config.competition_penalty,
-            b.config.competition_penalty,
-            c.config.competition_penalty,
-        ),
-        (
-            "strong-org multiplier",
-            a.config.strong_organization_multiplier,
-            b.config.strong_organization_multiplier,
-            c.config.strong_organization_multiplier,
-        ),
-        (
-            "generic-org multiplier",
-            a.config.generic_organization_multiplier,
-            b.config.generic_organization_multiplier,
-            c.config.generic_organization_multiplier,
-        ),
-        (
-            "gender emission threshold",
-            a.config.gender_threshold,
-            b.config.gender_threshold,
-            c.config.gender_threshold,
-        ),
-        (
-            "role score floor",
-            a.config.role_score_floor,
-            b.config.role_score_floor,
-            c.config.role_score_floor,
-        ),
-        (
-            "role weight",
-            a.config.role_weight,
-            b.config.role_weight,
-            c.config.role_weight,
-        ),
-        (
-            "role center",
-            a.config.role_center,
-            b.config.role_center,
-            c.config.role_center,
-        ),
-        (
-            "role scale",
-            a.config.role_scale,
-            b.config.role_scale,
-            c.config.role_scale,
-        ),
-        (
-            "role smoothing",
-            a.config.role_smoothing,
-            b.config.role_smoothing,
-            c.config.role_smoothing,
-        ),
-        (
-            "role reliability weight",
-            a.config.role_reliability_weight,
-            b.config.role_reliability_weight,
-            c.config.role_reliability_weight,
-        ),
-        (
-            "compound evidence weight",
-            a.config.compound_evidence_weight,
-            b.config.compound_evidence_weight,
-            c.config.compound_evidence_weight,
-        ),
-        (
-            "remainder role weight",
-            a.config.remainder_role_weight,
-            b.config.remainder_role_weight,
-            c.config.remainder_role_weight,
-        ),
-    ] {
-        writeln!(report, "| {name} | {left:.3} | {middle:.3} | {right:.3} |").unwrap();
+    writeln!(report, "All algorithms return an uncalibrated score before thresholding. A and B are unchanged frequency-led baselines. C0 is the frozen global-role baseline. C1 changes only candidate construction: when an exact compound is absent, it may compose adjacent or hyphen-separated components that are independently given-like. Whitespace composition requires a remainder token because an unsupported two-token input is ambiguous. C1's `{C1_SELECTED_THRESHOLD:.2}` operating threshold was selected on VALIDATION.\n").unwrap();
+    writeln!(
+        report,
+        "| Parameter | A | B | C0 | C1 |\n|---|---:|---:|---:|---:|"
+    )
+    .unwrap();
+    let [a, b, c0, c1] = algorithms else { return };
+    macro_rules! config_row {
+        ($label:literal, $field:ident) => {
+            writeln!(
+                report,
+                "| {} | {:.3} | {:.3} | {:.3} | {:.3} |",
+                $label, a.config.$field, b.config.$field, c0.config.$field, c1.config.$field,
+            )
+            .unwrap();
+        };
     }
-    writeln!(report, "\nC hard-abstains on configured strong legal markers; A/B retain their old multipliers. C compares contiguous one- and two-token greeting candidates using normalized global given-versus-surname role evidence, country given-name support, direct compound support relative to its components, and disjoint competing-role evidence. It does not parse or index surname-only strings. Gender decoding is unchanged.\n").unwrap();
+    config_row!("frequency floor", frequency_floor);
+    config_row!("frequency weight", frequency_weight);
+    config_row!("country weight", country_weight);
+    config_row!("first-position bonus", first_position_bonus);
+    config_row!("last-position bonus", last_position_bonus);
+    config_row!("multi-token bonus", multi_token_bonus);
+    config_row!("single-display bonus", single_display_bonus);
+    config_row!("competition penalty", competition_penalty);
+    config_row!("strong-org multiplier", strong_organization_multiplier);
+    config_row!("generic-org multiplier", generic_organization_multiplier);
+    config_row!("gender emission threshold", gender_threshold);
+    config_row!("role score floor", role_score_floor);
+    config_row!("role weight", role_weight);
+    config_row!("role center", role_center);
+    config_row!("role scale", role_scale);
+    config_row!("role smoothing", role_smoothing);
+    config_row!("role reliability weight", role_reliability_weight);
+    config_row!("compound evidence weight", compound_evidence_weight);
+    config_row!("remainder role weight", remainder_role_weight);
+    config_row!("compositional role floor", compositional_role_floor);
+    config_row!(
+        "compositional evidence weight",
+        compositional_evidence_weight
+    );
+    config_row!("hyphen structure bonus", hyphen_structure_bonus);
+    writeln!(report, "\nC0 and C1 hard-abstain on configured strong legal markers; A/B retain their old multipliers. C0/C1 use normalized global given-versus-surname role evidence, country given-name support, direct compound support, and disjoint competing-role evidence. C1 additionally supports compositional compounds without adding surname-only index keys or changing the binary artifact. Gender decoding is unchanged.\n").unwrap();
 }
 
 fn format_optional(value: Option<f64>) -> String {

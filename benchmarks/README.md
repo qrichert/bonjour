@@ -14,7 +14,7 @@ external names-dataset country CSVs
   -> name-indexes / name-corpus-audit      representation and tail experiments
   -> name-clean-v1                         selected sanitation and 5/2 policy
   -> name-surname-v2                       selected global surname role evidence
-  -> name-eval                             independent A/B/C evaluation
+  -> name-eval                             independent A/B/C0/C1 evaluation
 ```
 
 `scripts/extract_name_counts.py` validates the raw four-column country
@@ -100,10 +100,10 @@ The surname probability denominator is all 489,631,377 non-empty surname
 observations, not merely the 364,386,816 observations whose strings
 overlap a retained first-name key.
 
-## Current model: Algorithm C
+## Current model: Algorithms C0 and C1
 
-Algorithm C exists only in the evaluation harness; application runtime
-behavior has not changed. Its input is conceptually:
+Algorithms C0 and C1 exist only in the evaluation harness; application
+runtime behavior has not changed. Their input is conceptually:
 
 ```text
 infer(display_name, country_hint, locale_hint)
@@ -158,8 +158,8 @@ competition contributes between `-0.12` and `+0.12`. Scores are clamped
 to `[0, 1]`, ranked without a hardcoded name-order preference, then the
 winner loses up to `0.08` when the runner-up is close.
 
-Strong legal markers hard-abstain in C. Generic organization markers and
-`&` multiply the final score by `0.12`. Unicode NFC, whitespace,
+Strong legal markers hard-abstain in C0/C1. Generic organization markers
+and `&` multiply the final score by `0.12`. Unicode NFC, whitespace,
 apostrophe-like, and hyphen-like punctuation are canonicalized. Lookup
 tries canonical, title-case, lowercase, and accent-stripped forms.
 Country hints take precedence over locale-region hints. Gender uses the
@@ -167,30 +167,77 @@ selected candidate's country counts when present, otherwise global
 counts, and is emitted only when the dominant gender share is at least
 `0.80`.
 
-The classifier returns this uncalibrated score before a configurable
-threshold; no production threshold is selected.
+The classifier returns this uncalibrated score before thresholding. C0
+is frozen as the direct-evidence role baseline. C1 preserves all of C0's
+evidence and scoring, then adds two conservative compositional candidate
+forms when the full span is absent from the first-name index:
+
+- two adjacent whitespace-separated components, only when both have
+  `role_llr >= 0.75` and the input has at least one remainder token;
+- one hyphenated token whose two components both meet the same role
+  floor.
+
+For either form, the synthesized candidate uses the weaker component's
+role signal, geometric-mean reliability/country support, and up to
+`0.20` compositional evidence. A synthesized hyphenated token receives
+an additional `0.04` structural bonus. Unsupported two-token whitespace
+inputs are deliberately not combined: without direct phrase evidence,
+`Mary Jane` cannot safely be distinguished from given + surname.
+
+C1's synthetic operating threshold is frozen at `0.93`, selected on
+VALIDATION. It is not yet a production threshold.
 
 ## Current evaluation result
 
-Algorithm C was selected using DEV and VALIDATION before the fresh TEST
-was generated and evaluated. At the shared diagnostic threshold `0.80`:
+C0 was selected using DEV and VALIDATION before its TEST was generated
+and evaluated. That snapshot is now named `C0_TEST`. At the shared
+diagnostic threshold `0.80`:
 
-| Algorithm                 | Fresh TEST emissions | Correct | Wrong | Precision | Recall | Organization FPR |
-| ------------------------- | -------------------: | ------: | ----: | --------: | -----: | ---------------: |
-| A frequency baseline      |               12,482 |   7,774 | 4,708 |    62.28% |  9.79% |            0.00% |
-| B simple-signals baseline |               13,357 |  10,621 | 2,736 |    79.52% | 13.38% |            0.00% |
-| C global-role baseline    |               38,384 |  38,376 |     8 |   99.979% | 48.34% |            0.00% |
+| Algorithm                 | C0_TEST emissions | Correct | Wrong | Precision | Recall | Organization FPR |
+| ------------------------- | ----------------: | ------: | ----: | --------: | -----: | ---------------: |
+| A frequency baseline      |            12,482 |   7,774 | 4,708 |    62.28% |  9.79% |            0.00% |
+| B simple-signals baseline |            13,357 |  10,621 | 2,736 |    79.52% | 13.38% |            0.00% |
+| C global-role baseline    |            38,384 |  38,376 |     8 |   99.979% | 48.34% |            0.00% |
 
-The median TEST role LLR was +2.203 for independently labeled given
+The median C0_TEST role LLR was +2.203 for independently labeled given
 candidates and -2.888 for disjoint competing candidates. At threshold
 `0.85`, C emitted 33,207 correct greetings and no errors, with 41.83%
 recall on this synthetic holdout.
 
-The fresh TEST also records unresolved limits. Compound-given recall was
-0% because its independently partitioned compound fixtures lacked direct
+The C0_TEST also records unresolved limits. Compound-given recall was 0%
+because its independently partitioned compound fixtures lacked direct
 corpus support. Hyphenated recall was 21.83%. These results are
 synthetic and cannot replace a sealed, manually labeled real-world
 holdout.
+
+C1 was then developed against expanded DEV/VALIDATION compound and
+hyphen fixtures. At its VALIDATION-selected threshold `0.93`, it
+produced:
+
+| Split      | Emitted | Correct | Wrong | Precision | Recall | Organization FPR |
+| ---------- | ------: | ------: | ----: | --------: | -----: | ---------------: |
+| VALIDATION |  10,626 |  10,626 |     0 |   100.00% | 27.09% |            0.00% |
+| fresh TEST |  24,185 |  24,185 |     0 |   100.00% | 30.45% |            0.00% |
+
+The fresh TEST used new atom-isolated fixtures, seed
+`0x6576616c2d763034`, and a checksum frozen before its single
+evaluation. It was easier than VALIDATION: its observed zero-error curve
+reached 67.71% recall at `0.784923`, but the held-out result was not
+used to change C1's threshold.
+
+At the common `0.80` diagnostic threshold on C0_TEST, C1 increased
+overall recall from 48.34% to 53.26%. It emitted 42,285 correct and 13
+wrong greetings (99.969% precision); compound-given recall increased
+from 0% to 48.75%. On the new TEST, C0 and C1 made identical decisions
+at `0.80`, so that snapshot confirms the shared role baseline on new
+atoms but does not independently establish C1's marginal improvement.
+
+The selected-threshold fresh TEST still records coverage gaps:
+apostrophe-form recall was 0%, surname-comma-given recall was 10.58%,
+compound recall was 29.69%, and hyphenated recall was 31.49%. These
+aggregate findings were preserved without inspecting or tuning against
+TEST failure rows. A sealed, representative real-world holdout remains
+the next evidence milestone.
 
 ## Current storage choice
 

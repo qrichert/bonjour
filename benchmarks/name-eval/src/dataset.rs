@@ -12,15 +12,17 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub const GENERATOR_SEED: u64 = 0x6576_616c_2d76_3031;
 pub const LARGE_GENERATOR_SEED: u64 = 0x6576_616c_2d76_3032;
-pub const FRESH_TEST_GENERATOR_SEED: u64 = 0x6576_616c_2d76_3033;
+pub const C0_TEST_GENERATOR_SEED: u64 = 0x6576_616c_2d76_3033;
+pub const FRESH_TEST_GENERATOR_SEED: u64 = 0x6576_616c_2d76_3034;
 pub const DEV_TARGET: usize = 60_000;
 pub const VALIDATION_TARGET: usize = 60_000;
 pub const TEST_TARGET: usize = 120_000;
 const LEGACY_TEST_SHA256: &str = "56e047a7232f75f8ef717b2580b6eabc2fea036bb8f3bef3f123466796a91168";
 pub const INSPECTED_TEST_SHA256: &str =
     "2233794897ba69c3e9f8ffb9bdecd376545856d9f1bfa508793235cb8e74f962";
+pub const C0_TEST_SHA256: &str = "1be896d0febaade25d6c6f8ac8f9b55c382600df1a25f70c135f84fa7425d9ff";
 pub const FRESH_TEST_SHA256: &str =
-    "1be896d0febaade25d6c6f8ac8f9b55c382600df1a25f70c135f84fa7425d9ff";
+    "403528ab491a2552308729df6b0a984fc864cc99c8438ca23bc1c122d8b772ba";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Split {
@@ -29,6 +31,7 @@ pub enum Split {
     Validation,
     LegacyTest,
     InspectedTest,
+    C0Test,
     Test,
     Sealed,
 }
@@ -41,6 +44,7 @@ impl Split {
             Self::Validation => "VALIDATION",
             Self::LegacyTest => "LEGACY_TEST",
             Self::InspectedTest => "INSPECTED_TEST",
+            Self::C0Test => "C0_TEST",
             Self::Test => "TEST",
             Self::Sealed => "SEALED",
         }
@@ -53,8 +57,9 @@ impl Split {
             Self::Validation => 2,
             Self::LegacyTest => 3,
             Self::InspectedTest => 4,
-            Self::Test => 5,
-            Self::Sealed => 6,
+            Self::C0Test => 5,
+            Self::Test => 6,
+            Self::Sealed => 7,
         }
     }
 }
@@ -68,6 +73,7 @@ impl std::str::FromStr for Split {
             "VALIDATION" => Ok(Self::Validation),
             "LEGACY_TEST" => Ok(Self::LegacyTest),
             "INSPECTED_TEST" => Ok(Self::InspectedTest),
+            "C0_TEST" => Ok(Self::C0Test),
             "TEST" => Ok(Self::Test),
             other => Err(format!("unknown split {other:?}")),
         }
@@ -197,6 +203,16 @@ pub fn generate_cases(fixtures: &Path, include_fresh_test: bool) -> Result<Vec<C
         )?;
     }
     validate_inspected_test(&cases)?;
+    generate_large_split(
+        Split::C0Test,
+        TEST_TARGET,
+        C0_TEST_GENERATOR_SEED,
+        &given,
+        &surnames,
+        &organizations,
+        &mut cases,
+    )?;
+    validate_c0_test(&cases)?;
     if include_fresh_test {
         generate_large_split(
             Split::Test,
@@ -229,6 +245,7 @@ pub fn seed_stats(fixtures: &Path) -> Result<Vec<SeedStats>> {
         Split::Validation,
         Split::LegacyTest,
         Split::InspectedTest,
+        Split::C0Test,
         Split::Test,
     ]
     .into_iter()
@@ -433,6 +450,10 @@ fn validate_inspected_test(cases: &[Case]) -> Result<()> {
         TEST_TARGET,
         INSPECTED_TEST_SHA256,
     )
+}
+
+fn validate_c0_test(cases: &[Case]) -> Result<()> {
+    validate_snapshot(cases, Split::C0Test, TEST_TARGET, C0_TEST_SHA256)
 }
 
 fn validate_fresh_test(cases: &[Case]) -> Result<()> {
@@ -1004,7 +1025,8 @@ mod tests {
     fn seed_is_fixed() {
         assert_eq!(GENERATOR_SEED, 0x6576_616c_2d76_3031);
         assert_eq!(LARGE_GENERATOR_SEED, 0x6576_616c_2d76_3032);
-        assert_eq!(FRESH_TEST_GENERATOR_SEED, 0x6576_616c_2d76_3033);
+        assert_eq!(C0_TEST_GENERATOR_SEED, 0x6576_616c_2d76_3033);
+        assert_eq!(FRESH_TEST_GENERATOR_SEED, 0x6576_616c_2d76_3034);
     }
 
     #[test]
@@ -1032,6 +1054,13 @@ mod tests {
             first
                 .iter()
                 .filter(|case| case.split == Split::InspectedTest)
+                .count(),
+            TEST_TARGET
+        );
+        assert_eq!(
+            first
+                .iter()
+                .filter(|case| case.split == Split::C0Test)
                 .count(),
             TEST_TARGET
         );
