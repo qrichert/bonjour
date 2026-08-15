@@ -310,6 +310,24 @@ recall. These are development-selection results, not held-out quality
 evidence. C3 is frozen pending a fresh disjoint REAL_PROXY_V3; V2 was
 not loaded, inspected, or used to tune it.
 
+REAL_PROXY_V3 was then sampled with fixed seed `0x5245414C5F5633` after
+excluding every exact V1 and V2 display-name value. Its two blind
+machine annotations produced 1,232 exact greeting agreements, 242 NULL
+agreements, and 526 skipped cases. The holdout was frozen at SHA-256
+`d70e4d4b2ed7e49bed09dc1e8d2ba60ade8a752e3b86c772e964bd64883ee6fe`
+before the single aggregate-only comparison.
+
+On the 1,474 agreed V3 cases, frozen C2 emitted 205 greetings: 200
+correct, 5 wrong, and 2 on expected-NULL cases (97.56% observed
+precision, 16.23% recall). Frozen C3 emitted 223: 217 correct, 6 wrong,
+and 3 on expected-NULL cases (97.31% observed precision, 17.61% recall).
+C3 therefore generalized a modest `+1.38`-point recall gain and 17
+additional correct greetings, but also added one wrong selection and one
+expected-NULL emission. This supports the handle segmentation's
+reachability benefit but does not establish unchanged safety or make C3
+an unambiguous replacement for C2. No V3 failure rows were inspected,
+and V3 cannot be used to change either frozen algorithm.
+
 ## Current storage choice
 
 The leading experimental artifact is therefore:

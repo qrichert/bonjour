@@ -607,6 +607,86 @@ requires a fresh, disjoint, independently annotated REAL_PROXY_V3 for a
 one-shot comparison against frozen C2. V2 remains untouched and cannot
 validate or retune C3.
 
+### REAL_PROXY_V3 frozen C2/C3 comparison
+
+V3 was drawn from the same external Meta Kaggle `Users.csv` with fixed
+seed `0x5245414C5F5633`, after excluding every exact display-name value
+in both V1 and V2:
+
+```console
+python3 benchmarks/name-eval/scripts/prepare_meta_kaggle_holdout.py \
+  /path/to/Users.csv \
+  _wip/real-proxy-v3/source.csv \
+  _wip/real-proxy-v3/source.provenance.json \
+  --seed=0x5245414C5F5633 \
+  --exclude-source=_wip/source.csv \
+  --exclude-source=_wip/real-proxy-v2/source.csv
+```
+
+The resulting 2,000-row source has SHA-256
+`9deefa258a64c873d833357e8f242f18fab01ca2eedfa8d2442a56d931d361e7`. Its
+1,999 unique values have zero exact overlap with either earlier proxy.
+The 2,587,424,211-byte source `Users.csv` remained unchanged at SHA-256
+`30b95ff7d079289fe76a0fada39ebbb174f15f6f85a2e09f7a208c6fdf57dd82`.
+
+Both annotations were produced without classifier output or corpus
+evidence. Their returned schemas were normalized mechanically using the
+same policy as V2: exact original-text spans become `GREETING`, explicit
+`NULL` and `SKIP` are preserved, non-exact or unsupported labels become
+`SKIP`, and annotator confidence/notes are ignored. Raw annotation files
+remain unchanged. Annotator A supplied 1,662 exact spans, 274 NULLs, 52
+explicit skips, and 12 unusable labels. Annotator B supplied 1,289 exact
+spans, 331 NULLs, 28 explicit skips, and 352 unusable labels.
+
+Mechanical consensus yielded:
+
+| Source rows | Greeting agreements | NULL agreements | Annotator-skip cases | Other disagreements | Evaluable | Skipped |
+| ----------: | ------------------: | --------------: | -------------------: | ------------------: | --------: | ------: |
+|       2,000 |               1,232 |             242 |                  424 |                 102 |     1,474 |     526 |
+
+The consensus was frozen before the artifact was loaded, with SHA-256
+`d70e4d4b2ed7e49bed09dc1e8d2ba60ade8a752e3b86c772e964bd64883ee6fe`. The
+only V3 classifier invocation was:
+
+```console
+cargo run --release --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-eval -- \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-real-proxy-v3 \
+  --compare-sealed-c2-c3-sha256=d70e4d4b2ed7e49bed09dc1e8d2ba60ade8a752e3b86c772e964bd64883ee6fe \
+  --sealed=_wip/real-proxy-v3/sealed.csv \
+  --sealed-manifest=_wip/real-proxy-v3/sealed.manifest.csv
+```
+
+The comparison uses `ALGORITHM_C1` candidate generation for C2 and
+`ALGORITHM_C3` candidate generation for C3. Both then use the identical
+frozen C2 score and threshold `0.78975882405736963`:
+
+| Algorithm | Emitted | Correct | Wrong | Expected-NULL emissions | Observed precision | Recall | Abstention |
+| --------- | ------: | ------: | ----: | ----------------------: | -----------------: | -----: | ---------: |
+| C2        |     205 |     200 |     5 |                       2 |             97.56% | 16.23% |     86.09% |
+| C3        |     223 |     217 |     6 |                       3 |             97.31% | 17.61% |     84.87% |
+
+C3 added 18 emissions, of which 17 matched the proxy labels. Relative to
+C2 it gained `1.38` recall points while adding one wrong greeting and
+one expected-NULL emission. The handle candidates therefore generalized
+a modest reachability benefit, but the fresh comparison does not show
+unchanged safety and does not make C3 an unambiguous replacement for C2.
+
+Of C2's emissions, the `0.789759–0.85` bucket contained 147 correct and
+4 wrong; `0.85–0.90` contained 47 correct and none wrong; `0.90–0.95`
+contained 6 correct and 1 wrong. C3's corresponding buckets contained
+155/5, 56/0, and 6/1 correct/wrong. These aggregates are diagnostic only
+and must not be used to retune the shared threshold.
+
+No row-level V3 predictions, failures, traces, or changed-case
+comparisons were written or inspected. V3 is now spent comparison
+evidence and cannot be used to change C2 or C3. Exact agreement can
+select an easier subset, the two machine annotators can share cultural
+mistakes, and Meta Kaggle is not guaranteed to match the product
+population. These figures are relative proxy evidence, not worldwide or
+production-quality claims.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.
