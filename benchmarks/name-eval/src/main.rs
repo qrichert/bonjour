@@ -10,19 +10,23 @@
 )]
 
 mod artifact;
+mod c2_calibration;
 mod classifier;
 mod corpus_audit;
 mod dataset;
 mod lexical;
 mod metrics;
+mod proxy_diagnostic;
 
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use artifact::C32Artifact;
+use c2_calibration::run_c2_calibration;
 use classifier::{
     ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, AlgorithmConfig, RawInference,
     candidate_diagnostics, infer_prethreshold,
@@ -38,6 +42,7 @@ use name_eval::holdout::{
     FrozenHoldout, SealedDecision, SealedEvaluation, evaluate_sealed, load_frozen,
     sealed_confidence_buckets_csv, sealed_summary_csv,
 };
+use proxy_diagnostic::run_proxy_diagnostic;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -132,9 +137,15 @@ struct Arguments {
     reference_threshold: f64,
     development_only: bool,
     sealed_only: bool,
+    diagnose_spent_holdout_sha256: Option<String>,
+    develop_c2_spent_holdout_sha256: Option<String>,
 }
 
 fn parse_arguments() -> Result<Arguments> {
+    parse_arguments_from(std::env::args_os().skip(1))
+}
+
+fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result<Arguments> {
     let mut positional = Vec::new();
     let mut sealed = None;
     let mut sealed_manifest = None;
@@ -142,7 +153,9 @@ fn parse_arguments() -> Result<Arguments> {
     let mut reference_threshold_set = false;
     let mut development_only = false;
     let mut sealed_only = false;
-    for argument in std::env::args_os().skip(1) {
+    let mut diagnose_spent_holdout_sha256 = None;
+    let mut develop_c2_spent_holdout_sha256 = None;
+    for argument in arguments {
         let text = argument.to_string_lossy();
         if let Some(value) = text.strip_prefix("--sealed=") {
             sealed = Some(PathBuf::from(value));
@@ -158,6 +171,20 @@ fn parse_arguments() -> Result<Arguments> {
             development_only = true;
         } else if text == "--sealed-only" {
             sealed_only = true;
+        } else if let Some(value) = text.strip_prefix("--diagnose-spent-holdout-sha256=") {
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(
+                    "spent holdout SHA-256 must contain exactly 64 hexadecimal characters".into(),
+                );
+            }
+            diagnose_spent_holdout_sha256 = Some(value.to_ascii_lowercase());
+        } else if let Some(value) = text.strip_prefix("--develop-c2-from-spent-holdout-sha256=") {
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(
+                    "spent holdout SHA-256 must contain exactly 64 hexadecimal characters".into(),
+                );
+            }
+            develop_c2_spent_holdout_sha256 = Some(value.to_ascii_lowercase());
         } else if text.starts_with('-') {
             return Err(format!("unknown option: {text}").into());
         } else {
@@ -167,12 +194,27 @@ fn parse_arguments() -> Result<Arguments> {
     if sealed.is_some() != sealed_manifest.is_some() {
         return Err("--sealed and --sealed-manifest must be supplied together".into());
     }
-    let (artifact, clean_csv, output) = if sealed_only {
+    let explicit_modes = usize::from(sealed_only)
+        + usize::from(diagnose_spent_holdout_sha256.is_some())
+        + usize::from(develop_c2_spent_holdout_sha256.is_some());
+    if explicit_modes > 1 {
+        return Err("--sealed-only, --diagnose-spent-holdout-sha256, and --develop-c2-from-spent-holdout-sha256 are mutually exclusive".into());
+    }
+    let development_mode = develop_c2_spent_holdout_sha256.is_some();
+    let diagnostic_only = diagnose_spent_holdout_sha256.is_some() || development_mode;
+    let (artifact, clean_csv, output) = if sealed_only || diagnostic_only {
         if positional.len() != 2 {
             return Err(usage().into());
         }
         if sealed.is_none() || development_only || reference_threshold_set {
-            return Err("--sealed-only requires both sealed files and cannot be combined with --development-only or --reference-threshold".into());
+            let mode = if sealed_only {
+                "--sealed-only"
+            } else if development_mode {
+                "--develop-c2-from-spent-holdout-sha256"
+            } else {
+                "--diagnose-spent-holdout-sha256"
+            };
+            return Err(format!("{mode} requires both sealed files and cannot be combined with --development-only or --reference-threshold").into());
         }
         (positional.remove(0), None, positional.remove(0))
     } else {
@@ -194,11 +236,13 @@ fn parse_arguments() -> Result<Arguments> {
         reference_threshold,
         development_only,
         sealed_only,
+        diagnose_spent_holdout_sha256,
+        develop_c2_spent_holdout_sha256,
     })
 }
 
 fn usage() -> &'static str {
-    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE"
+    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
 }
 
 #[allow(clippy::too_many_lines)]
@@ -210,11 +254,32 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
         .zip(arguments.sealed_manifest.as_deref())
         .map(|(sealed, manifest)| load_frozen(sealed, manifest))
         .transpose()?;
+    if let (Some(acknowledged), Some(holdout)) = (
+        arguments
+            .diagnose_spent_holdout_sha256
+            .as_deref()
+            .or(arguments.develop_c2_spent_holdout_sha256.as_deref()),
+        frozen_holdout.as_ref(),
+    ) {
+        validate_spent_holdout_digest(acknowledged, &holdout.manifest.holdout_sha256)?;
+    }
     let corpus = C32Artifact::open(
         &arguments.artifact,
         &fixtures.join("artifact-manifest.csv"),
         &fixtures.join("surname-artifact-manifest.csv"),
     )?;
+    if let Some(acknowledged_sha256) = &arguments.develop_c2_spent_holdout_sha256 {
+        let holdout = frozen_holdout
+            .ok_or("--develop-c2-from-spent-holdout-sha256 requires a frozen holdout")?;
+        validate_spent_holdout_digest(acknowledged_sha256, &holdout.manifest.holdout_sha256)?;
+        return run_c2_calibration(output, &corpus, holdout, &fixtures);
+    }
+    if let Some(acknowledged_sha256) = &arguments.diagnose_spent_holdout_sha256 {
+        let holdout =
+            frozen_holdout.ok_or("--diagnose-spent-holdout-sha256 requires a frozen holdout")?;
+        validate_spent_holdout_digest(acknowledged_sha256, &holdout.manifest.holdout_sha256)?;
+        return run_proxy_diagnostic(output, &corpus, holdout, C1_SELECTED_THRESHOLD);
+    }
     if arguments.sealed_only {
         let holdout = frozen_holdout.ok_or("--sealed-only requires a frozen holdout")?;
         let sealed_run = evaluate_frozen_holdout(&corpus, holdout)?;
@@ -362,6 +427,16 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
         &role_summaries,
         sealed_run.as_ref(),
     ))
+}
+
+fn validate_spent_holdout_digest(acknowledged: &str, manifest: &str) -> Result<()> {
+    if acknowledged != manifest {
+        return Err(format!(
+            "spent holdout acknowledgement does not match manifest: acknowledged {acknowledged}, manifest {manifest}"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn evaluate_frozen_holdout(corpus: &C32Artifact, holdout: FrozenHoldout) -> Result<SealedRun> {
@@ -1934,6 +2009,105 @@ fn outcome_name(outcome: CaseOutcome) -> &'static str {
         CaseOutcome::Correct => "correct",
         CaseOutcome::Wrong => "wrong",
         CaseOutcome::Abstained => "abstained",
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn parse(arguments: &[&str]) -> Result<Arguments> {
+        parse_arguments_from(arguments.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn spent_proxy_mode_requires_explicit_digest_and_two_positional_paths() {
+        let arguments = parse(&[
+            "artifact",
+            "output",
+            &format!("--diagnose-spent-holdout-sha256={DIGEST}"),
+            "--sealed=sealed.csv",
+            "--sealed-manifest=manifest.csv",
+        ])
+        .unwrap();
+        assert_eq!(arguments.clean_csv, None);
+        assert_eq!(
+            arguments.diagnose_spent_holdout_sha256.as_deref(),
+            Some(DIGEST)
+        );
+    }
+
+    #[test]
+    fn spent_proxy_mode_rejects_tuning_and_sealed_only_options() {
+        for extra in [
+            "--reference-threshold=0.80",
+            "--development-only",
+            "--sealed-only",
+        ] {
+            assert!(
+                parse(&[
+                    "artifact",
+                    "output",
+                    &format!("--diagnose-spent-holdout-sha256={DIGEST}"),
+                    "--sealed=sealed.csv",
+                    "--sealed-manifest=manifest.csv",
+                    extra,
+                ])
+                .is_err(),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn c2_development_mode_requires_spent_digest_and_rejects_other_modes() {
+        let arguments = parse(&[
+            "artifact",
+            "output",
+            &format!("--develop-c2-from-spent-holdout-sha256={DIGEST}"),
+            "--sealed=sealed.csv",
+            "--sealed-manifest=manifest.csv",
+        ])
+        .unwrap();
+        assert_eq!(arguments.clean_csv, None);
+        assert_eq!(
+            arguments.develop_c2_spent_holdout_sha256.as_deref(),
+            Some(DIGEST)
+        );
+
+        for extra in [
+            "--reference-threshold=0.80",
+            "--development-only",
+            "--sealed-only",
+            &format!("--diagnose-spent-holdout-sha256={DIGEST}"),
+        ] {
+            assert!(
+                parse(&[
+                    "artifact",
+                    "output",
+                    &format!("--develop-c2-from-spent-holdout-sha256={DIGEST}"),
+                    "--sealed=sealed.csv",
+                    "--sealed-manifest=manifest.csv",
+                    extra,
+                ])
+                .is_err(),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn spent_proxy_digest_must_match_verified_manifest() {
+        assert!(validate_spent_holdout_digest(DIGEST, DIGEST).is_ok());
+        assert!(
+            validate_spent_holdout_digest(
+                DIGEST,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            )
+            .is_err()
+        );
     }
 }
 

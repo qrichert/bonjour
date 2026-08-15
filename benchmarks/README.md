@@ -238,8 +238,32 @@ The selected-threshold fresh TEST still records coverage gaps:
 apostrophe-form recall was 0%, surname-comma-given recall was 10.58%,
 compound recall was 29.69%, and hyphenated recall was 31.49%. These
 aggregate findings were preserved without inspecting or tuning against
-TEST failure rows. A sealed, representative real-world holdout remains
-the next evidence milestone.
+TEST failure rows.
+
+An independent 2,000-row Meta Kaggle display-name proxy then exposed a
+large distribution shift. Frozen C1 at `0.93` emitted 36 of 1,616
+expected greetings: 34 matched the proxy labels and 2 did not (94.44%
+observed precision, 2.10% recall). After preserving that aggregate
+checkpoint, the proxy was deliberately spent for diagnosis. Corpus
+evidence covered 93.25% of expected greetings, C1 generated 74.75%, and
+the correct candidate ranked first for 67.95%, but 1,064 correctly
+ranked cases remained below `0.93`. Another 299 evidence-supported
+labels were embedded in forms C1 does not generate, predominantly
+whitespace-free handles. Details are in
+[`name-eval/README.md`](name-eval/README.md). This inspected proxy is
+now development evidence and cannot validate C2; the next frozen
+algorithm requires a disjoint REAL_PROXY_V2.
+
+C2 freezes a new emission score over unchanged C1 winners. It weights
+role signal at 0.70, count reliability at 0.20, and normalized winner
+margin at 0.10, with a three-letter safety floor and hard
+generic-organization/ ampersand veto. On development evidence it
+increased REAL_PROXY_V1_DEV from 34 correct / 2 wrong emissions to 207
+correct / 0 wrong, and synthetic VALIDATION from 10,626 to 14,686
+correct emissions with no observed errors. These are selection results,
+not held-out quality evidence; C2 now requires a fresh disjoint
+REAL_PROXY_V2. Full methodology and limitations are recorded in
+[`name-eval/README.md`](name-eval/README.md).
 
 The holdout workflow accepts only display name plus optional country and
 locale hints, stores exact original-text spans, supports intentional

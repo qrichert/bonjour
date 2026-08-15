@@ -170,7 +170,7 @@ pub const ALGORITHM_C1: AlgorithmConfig = AlgorithmConfig {
     ..ALGORITHM_C
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RawInference {
     pub greeting_candidate: Option<String>,
     pub confidence: f64,
@@ -211,6 +211,9 @@ struct RoleCandidate {
     compositional_evidence: f64,
     remainder_evidence: f64,
     origin: CandidateOrigin,
+    lookup_query: Option<String>,
+    lookup_mode: Option<LookupMode>,
+    component_lookup_modes: Option<[LookupMode; 2]>,
     evidence: Evidence,
 }
 
@@ -231,6 +234,28 @@ impl CandidateOrigin {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LookupMode {
+    Normalized,
+    AccentFolded,
+}
+
+impl LookupMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normalized => "normalized",
+            Self::AccentFolded => "accent_folded",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LookupMatch {
+    evidence: Evidence,
+    query: String,
+    mode: LookupMode,
+}
+
 #[derive(Clone, Debug)]
 pub struct CandidateDiagnostic {
     pub display: String,
@@ -247,10 +272,84 @@ pub struct CandidateDiagnostic {
     pub compositional_evidence: f64,
     pub remainder_evidence: f64,
     pub origin: &'static str,
+    pub lookup_query: Option<String>,
+    pub lookup_mode: Option<&'static str>,
+    pub left_lookup_mode: Option<&'static str>,
+    pub right_lookup_mode: Option<&'static str>,
     pub score: f64,
     pub algorithm_a_score: f64,
     pub algorithm_b_score: f64,
 }
+
+#[derive(Clone, Debug)]
+pub struct ExpectedLookupDiagnostic {
+    pub eligible: bool,
+    pub matched_query: Option<String>,
+    pub lookup_mode: Option<&'static str>,
+    pub evidence: Option<Evidence>,
+    pub role_llr: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExpectedCompositionDiagnostic {
+    pub shape: Option<&'static str>,
+    pub supported: bool,
+    pub left_lookup_mode: Option<&'static str>,
+    pub right_lookup_mode: Option<&'static str>,
+    pub left_role_llr: Option<f64>,
+    pub right_role_llr: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RoleInferenceDiagnostic {
+    pub inference: RawInference,
+    pub hard_organization_abstention: bool,
+    pub generic_organization_marker: bool,
+    pub ampersand_negative_evidence: bool,
+    pub candidates: Vec<CandidateDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WinnerFeatures {
+    pub greeting_candidate: String,
+    pub winner_score: f64,
+    pub second_score: Option<f64>,
+    pub winner_margin: f64,
+    pub no_competitor: bool,
+    pub role_llr: f64,
+    pub role_signal: f64,
+    pub reliability: f64,
+    pub global_given_count: u64,
+    pub global_surname_count: u64,
+    pub candidate_origin: &'static str,
+    pub candidate_count: usize,
+    pub alphabetic_length: usize,
+    pub generic_organization_marker: bool,
+    pub ampersand_negative_evidence: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct C2EmissionConfig {
+    pub quality_weight: f64,
+    pub margin_weight: f64,
+    pub role_weight: f64,
+    pub reliability_weight: f64,
+    pub margin_scale: f64,
+    pub minimum_candidate_letters: usize,
+    pub threshold: f64,
+}
+
+/// Frozen from REAL_PROXY_V1_DEV plus synthetic VALIDATION. This is a
+/// development operating point, not a real-world quality claim.
+pub const ALGORITHM_C2: C2EmissionConfig = C2EmissionConfig {
+    quality_weight: 0.0,
+    margin_weight: 0.1,
+    role_weight: 0.7,
+    reliability_weight: 0.2,
+    margin_scale: 0.5,
+    minimum_candidate_letters: 3,
+    threshold: 0.789_758_824_057_369_6,
+};
 
 pub fn infer_prethreshold(
     corpus: &impl EvidenceSource,
@@ -359,6 +458,11 @@ fn infer_role_prethreshold(
         return empty_inference();
     }
     let mut candidates = role_candidates(corpus, config, display_name, country_hint, locale_hint);
+    sort_role_candidates(&mut candidates);
+    role_inference_from_sorted_candidates(config, display_name, &candidates)
+}
+
+fn sort_role_candidates(candidates: &mut [RoleCandidate]) {
     candidates.sort_by(|left, right| {
         right
             .score
@@ -367,6 +471,13 @@ fn infer_role_prethreshold(
             .then_with(|| left.start.cmp(&right.start))
             .then_with(|| left.display.cmp(&right.display))
     });
+}
+
+fn role_inference_from_sorted_candidates(
+    config: AlgorithmConfig,
+    display_name: &str,
+    candidates: &[RoleCandidate],
+) -> RawInference {
     let Some(best) = candidates.first() else {
         return empty_inference();
     };
@@ -417,9 +528,10 @@ fn exact_role_candidates(
     for start in 0..tokens.len() {
         for length in 1..=2.min(tokens.len() - start) {
             let display = tokens[start..start + length].join(" ");
-            let Some(evidence) = lookup_with_variants(corpus, &display, country) else {
+            let Some(lookup) = lookup_match_with_variants(corpus, &display, country) else {
                 continue;
             };
+            let evidence = lookup.evidence;
             let role_llr = role_llr(evidence, config.role_smoothing);
             let role_signal = logistic((role_llr - config.role_center) / config.role_scale);
             let reliability = count_reliability(evidence.global_count);
@@ -444,7 +556,10 @@ fn exact_role_candidates(
                 compositional_evidence: 0.0,
                 remainder_evidence: 0.0,
                 origin: CandidateOrigin::Exact,
-                evidence,
+                lookup_query: Some(lookup.query),
+                lookup_mode: Some(lookup.mode),
+                component_lookup_modes: None,
+                evidence: lookup.evidence,
             });
         }
     }
@@ -576,13 +691,15 @@ fn add_compositional_candidates(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ComponentEvidence {
     evidence: Evidence,
     role_llr: f64,
     role_signal: f64,
     reliability: f64,
     country_support: f64,
+    lookup_query: String,
+    lookup_mode: LookupMode,
 }
 
 fn component_evidence(
@@ -591,14 +708,16 @@ fn component_evidence(
     display: &str,
     country: Option<[u8; 2]>,
 ) -> Option<ComponentEvidence> {
-    let evidence = lookup_with_variants(corpus, display, country)?;
-    let role_llr = role_llr(evidence, config.role_smoothing);
+    let lookup = lookup_match_with_variants(corpus, display, country)?;
+    let role_llr = role_llr(lookup.evidence, config.role_smoothing);
     Some(ComponentEvidence {
-        evidence,
+        evidence: lookup.evidence,
         role_llr,
         role_signal: logistic((role_llr - config.role_center) / config.role_scale),
-        reliability: count_reliability(evidence.global_count),
-        country_support: country_support(evidence),
+        reliability: count_reliability(lookup.evidence.global_count),
+        country_support: country_support(lookup.evidence),
+        lookup_query: lookup.query,
+        lookup_mode: lookup.mode,
     })
 }
 
@@ -626,6 +745,7 @@ fn composed_candidate(
     } else {
         0.0
     };
+    let component_lookup_modes = [left.lookup_mode, right.lookup_mode];
     let score = config.role_score_floor
         + config.role_weight * role_signal
         + config.role_reliability_weight * reliability
@@ -645,6 +765,9 @@ fn composed_candidate(
         compositional_evidence,
         remainder_evidence: 0.0,
         origin,
+        lookup_query: Some(format!("{} + {}", left.lookup_query, right.lookup_query)),
+        lookup_mode: None,
+        component_lookup_modes: Some(component_lookup_modes),
         evidence: combine_component_evidence(left.evidence, right.evidence),
     })
 }
@@ -671,38 +794,230 @@ pub fn candidate_diagnostics(
 ) -> Vec<CandidateDiagnostic> {
     role_candidates(corpus, config, display_name, country_hint, locale_hint)
         .into_iter()
-        .map(|candidate| CandidateDiagnostic {
-            display: candidate.display,
-            start: candidate.start,
-            length: candidate.length,
-            global_given_count: candidate.evidence.global_count,
-            country_given_count: candidate.evidence.country_count,
-            global_surname_count: candidate.evidence.surname_count,
-            role_llr: candidate.role_llr,
-            role_signal: candidate.role_signal,
-            reliability: candidate.reliability,
-            country_support: candidate.country_support,
-            compound_evidence: candidate.compound_evidence,
-            compositional_evidence: candidate.compositional_evidence,
-            remainder_evidence: candidate.remainder_evidence,
-            origin: candidate.origin.as_str(),
-            score: candidate.score,
-            algorithm_a_score: legacy_candidate_score(
-                candidate.evidence,
-                candidate.start,
-                candidate.length,
-                tokenize(display_name).len(),
-                ALGORITHM_A,
-            ),
-            algorithm_b_score: legacy_candidate_score(
-                candidate.evidence,
-                candidate.start,
-                candidate.length,
-                tokenize(display_name).len(),
-                ALGORITHM_B,
-            ),
-        })
+        .map(|candidate| candidate_diagnostic(candidate, tokenize(display_name).len()))
         .collect()
+}
+
+pub fn diagnose_role_inference(
+    corpus: &impl EvidenceSource,
+    config: AlgorithmConfig,
+    display_name: &str,
+    country_hint: Option<&str>,
+    locale_hint: Option<&str>,
+) -> RoleInferenceDiagnostic {
+    let hard_organization_abstention =
+        config.hard_legal_abstention && has_strong_organization_marker(display_name);
+    let generic_organization_marker = has_generic_organization_marker(display_name);
+    let ampersand_negative_evidence = display_name.contains('&');
+    let mut candidates = role_candidates(corpus, config, display_name, country_hint, locale_hint);
+    sort_role_candidates(&mut candidates);
+    let inference = if hard_organization_abstention {
+        empty_inference()
+    } else {
+        role_inference_from_sorted_candidates(config, display_name, &candidates)
+    };
+    let token_count = tokenize(display_name).len();
+    RoleInferenceDiagnostic {
+        inference,
+        hard_organization_abstention,
+        generic_organization_marker,
+        ampersand_negative_evidence,
+        candidates: candidates
+            .into_iter()
+            .map(|candidate| candidate_diagnostic(candidate, token_count))
+            .collect(),
+    }
+}
+
+pub fn winner_features(diagnostic: &RoleInferenceDiagnostic) -> Option<WinnerFeatures> {
+    let selected = diagnostic.inference.greeting_candidate.as_deref()?;
+    let winner = diagnostic.candidates.first()?;
+    debug_assert_eq!(winner.display, selected);
+    let second_score = diagnostic
+        .candidates
+        .get(1)
+        .map(|candidate| candidate.score);
+    Some(WinnerFeatures {
+        greeting_candidate: selected.to_string(),
+        winner_score: winner.score,
+        second_score,
+        winner_margin: second_score.map_or(1.0, |score| winner.score - score),
+        no_competitor: second_score.is_none(),
+        role_llr: winner.role_llr,
+        role_signal: winner.role_signal,
+        reliability: winner.reliability,
+        global_given_count: winner.global_given_count,
+        global_surname_count: winner.global_surname_count,
+        candidate_origin: winner.origin,
+        candidate_count: diagnostic.candidates.len(),
+        alphabetic_length: selected
+            .chars()
+            .filter(|character| character.is_alphabetic())
+            .count(),
+        generic_organization_marker: diagnostic.generic_organization_marker,
+        ampersand_negative_evidence: diagnostic.ampersand_negative_evidence,
+    })
+}
+
+pub fn c2_decision_score(features: &WinnerFeatures, config: C2EmissionConfig) -> f64 {
+    debug_assert!(c2_config_is_valid(config));
+    if features.generic_organization_marker
+        || features.ampersand_negative_evidence
+        || features.alphabetic_length < config.minimum_candidate_letters
+    {
+        return 0.0;
+    }
+    let margin_signal = (features.winner_margin / config.margin_scale).clamp(0.0, 1.0);
+    (config.quality_weight * features.winner_score
+        + config.margin_weight * margin_signal
+        + config.role_weight * features.role_signal
+        + config.reliability_weight * features.reliability)
+        .clamp(0.0, 1.0)
+}
+
+pub fn c2_config_is_valid(config: C2EmissionConfig) -> bool {
+    let weights = [
+        config.quality_weight,
+        config.margin_weight,
+        config.role_weight,
+        config.reliability_weight,
+    ];
+    weights
+        .iter()
+        .all(|weight| *weight >= 0.0 && weight.is_finite())
+        && (weights.iter().sum::<f64>() - 1.0).abs() < 1e-9
+        && config.margin_scale > 0.0
+        && config.margin_scale.is_finite()
+        && config.minimum_candidate_letters > 0
+        && config.threshold > 0.0
+        && config.threshold <= 1.0
+}
+
+pub fn c2_inference_from_diagnostic(
+    diagnostic: &RoleInferenceDiagnostic,
+    config: C2EmissionConfig,
+) -> RawInference {
+    let mut inference = diagnostic.inference.clone();
+    inference.confidence = winner_features(diagnostic)
+        .as_ref()
+        .map_or(0.0, |features| c2_decision_score(features, config));
+    inference
+}
+
+pub fn expected_lookup_diagnostic(
+    corpus: &impl EvidenceSource,
+    config: AlgorithmConfig,
+    display: &str,
+    country_hint: Option<&str>,
+    locale_hint: Option<&str>,
+) -> ExpectedLookupDiagnostic {
+    let eligible = candidate_is_eligible(display);
+    let country = resolve_country(country_hint, locale_hint);
+    let lookup = lookup_match_with_variants(corpus, display, country);
+    ExpectedLookupDiagnostic {
+        eligible,
+        matched_query: lookup.as_ref().map(|lookup| lookup.query.clone()),
+        lookup_mode: lookup.as_ref().map(|lookup| lookup.mode.as_str()),
+        evidence: lookup.as_ref().map(|lookup| lookup.evidence),
+        role_llr: lookup
+            .as_ref()
+            .map(|lookup| role_llr(lookup.evidence, config.role_smoothing)),
+    }
+}
+
+pub fn expected_composition_diagnostic(
+    corpus: &impl EvidenceSource,
+    config: AlgorithmConfig,
+    display: &str,
+    country_hint: Option<&str>,
+    locale_hint: Option<&str>,
+) -> ExpectedCompositionDiagnostic {
+    let canonical = canonicalize(display);
+    let tokens = canonical.split_whitespace().collect::<Vec<_>>();
+    let components = if let [left, right] = tokens.as_slice() {
+        Some((*left, *right, "whitespace"))
+    } else if let [token] = tokens.as_slice() {
+        let mut parts = token.split('-');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(left), Some(right), None) if !left.is_empty() && !right.is_empty() => {
+                Some((left, right, "hyphen"))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let Some((left_display, right_display, shape)) = components else {
+        return ExpectedCompositionDiagnostic {
+            shape: None,
+            supported: false,
+            left_lookup_mode: None,
+            right_lookup_mode: None,
+            left_role_llr: None,
+            right_role_llr: None,
+        };
+    };
+    let country = resolve_country(country_hint, locale_hint);
+    let left = component_evidence(corpus, config, left_display, country);
+    let right = component_evidence(corpus, config, right_display, country);
+    ExpectedCompositionDiagnostic {
+        shape: Some(shape),
+        supported: left
+            .as_ref()
+            .is_some_and(|component| component.role_llr >= config.compositional_role_floor)
+            && right
+                .as_ref()
+                .is_some_and(|component| component.role_llr >= config.compositional_role_floor),
+        left_lookup_mode: left
+            .as_ref()
+            .map(|component| component.lookup_mode.as_str()),
+        right_lookup_mode: right
+            .as_ref()
+            .map(|component| component.lookup_mode.as_str()),
+        left_role_llr: left.as_ref().map(|component| component.role_llr),
+        right_role_llr: right.as_ref().map(|component| component.role_llr),
+    }
+}
+
+fn candidate_diagnostic(candidate: RoleCandidate, token_count: usize) -> CandidateDiagnostic {
+    let [left_lookup_mode, right_lookup_mode] = candidate
+        .component_lookup_modes
+        .map_or([None, None], |modes| [Some(modes[0]), Some(modes[1])]);
+    CandidateDiagnostic {
+        display: candidate.display,
+        start: candidate.start,
+        length: candidate.length,
+        global_given_count: candidate.evidence.global_count,
+        country_given_count: candidate.evidence.country_count,
+        global_surname_count: candidate.evidence.surname_count,
+        role_llr: candidate.role_llr,
+        role_signal: candidate.role_signal,
+        reliability: candidate.reliability,
+        country_support: candidate.country_support,
+        compound_evidence: candidate.compound_evidence,
+        compositional_evidence: candidate.compositional_evidence,
+        remainder_evidence: candidate.remainder_evidence,
+        origin: candidate.origin.as_str(),
+        lookup_query: candidate.lookup_query,
+        lookup_mode: candidate.lookup_mode.map(LookupMode::as_str),
+        left_lookup_mode: left_lookup_mode.map(LookupMode::as_str),
+        right_lookup_mode: right_lookup_mode.map(LookupMode::as_str),
+        score: candidate.score,
+        algorithm_a_score: legacy_candidate_score(
+            candidate.evidence,
+            candidate.start,
+            candidate.length,
+            token_count,
+            ALGORITHM_A,
+        ),
+        algorithm_b_score: legacy_candidate_score(
+            candidate.evidence,
+            candidate.start,
+            candidate.length,
+            token_count,
+            ALGORITHM_B,
+        ),
+    }
 }
 
 fn legacy_candidate_score(
@@ -804,23 +1119,41 @@ fn lookup_with_variants(
     display: &str,
     country: Option<[u8; 2]>,
 ) -> Option<Evidence> {
+    lookup_match_with_variants(corpus, display, country).map(|lookup| lookup.evidence)
+}
+
+fn lookup_match_with_variants(
+    corpus: &impl EvidenceSource,
+    display: &str,
+    country: Option<[u8; 2]>,
+) -> Option<LookupMatch> {
     if !candidate_is_eligible(display) {
         return None;
     }
     let canonical = canonicalize(display);
     let title = title_case(&canonical);
     let lowercase = canonical.to_lowercase();
-    let mut variants = vec![canonical, title, lowercase];
+    let mut variants = vec![
+        (canonical, LookupMode::Normalized),
+        (title, LookupMode::Normalized),
+        (lowercase, LookupMode::Normalized),
+    ];
     let unaccented = variants
         .iter()
-        .map(|value| strip_accents(value))
+        .map(|(value, _)| (strip_accents(value), LookupMode::AccentFolded))
         .collect::<Vec<_>>();
     variants.extend(unaccented);
     let mut seen = HashSet::new();
     variants
         .into_iter()
-        .filter(|variant| seen.insert(variant.clone()))
-        .find_map(|variant| corpus.lookup(&variant, country))
+        .filter(|(variant, _)| seen.insert(variant.clone()))
+        .find_map(|(query, mode)| {
+            corpus.lookup(&query, country).map(|evidence| LookupMatch {
+                evidence,
+                query,
+                mode,
+            })
+        })
 }
 
 fn organization_multiplier(display_name: &str, config: AlgorithmConfig) -> f64 {
@@ -1172,5 +1505,237 @@ mod tests {
         let role = infer_prethreshold(&corpus, ALGORITHM_C, "Martin BV", None, None);
         assert_eq!(legacy.greeting_candidate.as_deref(), Some("Martin"));
         assert_eq!(role.greeting_candidate, None);
+    }
+
+    #[test]
+    fn diagnostics_distinguish_normalized_and_accent_folded_lookups() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Martin".to_string(), role_evidence(10_000, 100)),
+            ("Elodie".to_string(), role_evidence(9_000, 90)),
+        ]));
+        let normalized = expected_lookup_diagnostic(&corpus, ALGORITHM_C1, "martin", None, None);
+        assert!(normalized.eligible);
+        assert_eq!(normalized.lookup_mode, Some("normalized"));
+        assert_eq!(normalized.matched_query.as_deref(), Some("Martin"));
+
+        let folded = expected_lookup_diagnostic(&corpus, ALGORITHM_C1, "Élodie", None, None);
+        assert!(folded.eligible);
+        assert_eq!(folded.lookup_mode, Some("accent_folded"));
+        assert_eq!(folded.matched_query.as_deref(), Some("Elodie"));
+    }
+
+    #[test]
+    fn diagnostic_inference_is_identical_to_production_c1() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Mary".to_string(), role_evidence(40_000, 200)),
+            ("Jane".to_string(), role_evidence(30_000, 150)),
+            ("Martin".to_string(), role_evidence(14_544, 46_409)),
+        ]));
+        for input in [
+            "Mary Jane Watson",
+            "Mary-Jane Martin",
+            "Mary Consulting",
+            "Unknown",
+            "Mary GmbH",
+        ] {
+            let production = infer_prethreshold(&corpus, ALGORITHM_C1, input, None, None);
+            let diagnostic = diagnose_role_inference(&corpus, ALGORITHM_C1, input, None, None);
+            assert_eq!(diagnostic.inference, production, "{input}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_preserves_composed_lookup_provenance() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Mary".to_string(), role_evidence(40_000, 200)),
+            ("Jane".to_string(), role_evidence(30_000, 150)),
+        ]));
+        let diagnostic =
+            diagnose_role_inference(&corpus, ALGORITHM_C1, "Mary-Jane Watson", None, None);
+        let composed = diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.origin == "composed_hyphen")
+            .unwrap();
+        assert_eq!(composed.lookup_mode, None);
+        assert_eq!(composed.left_lookup_mode, Some("normalized"));
+        assert_eq!(composed.right_lookup_mode, Some("normalized"));
+    }
+
+    #[test]
+    fn expected_composition_support_is_separate_from_candidate_generation() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Mary".to_string(), role_evidence(40_000, 200)),
+            ("Jane".to_string(), role_evidence(30_000, 150)),
+        ]));
+        let composition =
+            expected_composition_diagnostic(&corpus, ALGORITHM_C1, "Mary Jane", None, None);
+        assert_eq!(composition.shape, Some("whitespace"));
+        assert!(composition.supported);
+        assert!(
+            candidate_diagnostics(&corpus, ALGORITHM_C1, "Mary Jane", None, None)
+                .iter()
+                .all(|candidate| candidate.display != "Mary Jane")
+        );
+    }
+
+    #[test]
+    fn hard_abstention_diagnostic_keeps_counterfactual_candidates() {
+        let corpus = FakeCorpus(HashMap::from([(
+            "Martin".to_string(),
+            role_evidence(50_000, 1_000),
+        )]));
+        let diagnostic = diagnose_role_inference(&corpus, ALGORITHM_C1, "Martin GmbH", None, None);
+        assert!(diagnostic.hard_organization_abstention);
+        assert_eq!(diagnostic.inference, empty_inference());
+        assert!(
+            diagnostic
+                .candidates
+                .iter()
+                .any(|candidate| candidate.display == "Martin")
+        );
+    }
+
+    #[test]
+    fn winner_features_use_unit_margin_without_a_competitor() {
+        let corpus = FakeCorpus(HashMap::from([(
+            "Quentin".to_string(),
+            role_evidence(100_000, 100),
+        )]));
+        let diagnostic = diagnose_role_inference(&corpus, ALGORITHM_C1, "Quentin", None, None);
+        let features = winner_features(&diagnostic).unwrap();
+        assert_eq!(features.greeting_candidate, "Quentin");
+        assert!(features.no_competitor);
+        assert_eq!(features.second_score, None);
+        assert!((features.winner_margin - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn c2_score_is_monotonic_in_positive_weighted_features() {
+        let baseline = WinnerFeatures {
+            greeting_candidate: "Quentin".to_string(),
+            winner_score: 0.4,
+            second_score: Some(0.3),
+            winner_margin: 0.1,
+            no_competitor: false,
+            role_llr: 1.0,
+            role_signal: 0.4,
+            reliability: 0.4,
+            global_given_count: 100,
+            global_surname_count: 10,
+            candidate_origin: "exact",
+            candidate_count: 2,
+            alphabetic_length: 7,
+            generic_organization_marker: false,
+            ampersand_negative_evidence: false,
+        };
+        let config = C2EmissionConfig {
+            quality_weight: 0.25,
+            margin_weight: 0.25,
+            role_weight: 0.25,
+            reliability_weight: 0.25,
+            margin_scale: 0.5,
+            minimum_candidate_letters: 3,
+            threshold: 0.5,
+        };
+        let score = c2_decision_score(&baseline, config);
+        for improved in [
+            WinnerFeatures {
+                winner_score: 0.5,
+                ..baseline.clone()
+            },
+            WinnerFeatures {
+                winner_margin: 0.2,
+                ..baseline.clone()
+            },
+            WinnerFeatures {
+                role_signal: 0.5,
+                ..baseline.clone()
+            },
+            WinnerFeatures {
+                reliability: 0.5,
+                ..baseline.clone()
+            },
+        ] {
+            assert!(c2_decision_score(&improved, config) > score);
+        }
+    }
+
+    #[test]
+    fn c2_configuration_and_safety_vetoes_are_enforced() {
+        assert!(c2_config_is_valid(ALGORITHM_C2));
+        assert!(!c2_config_is_valid(C2EmissionConfig {
+            reliability_weight: 0.3,
+            ..ALGORITHM_C2
+        }));
+        let baseline = WinnerFeatures {
+            greeting_candidate: "Martin".to_string(),
+            winner_score: 1.0,
+            second_score: None,
+            winner_margin: 1.0,
+            no_competitor: true,
+            role_llr: 5.0,
+            role_signal: 1.0,
+            reliability: 1.0,
+            global_given_count: 1_000_000,
+            global_surname_count: 0,
+            candidate_origin: "exact",
+            candidate_count: 1,
+            alphabetic_length: 6,
+            generic_organization_marker: false,
+            ampersand_negative_evidence: false,
+        };
+        assert!(c2_decision_score(&baseline, ALGORITHM_C2) > 0.0);
+        assert_eq!(
+            c2_decision_score(
+                &WinnerFeatures {
+                    generic_organization_marker: true,
+                    ..baseline.clone()
+                },
+                ALGORITHM_C2
+            ),
+            0.0
+        );
+        assert_eq!(
+            c2_decision_score(
+                &WinnerFeatures {
+                    ampersand_negative_evidence: true,
+                    ..baseline.clone()
+                },
+                ALGORITHM_C2
+            ),
+            0.0
+        );
+        assert_eq!(
+            c2_decision_score(
+                &WinnerFeatures {
+                    greeting_candidate: "MD".to_string(),
+                    alphabetic_length: 2,
+                    ..baseline
+                },
+                ALGORITHM_C2
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn c2_preserves_c1_winner_and_gender_but_blocks_short_fragments() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Quentin".to_string(), role_evidence(1_500_000, 0)),
+            ("MD".to_string(), role_evidence(1_500_000, 0)),
+        ]));
+        let c1 = infer_prethreshold(&corpus, ALGORITHM_C1, "Quentin", None, None);
+        let diagnostic = diagnose_role_inference(&corpus, ALGORITHM_C1, "Quentin", None, None);
+        let c2 = c2_inference_from_diagnostic(&diagnostic, ALGORITHM_C2);
+        assert_eq!(c2.greeting_candidate, c1.greeting_candidate);
+        assert_eq!(c2.gender_hint, c1.gender_hint);
+        assert_eq!(c2.gender_confidence, c1.gender_confidence);
+        assert!(c2.greeting_at(ALGORITHM_C2.threshold).is_some());
+
+        let diagnostic = diagnose_role_inference(&corpus, ALGORITHM_C1, "MD", None, None);
+        let short = c2_inference_from_diagnostic(&diagnostic, ALGORITHM_C2);
+        assert_eq!(short.greeting_candidate.as_deref(), Some("MD"));
+        assert_eq!(short.greeting_at(ALGORITHM_C2.threshold), None);
     }
 }
