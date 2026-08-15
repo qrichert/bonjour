@@ -11,6 +11,7 @@
 
 mod artifact;
 mod c2_calibration;
+mod c3_development;
 mod classifier;
 mod corpus_audit;
 mod dataset;
@@ -27,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use artifact::C32Artifact;
 use c2_calibration::run_c2_calibration;
+use c3_development::run_c3_development;
 use classifier::{
     ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, ALGORITHM_C2, AlgorithmConfig,
     RawInference, c2_inference_from_diagnostic, candidate_diagnostics, diagnose_role_inference,
@@ -147,6 +149,7 @@ struct Arguments {
     sealed_only: bool,
     diagnose_spent_holdout_sha256: Option<String>,
     develop_c2_spent_holdout_sha256: Option<String>,
+    develop_c3_spent_holdout_sha256: Option<String>,
     compare_sealed_c1_c2_sha256: Option<String>,
 }
 
@@ -164,6 +167,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut sealed_only = false;
     let mut diagnose_spent_holdout_sha256 = None;
     let mut develop_c2_spent_holdout_sha256 = None;
+    let mut develop_c3_spent_holdout_sha256 = None;
     let mut compare_sealed_c1_c2_sha256 = None;
     for argument in arguments {
         let text = argument.to_string_lossy();
@@ -195,6 +199,13 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
                 );
             }
             develop_c2_spent_holdout_sha256 = Some(value.to_ascii_lowercase());
+        } else if let Some(value) = text.strip_prefix("--develop-c3-from-spent-holdout-sha256=") {
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(
+                    "spent holdout SHA-256 must contain exactly 64 hexadecimal characters".into(),
+                );
+            }
+            develop_c3_spent_holdout_sha256 = Some(value.to_ascii_lowercase());
         } else if let Some(value) = text.strip_prefix("--compare-sealed-c1-c2-sha256=") {
             if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err(
@@ -215,11 +226,13 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let explicit_modes = usize::from(sealed_only)
         + usize::from(diagnose_spent_holdout_sha256.is_some())
         + usize::from(develop_c2_spent_holdout_sha256.is_some())
+        + usize::from(develop_c3_spent_holdout_sha256.is_some())
         + usize::from(compare_sealed_c1_c2_sha256.is_some());
     if explicit_modes > 1 {
-        return Err("sealed-only, spent-diagnostic, C2-development, and sealed C1/C2 comparison modes are mutually exclusive".into());
+        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, and sealed C1/C2 comparison modes are mutually exclusive".into());
     }
-    let development_mode = develop_c2_spent_holdout_sha256.is_some();
+    let development_mode =
+        develop_c2_spent_holdout_sha256.is_some() || develop_c3_spent_holdout_sha256.is_some();
     let diagnostic_only = diagnose_spent_holdout_sha256.is_some()
         || development_mode
         || compare_sealed_c1_c2_sha256.is_some();
@@ -232,7 +245,9 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
                 "--sealed-only"
             } else if compare_sealed_c1_c2_sha256.is_some() {
                 "--compare-sealed-c1-c2-sha256"
-            } else if development_mode {
+            } else if develop_c3_spent_holdout_sha256.is_some() {
+                "--develop-c3-from-spent-holdout-sha256"
+            } else if develop_c2_spent_holdout_sha256.is_some() {
                 "--develop-c2-from-spent-holdout-sha256"
             } else {
                 "--diagnose-spent-holdout-sha256"
@@ -261,12 +276,13 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         sealed_only,
         diagnose_spent_holdout_sha256,
         develop_c2_spent_holdout_sha256,
+        develop_c3_spent_holdout_sha256,
         compare_sealed_c1_c2_sha256,
     })
 }
 
 fn usage() -> &'static str {
-    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
+    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
 }
 
 #[allow(clippy::too_many_lines)]
@@ -283,6 +299,7 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
             .diagnose_spent_holdout_sha256
             .as_deref()
             .or(arguments.develop_c2_spent_holdout_sha256.as_deref())
+            .or(arguments.develop_c3_spent_holdout_sha256.as_deref())
             .or(arguments.compare_sealed_c1_c2_sha256.as_deref()),
         frozen_holdout.as_ref(),
     ) {
@@ -313,6 +330,12 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
             .ok_or("--develop-c2-from-spent-holdout-sha256 requires a frozen holdout")?;
         validate_spent_holdout_digest(acknowledged_sha256, &holdout.manifest.holdout_sha256)?;
         return run_c2_calibration(output, &corpus, holdout, &fixtures);
+    }
+    if let Some(acknowledged_sha256) = &arguments.develop_c3_spent_holdout_sha256 {
+        let holdout = frozen_holdout
+            .ok_or("--develop-c3-from-spent-holdout-sha256 requires a frozen holdout")?;
+        validate_spent_holdout_digest(acknowledged_sha256, &holdout.manifest.holdout_sha256)?;
+        return run_c3_development(output, &corpus, holdout, &fixtures);
     }
     if let Some(acknowledged_sha256) = &arguments.diagnose_spent_holdout_sha256 {
         let holdout =
@@ -2321,12 +2344,52 @@ mod argument_tests {
             "--development-only",
             "--sealed-only",
             &format!("--diagnose-spent-holdout-sha256={DIGEST}"),
+            &format!("--develop-c3-from-spent-holdout-sha256={DIGEST}"),
         ] {
             assert!(
                 parse(&[
                     "artifact",
                     "output",
                     &format!("--develop-c2-from-spent-holdout-sha256={DIGEST}"),
+                    "--sealed=sealed.csv",
+                    "--sealed-manifest=manifest.csv",
+                    extra,
+                ])
+                .is_err(),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn c3_development_mode_requires_spent_digest_and_rejects_other_modes() {
+        let arguments = parse(&[
+            "artifact",
+            "output",
+            &format!("--develop-c3-from-spent-holdout-sha256={DIGEST}"),
+            "--sealed=sealed.csv",
+            "--sealed-manifest=manifest.csv",
+        ])
+        .unwrap();
+        assert_eq!(arguments.clean_csv, None);
+        assert_eq!(
+            arguments.develop_c3_spent_holdout_sha256.as_deref(),
+            Some(DIGEST)
+        );
+
+        for extra in [
+            "--reference-threshold=0.80",
+            "--development-only",
+            "--sealed-only",
+            &format!("--diagnose-spent-holdout-sha256={DIGEST}"),
+            &format!("--develop-c2-from-spent-holdout-sha256={DIGEST}"),
+            &format!("--compare-sealed-c1-c2-sha256={DIGEST}"),
+        ] {
+            assert!(
+                parse(&[
+                    "artifact",
+                    "output",
+                    &format!("--develop-c3-from-spent-holdout-sha256={DIGEST}"),
                     "--sealed=sealed.csv",
                     "--sealed-manifest=manifest.csv",
                     extra,
@@ -2371,6 +2434,7 @@ mod argument_tests {
             "--reference-threshold=0.80",
             &format!("--diagnose-spent-holdout-sha256={DIGEST}"),
             &format!("--develop-c2-from-spent-holdout-sha256={DIGEST}"),
+            &format!("--develop-c3-from-spent-holdout-sha256={DIGEST}"),
         ] {
             assert!(
                 parse(&[

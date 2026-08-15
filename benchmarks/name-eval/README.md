@@ -4,7 +4,7 @@ This isolated crate evaluates greeting-name inference against labels
 that are independent of the clean-v1 statistical corpus. It does not
 change corpus sanitation, C32 encoding, or application runtime behavior.
 
-The harness contains four algorithms:
+The harness contains five candidate-generation algorithms:
 
 - `A-frequency-v1`, a weak frequency-led comparator;
 - `B-simple-signals-v1`, which additionally uses country support, token
@@ -20,6 +20,11 @@ The harness contains four algorithms:
   independently given-like components. Unsupported whitespace
   composition requires a remainder token; an otherwise unsupported
   two-token input remains ambiguous and is not combined.
+- `C3-conservative-handle-candidates-v1`, which preserves every C1
+  candidate and adds only corpus-backed substrings exposed by ASCII
+  digit runs, `_`/`.` separators, or safe Unicode lower-to-upper case
+  transitions. C3 is evaluated through the permanently frozen C2
+  emission policy rather than a new score or threshold.
 
 All return an unthresholded score. The evaluator applies configurable
 thresholds afterward and writes split/category metrics, threshold
@@ -538,6 +543,69 @@ emission policy on this fresh proxy, but 208 emissions and
 machine-agreed labels do not establish 99% worldwide or production
 precision. V2 is now frozen comparison evidence and must not be used to
 retune C2.
+
+### C3 conservative handle candidates
+
+C3 addresses only the 299 spent-V1 labels whose corpus evidence existed
+but whose expected span was embedded in a larger whitespace-free token.
+It preserves C1 candidates, role scoring, ranking, organization and
+gender evidence, then adds maximal corpus-backed segments exposed by:
+
+- an ASCII digit run;
+- `_` or `.`;
+- a Unicode lowercase-to-uppercase transition.
+
+Tokens containing another non-name punctuation or symbol do not produce
+handle-derived candidates, so `/`, `\\`, `@`, `:`, and similar URL,
+email, or arbitrary-symbol forms are not split. Camel-like parts are
+also rejected when any resulting component lacks a lowercase character;
+this prevents an acronym-like suffix such as `PrincessFC` from exposing
+`Princess`. C3 does not scan arbitrary prefixes, split all-lowercase or
+all-uppercase concatenations, remove repeated letters, infer
+script-specific boundaries, or repair misspellings. Derived candidates
+receive the unchanged C1 role score with no origin bonus or penalty, and
+the winner is gated by frozen C2 at exactly `0.78975882405736963`.
+
+Reproduce the development experiment with spent REAL_PROXY_V1_DEV only:
+
+```console
+cargo run --release --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-eval -- \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-c3-development \
+  --develop-c3-from-spent-holdout-sha256=de95213f27fc1849032ee6788c8f16d7d515c1a991ae8b2e8414b7b155814c4e \
+  --sealed=_wip/real-proxy-v1/sealed.csv \
+  --sealed-manifest=_wip/real-proxy-v1/sealed.manifest.csv
+```
+
+The command verifies the spent digest, reproduces the historical C2
+checkpoints, and evaluates only V1 plus synthetic VALIDATION. It never
+loads V2 or a synthetic TEST split. Local changed-case diagnostics are
+development material under `_wip` and must not be committed.
+
+Development results were:
+
+| Population        | Algorithm | Emitted | Correct | Wrong | Expected-NULL emissions | Observed precision | Recall |
+| ----------------- | --------- | ------: | ------: | ----: | ----------------------: | -----------------: | -----: |
+| REAL_PROXY_V1_DEV | C2        |     207 |     207 |     0 |                       0 |            100.00% | 12.81% |
+| REAL_PROXY_V1_DEV | C3        |     234 |     234 |     0 |                       0 |            100.00% | 14.48% |
+| VALIDATION        | C2        |  14,686 |  14,686 |     0 |                       0 |            100.00% | 37.44% |
+| VALIDATION        | C3        |  14,686 |  14,686 |     0 |                       0 |            100.00% | 37.44% |
+
+On V1's 1,616 expected greetings, matching-candidate generation rose
+from 1,208 (74.75%) to 1,387 (85.83%), and correct pre-threshold winner
+selection rose from 1,098 (67.95%) to 1,268 (78.47%). C3 generated 179
+previously missing matching candidates, selected 172 of them, and
+emitted 27. The first, broader camel rule emitted `Princess` from the
+expected-NULL handle `PrincessFC`; rejecting acronym-like camel parts
+removed that unsafe behavior before C3 was frozen.
+
+These are selection results on machine-labeled spent V1 plus synthetic
+VALIDATION, not held-out quality evidence. The observed zero-error rows
+do not establish precision. C3 is frozen as a development candidate and
+requires a fresh, disjoint, independently annotated REAL_PROXY_V3 for a
+one-shot comparison against frozen C2. V2 remains untouched and cannot
+validate or retune C3.
 
 ## Metric definitions
 

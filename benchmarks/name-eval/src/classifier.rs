@@ -75,6 +75,7 @@ pub enum AlgorithmKind {
     Legacy,
     RoleHypothesis,
     RoleCompositional,
+    RoleHandleSegments,
 }
 
 pub const ALGORITHM_A: AlgorithmConfig = AlgorithmConfig {
@@ -170,6 +171,12 @@ pub const ALGORITHM_C1: AlgorithmConfig = AlgorithmConfig {
     ..ALGORITHM_C
 };
 
+pub const ALGORITHM_C3: AlgorithmConfig = AlgorithmConfig {
+    name: "C3-conservative-handle-candidates-v1",
+    kind: AlgorithmKind::RoleHandleSegments,
+    ..ALGORITHM_C1
+};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawInference {
     pub greeting_candidate: Option<String>,
@@ -222,6 +229,7 @@ enum CandidateOrigin {
     Exact,
     ComposedWhitespace,
     ComposedHyphen,
+    HandleSegment,
 }
 
 impl CandidateOrigin {
@@ -230,6 +238,7 @@ impl CandidateOrigin {
             Self::Exact => "exact",
             Self::ComposedWhitespace => "composed_whitespace",
             Self::ComposedHyphen => "composed_hyphen",
+            Self::HandleSegment => "handle_segment",
         }
     }
 }
@@ -360,7 +369,9 @@ pub fn infer_prethreshold(
 ) -> RawInference {
     if matches!(
         config.kind,
-        AlgorithmKind::RoleHypothesis | AlgorithmKind::RoleCompositional
+        AlgorithmKind::RoleHypothesis
+            | AlgorithmKind::RoleCompositional
+            | AlgorithmKind::RoleHandleSegments
     ) {
         return infer_role_prethreshold(corpus, config, display_name, country_hint, locale_hint);
     }
@@ -509,8 +520,14 @@ fn role_candidates(
     let country = resolve_country(country_hint, locale_hint);
     let tokens = tokenize(display_name);
     let mut candidates = exact_role_candidates(corpus, config, &tokens, country);
-    if config.kind == AlgorithmKind::RoleCompositional {
+    if matches!(
+        config.kind,
+        AlgorithmKind::RoleCompositional | AlgorithmKind::RoleHandleSegments
+    ) {
         add_compositional_candidates(corpus, config, &tokens, country, &mut candidates);
+    }
+    if config.kind == AlgorithmKind::RoleHandleSegments {
+        add_handle_segment_candidates(corpus, config, &tokens, country, &mut candidates);
     }
 
     add_direct_compound_evidence(config, &mut candidates);
@@ -531,39 +548,167 @@ fn exact_role_candidates(
             let Some(lookup) = lookup_match_with_variants(corpus, &display, country) else {
                 continue;
             };
-            let evidence = lookup.evidence;
-            let role_llr = role_llr(evidence, config.role_smoothing);
-            let role_signal = logistic((role_llr - config.role_center) / config.role_scale);
-            let reliability = count_reliability(evidence.global_count);
-            let country_support = country_support(evidence);
-            let mut score = config.role_score_floor
-                + config.role_weight * role_signal
-                + config.role_reliability_weight * reliability
-                + config.country_weight * country_support;
-            if tokens.len() == 1 {
-                score += config.single_display_bonus;
-            }
-            candidates.push(RoleCandidate {
+            candidates.push(role_candidate_from_lookup(
+                config,
                 display,
                 start,
                 length,
-                score,
-                role_llr,
-                role_signal,
-                reliability,
-                country_support,
-                compound_evidence: 0.0,
-                compositional_evidence: 0.0,
-                remainder_evidence: 0.0,
-                origin: CandidateOrigin::Exact,
-                lookup_query: Some(lookup.query),
-                lookup_mode: Some(lookup.mode),
-                component_lookup_modes: None,
-                evidence: lookup.evidence,
-            });
+                CandidateOrigin::Exact,
+                lookup,
+                tokens.len() == 1,
+            ));
         }
     }
     candidates
+}
+
+fn role_candidate_from_lookup(
+    config: AlgorithmConfig,
+    display: String,
+    start: usize,
+    length: usize,
+    origin: CandidateOrigin,
+    lookup: LookupMatch,
+    single_display: bool,
+) -> RoleCandidate {
+    let evidence = lookup.evidence;
+    let role_llr = role_llr(evidence, config.role_smoothing);
+    let role_signal = logistic((role_llr - config.role_center) / config.role_scale);
+    let reliability = count_reliability(evidence.global_count);
+    let country_support = country_support(evidence);
+    let mut score = config.role_score_floor
+        + config.role_weight * role_signal
+        + config.role_reliability_weight * reliability
+        + config.country_weight * country_support;
+    if single_display {
+        score += config.single_display_bonus;
+    }
+    RoleCandidate {
+        display,
+        start,
+        length,
+        score,
+        role_llr,
+        role_signal,
+        reliability,
+        country_support,
+        compound_evidence: 0.0,
+        compositional_evidence: 0.0,
+        remainder_evidence: 0.0,
+        origin,
+        lookup_query: Some(lookup.query),
+        lookup_mode: Some(lookup.mode),
+        component_lookup_modes: None,
+        evidence,
+    }
+}
+
+fn add_handle_segment_candidates(
+    corpus: &impl EvidenceSource,
+    config: AlgorithmConfig,
+    tokens: &[String],
+    country: Option<[u8; 2]>,
+    candidates: &mut Vec<RoleCandidate>,
+) {
+    for (start, token) in tokens.iter().enumerate() {
+        for display in conservative_handle_segments(token) {
+            if display
+                .chars()
+                .filter(|character| character.is_alphabetic())
+                .count()
+                < ALGORITHM_C2.minimum_candidate_letters
+                || candidates.iter().any(|candidate| {
+                    candidate.start == start
+                        && candidate.length == 1
+                        && canonicalize(&candidate.display).to_lowercase()
+                            == canonicalize(&display).to_lowercase()
+                })
+            {
+                continue;
+            }
+            let Some(lookup) = lookup_match_with_variants(corpus, &display, country) else {
+                continue;
+            };
+            candidates.push(role_candidate_from_lookup(
+                config,
+                display,
+                start,
+                1,
+                CandidateOrigin::HandleSegment,
+                lookup,
+                tokens.len() == 1,
+            ));
+        }
+    }
+}
+
+fn conservative_handle_segments(token: &str) -> Vec<String> {
+    if token.chars().any(|character| {
+        !(character.is_alphabetic()
+            || is_combining_mark(character)
+            || character.is_ascii_digit()
+            || matches!(character, '\'' | '-' | '_' | '.'))
+    }) {
+        return Vec::new();
+    }
+
+    let mut explicit_parts = Vec::new();
+    let mut part_start = 0;
+    let mut explicit_boundary = false;
+    for (index, character) in token.char_indices() {
+        if character.is_ascii_digit() || matches!(character, '_' | '.') {
+            explicit_boundary = true;
+            if part_start < index {
+                explicit_parts.push(&token[part_start..index]);
+            }
+            part_start = index + character.len_utf8();
+        }
+    }
+    if part_start < token.len() {
+        explicit_parts.push(&token[part_start..]);
+    }
+
+    let mut segments = Vec::new();
+    let mut camel_boundary = false;
+    for part in explicit_parts {
+        let mut part_segments = Vec::new();
+        let mut part_has_camel_boundary = false;
+        let mut segment_start = 0;
+        let mut previous = None;
+        for (index, character) in part.char_indices() {
+            if previous.is_some_and(char::is_lowercase) && character.is_uppercase() {
+                camel_boundary = true;
+                part_has_camel_boundary = true;
+                if segment_start < index {
+                    part_segments.push(part[segment_start..index].to_string());
+                }
+                segment_start = index;
+            }
+            previous = Some(character);
+        }
+        if segment_start < part.len() {
+            part_segments.push(part[segment_start..].to_string());
+        }
+        // A trailing all-uppercase fragment is indistinguishable from a
+        // credential, club marker, or handle suffix (`PrincessFC`). Treat the
+        // entire camel-like part as unsafe rather than extracting its prefix.
+        if part_has_camel_boundary
+            && part_segments
+                .iter()
+                .any(|segment| !segment.chars().any(char::is_lowercase))
+        {
+            continue;
+        }
+        segments.extend(part_segments);
+    }
+
+    if !explicit_boundary && !camel_boundary {
+        return Vec::new();
+    }
+    segments
+        .into_iter()
+        .filter(|segment| candidate_is_eligible(segment))
+        .collect()
 }
 
 fn add_direct_compound_evidence(config: AlgorithmConfig, candidates: &mut [RoleCandidate]) {
@@ -1494,6 +1639,102 @@ mod tests {
                 candidate_diagnostics(&corpus, ALGORITHM_C1, input, None, None)
                     .iter()
                     .all(|candidate| candidate.origin != "composed_whitespace")
+            );
+        }
+    }
+
+    #[test]
+    fn c3_segments_only_explicit_conservative_handle_boundaries() {
+        assert_eq!(conservative_handle_segments("Quentin42"), ["Quentin"]);
+        assert_eq!(
+            conservative_handle_segments("Jean.Dupont_2024"),
+            ["Jean", "Dupont"]
+        );
+        assert_eq!(
+            conservative_handle_segments("ÉlodieMartin"),
+            ["Élodie", "Martin"]
+        );
+        assert_eq!(
+            conservative_handle_segments("Fatima-ZahraCarla1"),
+            ["Fatima-Zahra", "Carla"]
+        );
+
+        for input in [
+            "quentindupont",
+            "quentinnnn",
+            "QUENTINDUPONT",
+            "PrincessFC",
+            "kaggle.com/quentin",
+            "quentin@example.com",
+            "a:quentin",
+        ] {
+            assert!(conservative_handle_segments(input).is_empty(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn c3_adds_corpus_backed_digit_delimiter_and_camel_case_segments() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Quentin".to_string(), role_evidence(100_000, 100)),
+            ("Élodie".to_string(), role_evidence(90_000, 100)),
+            ("Martin".to_string(), role_evidence(14_544, 46_409)),
+        ]));
+        for (input, expected) in [
+            ("Quentin42", "Quentin"),
+            ("Quentin_42", "Quentin"),
+            ("Quentin.Martin", "Quentin"),
+            ("ÉlodieMartin", "Élodie"),
+        ] {
+            let diagnostic = diagnose_role_inference(&corpus, ALGORITHM_C3, input, None, None);
+            assert!(diagnostic.candidates.iter().any(|candidate| {
+                candidate.display == expected && candidate.origin == "handle_segment"
+            }));
+            let c3 = c2_inference_from_diagnostic(&diagnostic, ALGORITHM_C2);
+            assert_eq!(
+                c3.greeting_at(ALGORITHM_C2.threshold),
+                Some(expected),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c3_does_not_scan_arbitrary_substrings_or_unsafe_url_tokens() {
+        let corpus = FakeCorpus(HashMap::from([(
+            "Quentin".to_string(),
+            role_evidence(100_000, 100),
+        )]));
+        for input in [
+            "quentindupont",
+            "quentinnnn",
+            "QUENTINXYZ",
+            "kaggle.com/Quentin",
+            "quentin@example.com",
+        ] {
+            let diagnostic = diagnose_role_inference(&corpus, ALGORITHM_C3, input, None, None);
+            assert!(
+                diagnostic
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.origin != "handle_segment"),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c3_leaves_non_handle_c2_inference_unchanged() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Quentin".to_string(), role_evidence(100_000, 100)),
+            ("Martin".to_string(), role_evidence(14_544, 46_409)),
+        ]));
+        for input in ["Quentin Martin", "Martin Quentin", "Quentin GmbH"] {
+            let c1 = diagnose_role_inference(&corpus, ALGORITHM_C1, input, None, None);
+            let c3 = diagnose_role_inference(&corpus, ALGORITHM_C3, input, None, None);
+            assert_eq!(
+                c2_inference_from_diagnostic(&c3, ALGORITHM_C2),
+                c2_inference_from_diagnostic(&c1, ALGORITHM_C2),
+                "{input:?}"
             );
         }
     }

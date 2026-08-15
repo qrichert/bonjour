@@ -292,6 +292,24 @@ to C1 at `0.93`; the explicit V2 comparison mode evaluates frozen C1 and
 C2 together. Both emit aggregate metrics and coarse score buckets only.
 No real holdout or personal-data source is included in the repository.
 
+C3 is the next candidate-generation-only experiment. It keeps C1
+scoring/ranking and the permanently frozen C2 emission configuration,
+but adds maximal corpus-backed handle segments exposed by ASCII digits,
+`_`/`.`, or conservative Unicode lower-to-upper case boundaries. It does
+not scan arbitrary substrings, split all-lower/all-uppercase
+concatenations, repair repeated letters, or parse URL/email punctuation.
+A camel-like part containing an all-uppercase component is rejected to
+avoid unsafe acronym or credential suffix extraction.
+
+On spent REAL_PROXY_V1_DEV, C3 increased matching-candidate generation
+from 74.75% to 85.83%, correct pre-threshold selection from 67.95% to
+78.47%, and emitted recall from 12.81% to 14.48%. It emitted 234/234
+proxy greetings correctly with no expected-NULL emission; synthetic
+VALIDATION remained exactly 14,686/14,686 correct emissions at 37.44%
+recall. These are development-selection results, not held-out quality
+evidence. C3 is frozen pending a fresh disjoint REAL_PROXY_V3; V2 was
+not loaded, inspected, or used to tune it.
+
 ## Current storage choice
 
 The leading experimental artifact is therefore:
