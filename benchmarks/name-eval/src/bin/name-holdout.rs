@@ -3,8 +3,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use name_eval::holdout::{
-    CaseKind, LabelStatus, freeze, load_or_initialize_draft, render_label_prompt, save_draft,
-    span_candidates,
+    CaseKind, LabelStatus, export_blind_annotation_template, freeze, load_or_initialize_draft,
+    merge_blind_annotations, render_label_prompt, save_draft, span_candidates,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -61,6 +61,45 @@ fn run() -> Result<()> {
             println!("Skipped: {}", frozen.skipped_cases);
             println!("Expected greetings: {}", frozen.expected_greetings);
             println!("Expected abstentions: {}", frozen.expected_abstentions);
+            Ok(())
+        }
+        "export-blind" => {
+            let source = next_path(&mut arguments, "missing source CSV")?;
+            let destination = next_path(&mut arguments, "missing annotation template CSV")?;
+            if arguments.next().is_some() {
+                return Err(usage().into());
+            }
+            if source == destination {
+                return Err("source and annotation template paths must differ".into());
+            }
+            export_blind_annotation_template(&source, &destination)?;
+            println!("Blind annotation template: {}", destination.display());
+            Ok(())
+        }
+        "consensus" => {
+            let source = next_path(&mut arguments, "missing source CSV")?;
+            let annotation_a = next_path(&mut arguments, "missing annotation A CSV")?;
+            let annotation_b = next_path(&mut arguments, "missing annotation B CSV")?;
+            let draft = next_path(&mut arguments, "missing consensus draft CSV")?;
+            let summary = next_path(&mut arguments, "missing consensus summary CSV")?;
+            if arguments.next().is_some() {
+                return Err(usage().into());
+            }
+            let paths = [&source, &annotation_a, &annotation_b, &draft, &summary];
+            for (index, left) in paths.iter().enumerate() {
+                if paths.iter().skip(index + 1).any(|right| left == right) {
+                    return Err("consensus input and output paths must all differ".into());
+                }
+            }
+            let counts =
+                merge_blind_annotations(&source, &annotation_a, &annotation_b, &draft, &summary)?;
+            println!("Consensus draft: {}", draft.display());
+            println!("Aggregate summary: {}", summary.display());
+            println!("Cases: {}", counts.total_cases);
+            println!("Greeting agreements: {}", counts.greeting_agreements);
+            println!("NULL agreements: {}", counts.null_agreements);
+            println!("Annotator SKIP cases: {}", counts.annotator_skip_cases);
+            println!("Disagreements: {}", counts.disagreement_cases);
             Ok(())
         }
         "help" | "--help" | "-h" => {
@@ -162,5 +201,5 @@ fn next_path(
 }
 
 fn usage() -> &'static str {
-    "usage:\n  name-holdout label <source.csv> <draft.csv>\n  name-holdout freeze <draft.csv> <sealed.csv> <manifest.csv> --provenance=DESCRIPTION"
+    "usage:\n  name-holdout label <source.csv> <draft.csv>\n  name-holdout export-blind <source.csv> <annotation-template.csv>\n  name-holdout consensus <source.csv> <annotation-a.csv> <annotation-b.csv> <draft.csv> <summary.csv>\n  name-holdout freeze <draft.csv> <sealed.csv> <manifest.csv> --provenance=DESCRIPTION"
 }

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::fs::OpenOptions;
@@ -37,6 +37,21 @@ const MANIFEST_HEADER: [&str; 11] = [
     "non_person_cases",
     "unknown_kind_cases",
     "provenance",
+];
+const BLIND_ANNOTATION_HEADER: [&str; 6] = [
+    "id",
+    "display_name",
+    "country_hint",
+    "locale_hint",
+    "decision",
+    "expected_greeting",
+];
+const CONSENSUS_HEADER: [&str; 5] = [
+    "total_cases",
+    "greeting_agreements",
+    "null_agreements",
+    "annotator_skip_cases",
+    "disagreement_cases",
 ];
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -146,6 +161,15 @@ pub struct FrozenHoldout {
     pub manifest: HoldoutManifest,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ConsensusSummary {
+    pub total_cases: usize,
+    pub greeting_agreements: usize,
+    pub null_agreements: usize,
+    pub annotator_skip_cases: usize,
+    pub disagreement_cases: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct SealedDecision {
     pub greeting_candidate: Option<String>,
@@ -195,6 +219,13 @@ pub struct ConfidenceBucket {
     pub wrong: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConfidenceBucketSpec {
+    pub label: &'static str,
+    pub lower: f64,
+    pub upper: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct SealedEvaluation {
     pub threshold: f64,
@@ -209,6 +240,23 @@ struct SourceRow {
     country_hint: String,
     #[serde(default)]
     locale_hint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct BlindAnnotationRow {
+    id: String,
+    display_name: String,
+    country_hint: String,
+    locale_hint: String,
+    decision: String,
+    expected_greeting: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AnnotationDecision {
+    Greeting(String),
+    Abstain,
+    Skip,
 }
 
 pub fn load_source(path: &Path) -> Result<Vec<HoldoutCase>> {
@@ -269,6 +317,78 @@ pub fn load_or_initialize_draft(source: &Path, draft: &Path) -> Result<Vec<Holdo
         return Err("existing draft does not match the supplied holdout source".into());
     }
     Ok(draft_cases)
+}
+
+pub fn export_blind_annotation_template(source: &Path, destination: &Path) -> Result<()> {
+    let cases = load_source(source)?;
+    let bytes = serialize_blind_annotations(
+        &cases
+            .iter()
+            .map(|case| BlindAnnotationRow {
+                id: case.id.clone(),
+                display_name: case.display_name.clone(),
+                country_hint: case.country_hint.clone(),
+                locale_hint: case.locale_hint.clone(),
+                decision: String::new(),
+                expected_greeting: String::new(),
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    write_new_file(destination, &bytes)
+}
+
+pub fn merge_blind_annotations(
+    source: &Path,
+    annotation_a: &Path,
+    annotation_b: &Path,
+    draft: &Path,
+    summary_path: &Path,
+) -> Result<ConsensusSummary> {
+    if draft.exists() || summary_path.exists() {
+        return Err("refusing to overwrite an existing consensus output".into());
+    }
+    let mut cases = load_source(source)?;
+    let decisions_a = load_blind_annotations(annotation_a, &cases)?;
+    let decisions_b = load_blind_annotations(annotation_b, &cases)?;
+    let mut summary = ConsensusSummary {
+        total_cases: cases.len(),
+        ..ConsensusSummary::default()
+    };
+
+    for case in &mut cases {
+        let decision_a = decisions_a
+            .get(&case.id)
+            .ok_or_else(|| format!("annotation A is missing {}", case.id))?;
+        let decision_b = decisions_b
+            .get(&case.id)
+            .ok_or_else(|| format!("annotation B is missing {}", case.id))?;
+        match (decision_a, decision_b) {
+            (AnnotationDecision::Greeting(left), AnnotationDecision::Greeting(right))
+                if left == right =>
+            {
+                let candidate = exact_annotation_span(&case.display_name, left)?;
+                case.select_greeting(&candidate)?;
+                summary.greeting_agreements += 1;
+            }
+            (AnnotationDecision::Abstain, AnnotationDecision::Abstain) => {
+                case.select_abstention(CaseKind::Unknown);
+                summary.null_agreements += 1;
+            }
+            (AnnotationDecision::Skip, _) | (_, AnnotationDecision::Skip) => {
+                case.select_skip();
+                summary.annotator_skip_cases += 1;
+            }
+            _ => {
+                case.select_skip();
+                summary.disagreement_cases += 1;
+            }
+        }
+    }
+
+    let draft_bytes = serialize_cases(&cases)?;
+    let summary_bytes = serialize_consensus_summary(summary)?;
+    write_new_pair(draft, &draft_bytes, summary_path, &summary_bytes)?;
+    Ok(summary)
 }
 
 pub fn save_draft(path: &Path, cases: &[HoldoutCase]) -> Result<()> {
@@ -409,9 +529,45 @@ pub fn evaluate_sealed(
     decisions: &[Option<SealedDecision>],
     threshold: f64,
 ) -> Result<SealedEvaluation> {
+    evaluate_sealed_with_buckets(
+        holdout,
+        decisions,
+        threshold,
+        [
+            ConfidenceBucketSpec {
+                label: "0.93–0.95",
+                lower: 0.93,
+                upper: 0.95,
+            },
+            ConfidenceBucketSpec {
+                label: "0.95–0.97",
+                lower: 0.95,
+                upper: 0.97,
+            },
+            ConfidenceBucketSpec {
+                label: "0.97–0.99",
+                lower: 0.97,
+                upper: 0.99,
+            },
+            ConfidenceBucketSpec {
+                label: "0.99–1.00",
+                lower: 0.99,
+                upper: 1.00,
+            },
+        ],
+    )
+}
+
+pub fn evaluate_sealed_with_buckets(
+    holdout: &FrozenHoldout,
+    decisions: &[Option<SealedDecision>],
+    threshold: f64,
+    bucket_specs: [ConfidenceBucketSpec; 4],
+) -> Result<SealedEvaluation> {
     if decisions.len() != holdout.cases.len() {
         return Err("sealed decision count does not match holdout case count".into());
     }
+    validate_bucket_specs(threshold, bucket_specs)?;
     let mut metrics = SealedMetrics {
         total_labeled_cases: holdout.manifest.total_cases,
         evaluable_cases: holdout.manifest.evaluable_cases,
@@ -421,32 +577,12 @@ pub fn evaluate_sealed(
         non_person_cases: holdout.manifest.non_person_cases,
         ..SealedMetrics::default()
     };
-    let mut buckets = [
-        ConfidenceBucket {
-            label: "0.93–0.95",
-            emitted: 0,
-            correct: 0,
-            wrong: 0,
-        },
-        ConfidenceBucket {
-            label: "0.95–0.97",
-            emitted: 0,
-            correct: 0,
-            wrong: 0,
-        },
-        ConfidenceBucket {
-            label: "0.97–0.99",
-            emitted: 0,
-            correct: 0,
-            wrong: 0,
-        },
-        ConfidenceBucket {
-            label: "0.99–1.00",
-            emitted: 0,
-            correct: 0,
-            wrong: 0,
-        },
-    ];
+    let mut buckets = bucket_specs.map(|spec| ConfidenceBucket {
+        label: spec.label,
+        emitted: 0,
+        correct: 0,
+        wrong: 0,
+    });
 
     for (case, decision) in holdout.cases.iter().zip(decisions) {
         if case.label_status == LabelStatus::Skip {
@@ -470,7 +606,7 @@ pub fn evaluate_sealed(
             } else {
                 metrics.wrong_greetings += 1;
             }
-            let bucket = confidence_bucket(&mut buckets, decision.confidence)?;
+            let bucket = confidence_bucket(&mut buckets, bucket_specs, decision.confidence)?;
             bucket.emitted += 1;
             if correct {
                 bucket.correct += 1;
@@ -570,6 +706,111 @@ fn source_identity(cases: &[HoldoutCase]) -> Vec<(&str, &str, &str, &str)> {
             )
         })
         .collect()
+}
+
+fn serialize_blind_annotations(rows: &[BlindAnnotationRow]) -> Result<Vec<u8>> {
+    let mut sorted = rows.to_vec();
+    sorted.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut writer = canonical_writer();
+    writer.write_record(BLIND_ANNOTATION_HEADER)?;
+    for row in sorted {
+        writer.serialize(row)?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn load_blind_annotations(
+    path: &Path,
+    source_cases: &[HoldoutCase],
+) -> Result<BTreeMap<String, AnnotationDecision>> {
+    let mut reader = csv::Reader::from_path(path)?;
+    if reader.headers()?.iter().ne(BLIND_ANNOTATION_HEADER) {
+        return Err("blind annotation CSV header does not match the exchange format".into());
+    }
+    let rows = reader
+        .deserialize::<BlindAnnotationRow>()
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if rows.len() != source_cases.len() {
+        return Err(format!(
+            "blind annotation row count differs from source: expected {}, got {}",
+            source_cases.len(),
+            rows.len()
+        )
+        .into());
+    }
+    let source_by_id = source_cases
+        .iter()
+        .map(|case| (case.id.as_str(), case))
+        .collect::<BTreeMap<_, _>>();
+    let mut decisions = BTreeMap::new();
+    for row in rows {
+        let Some(source) = source_by_id.get(row.id.as_str()) else {
+            return Err(format!("blind annotation contains unknown ID {}", row.id).into());
+        };
+        if row.display_name != source.display_name
+            || row.country_hint != source.country_hint
+            || row.locale_hint != source.locale_hint
+        {
+            return Err(format!("blind annotation mutated source fields for {}", row.id).into());
+        }
+        let decision = parse_annotation_decision(&row, &source.display_name)?;
+        if decisions.insert(row.id.clone(), decision).is_some() {
+            return Err(format!("blind annotation contains duplicate ID {}", row.id).into());
+        }
+    }
+    if decisions.len() != source_cases.len() {
+        return Err("blind annotation does not cover every source case".into());
+    }
+    Ok(decisions)
+}
+
+fn parse_annotation_decision(
+    row: &BlindAnnotationRow,
+    display_name: &str,
+) -> Result<AnnotationDecision> {
+    match row.decision.as_str() {
+        "GREETING" => {
+            if row.expected_greeting.is_empty() {
+                return Err(format!("{} has an empty GREETING label", row.id).into());
+            }
+            exact_annotation_span(display_name, &row.expected_greeting)?;
+            Ok(AnnotationDecision::Greeting(row.expected_greeting.clone()))
+        }
+        "NULL" => {
+            if !row.expected_greeting.is_empty() {
+                return Err(format!("{} has text attached to a NULL label", row.id).into());
+            }
+            Ok(AnnotationDecision::Abstain)
+        }
+        "SKIP" => {
+            if !row.expected_greeting.is_empty() {
+                return Err(format!("{} has text attached to a SKIP label", row.id).into());
+            }
+            Ok(AnnotationDecision::Skip)
+        }
+        "" => Err(format!("{} has not been annotated", row.id).into()),
+        other => Err(format!("{} has unsupported decision {other:?}", row.id).into()),
+    }
+}
+
+fn exact_annotation_span(display_name: &str, expected: &str) -> Result<SpanCandidate> {
+    let Some(start) = display_name.find(expected) else {
+        return Err("annotation greeting is not an exact span of display_name".into());
+    };
+    let end = start + expected.len();
+    validate_span(display_name, start, end, expected)?;
+    Ok(SpanCandidate {
+        start,
+        end,
+        text: expected.to_string(),
+    })
+}
+
+fn serialize_consensus_summary(summary: ConsensusSummary) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record(CONSENSUS_HEADER)?;
+    writer.serialize(summary)?;
+    Ok(writer.into_inner()?)
 }
 
 fn validate_cases(cases: &[HoldoutCase], allow_unlabeled: bool) -> Result<()> {
@@ -824,20 +1065,43 @@ fn normalize_greeting(value: &str) -> String {
 
 fn confidence_bucket(
     buckets: &mut [ConfidenceBucket; 4],
+    specs: [ConfidenceBucketSpec; 4],
     confidence: f64,
 ) -> Result<&mut ConfidenceBucket> {
-    let index = if (0.93..0.95).contains(&confidence) {
-        0
-    } else if (0.95..0.97).contains(&confidence) {
-        1
-    } else if (0.97..0.99).contains(&confidence) {
-        2
-    } else if (0.99..=1.0).contains(&confidence) {
-        3
-    } else {
-        return Err(format!("emitted confidence {confidence} is outside sealed buckets").into());
-    };
+    let index = specs
+        .iter()
+        .enumerate()
+        .find(|(index, spec)| {
+            confidence >= spec.lower
+                && if *index + 1 == specs.len() {
+                    confidence <= spec.upper
+                } else {
+                    confidence < spec.upper
+                }
+        })
+        .map(|(index, _)| index)
+        .ok_or_else(|| format!("emitted confidence {confidence} is outside sealed buckets"))?;
     Ok(&mut buckets[index])
+}
+
+fn validate_bucket_specs(threshold: f64, specs: [ConfidenceBucketSpec; 4]) -> Result<()> {
+    if specs[0].lower != threshold {
+        return Err("first sealed confidence bucket must begin at the emission threshold".into());
+    }
+    for (index, spec) in specs.iter().enumerate() {
+        if spec.label.is_empty()
+            || !spec.lower.is_finite()
+            || !spec.upper.is_finite()
+            || spec.lower >= spec.upper
+            || index > 0 && specs[index - 1].upper != spec.lower
+        {
+            return Err("sealed confidence buckets must be labeled, finite, and contiguous".into());
+        }
+    }
+    if specs[3].upper != 1.0 {
+        return Err("last sealed confidence bucket must end at 1.0".into());
+    }
+    Ok(())
 }
 
 fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
@@ -891,6 +1155,34 @@ mod tests {
         skipped.id = "case-222222222222222222222222".to_string();
         skipped.select_skip();
         vec![greeting, abstain, skipped]
+    }
+
+    fn write_source_fixture(path: &Path) -> Vec<HoldoutCase> {
+        fs::write(
+            path,
+            "display_name,country_hint,locale_hint\nAmbiguous,,\nBaris Kebab,,\nÉlodie Durand,FR,fr-FR\nМария Иванова,,\n",
+        )
+        .unwrap();
+        load_source(path).unwrap()
+    }
+
+    fn write_annotation_fixture(path: &Path, cases: &[HoldoutCase], decisions: &[(&str, &str)]) {
+        assert_eq!(cases.len(), decisions.len());
+        let rows = cases
+            .iter()
+            .zip(decisions)
+            .map(
+                |(case, &(decision, expected_greeting))| BlindAnnotationRow {
+                    id: case.id.clone(),
+                    display_name: case.display_name.clone(),
+                    country_hint: case.country_hint.clone(),
+                    locale_hint: case.locale_hint.clone(),
+                    decision: decision.to_string(),
+                    expected_greeting: expected_greeting.to_string(),
+                },
+            )
+            .collect::<Vec<_>>();
+        fs::write(path, serialize_blind_annotations(&rows).unwrap()).unwrap();
     }
 
     #[test]
@@ -977,6 +1269,188 @@ mod tests {
     }
 
     #[test]
+    fn blind_template_contains_only_source_fields_and_empty_labels() {
+        let directory = temporary_directory();
+        let source = directory.join("source.csv");
+        let template = directory.join("annotation.csv");
+        let cases = write_source_fixture(&source);
+        export_blind_annotation_template(&source, &template).unwrap();
+
+        let text = fs::read_to_string(&template).unwrap();
+        assert_eq!(text.lines().count(), cases.len() + 1);
+        for forbidden in ["confidence", "frequency", "llr", "classifier", "surname"] {
+            assert!(!text.to_lowercase().contains(forbidden));
+        }
+        let mut reader = csv::Reader::from_path(&template).unwrap();
+        let rows = reader
+            .deserialize::<BlindAnnotationRow>()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row.decision.is_empty() && row.expected_greeting.is_empty())
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn consensus_accepts_exact_agreement_and_skips_uncertainty() {
+        let directory = temporary_directory();
+        let source = directory.join("source.csv");
+        let annotation_a = directory.join("a.csv");
+        let annotation_b = directory.join("b.csv");
+        let draft = directory.join("draft.csv");
+        let summary_path = directory.join("summary.csv");
+        let cases = write_source_fixture(&source);
+        write_annotation_fixture(
+            &annotation_a,
+            &cases,
+            &[
+                ("GREETING", "Ambiguous"),
+                ("NULL", ""),
+                ("GREETING", "Élodie"),
+                ("SKIP", ""),
+            ],
+        );
+        write_annotation_fixture(
+            &annotation_b,
+            &cases,
+            &[
+                ("NULL", ""),
+                ("NULL", ""),
+                ("GREETING", "Élodie"),
+                ("GREETING", "Мария"),
+            ],
+        );
+
+        let summary =
+            merge_blind_annotations(&source, &annotation_a, &annotation_b, &draft, &summary_path)
+                .unwrap();
+        assert_eq!(
+            summary,
+            ConsensusSummary {
+                total_cases: 4,
+                greeting_agreements: 1,
+                null_agreements: 1,
+                annotator_skip_cases: 1,
+                disagreement_cases: 1,
+            }
+        );
+        let consensus = load_cases(&draft, false).unwrap();
+        assert_eq!(consensus[0].label_status, LabelStatus::Skip);
+        assert_eq!(consensus[1].label_status, LabelStatus::Abstain);
+        assert_eq!(consensus[2].expected_greeting(), Some("Élodie"));
+        assert_eq!(consensus[2].span_start, Some(0));
+        assert_eq!(consensus[2].span_end, Some("Élodie".len()));
+        assert_eq!(consensus[3].label_status, LabelStatus::Skip);
+        let summary_bytes = fs::read(&summary_path).unwrap();
+
+        let second_draft = directory.join("draft-two.csv");
+        let second_summary = directory.join("summary-two.csv");
+        merge_blind_annotations(
+            &source,
+            &annotation_a,
+            &annotation_b,
+            &second_draft,
+            &second_summary,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&draft).unwrap(), fs::read(second_draft).unwrap());
+        assert_eq!(summary_bytes, fs::read(second_summary).unwrap());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn consensus_rejects_missing_mutated_duplicate_and_nonspan_annotations() {
+        let directory = temporary_directory();
+        let source = directory.join("source.csv");
+        let cases = write_source_fixture(&source);
+        let valid = directory.join("valid.csv");
+        write_annotation_fixture(
+            &valid,
+            &cases,
+            &[("NULL", ""), ("NULL", ""), ("NULL", ""), ("NULL", "")],
+        );
+
+        let missing = directory.join("missing.csv");
+        let mut missing_rows = cases[..3]
+            .iter()
+            .map(|case| BlindAnnotationRow {
+                id: case.id.clone(),
+                display_name: case.display_name.clone(),
+                country_hint: case.country_hint.clone(),
+                locale_hint: case.locale_hint.clone(),
+                decision: "NULL".to_string(),
+                expected_greeting: String::new(),
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            &missing,
+            serialize_blind_annotations(&missing_rows).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            load_blind_annotations(&missing, &cases)
+                .unwrap_err()
+                .to_string()
+                .contains("row count differs")
+        );
+
+        let mutated = directory.join("mutated.csv");
+        missing_rows = cases
+            .iter()
+            .map(|case| BlindAnnotationRow {
+                id: case.id.clone(),
+                display_name: case.display_name.clone(),
+                country_hint: case.country_hint.clone(),
+                locale_hint: case.locale_hint.clone(),
+                decision: "NULL".to_string(),
+                expected_greeting: String::new(),
+            })
+            .collect();
+        missing_rows[0].display_name.push('!');
+        fs::write(
+            &mutated,
+            serialize_blind_annotations(&missing_rows).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            load_blind_annotations(&mutated, &cases)
+                .unwrap_err()
+                .to_string()
+                .contains("mutated source fields")
+        );
+
+        let duplicate = directory.join("duplicate.csv");
+        missing_rows[0] = missing_rows[1].clone();
+        fs::write(
+            &duplicate,
+            serialize_blind_annotations(&missing_rows).unwrap(),
+        )
+        .unwrap();
+        assert!(load_blind_annotations(&duplicate, &cases).is_err());
+
+        let nonspan = directory.join("nonspan.csv");
+        write_annotation_fixture(
+            &nonspan,
+            &cases,
+            &[
+                ("GREETING", "Not present"),
+                ("NULL", ""),
+                ("NULL", ""),
+                ("NULL", ""),
+            ],
+        );
+        assert!(
+            load_blind_annotations(&nonspan, &cases)
+                .unwrap_err()
+                .to_string()
+                .contains("not an exact span")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn punctuation_delimits_options_but_name_separators_do_not() {
         let slash = span_candidates("Jean / Sophie");
         assert!(slash.iter().any(|candidate| candidate.text == "Jean"));
@@ -1051,5 +1525,62 @@ mod tests {
             assert!(!summary.contains(forbidden));
             assert!(!buckets.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn sealed_evaluation_supports_distinct_contiguous_score_buckets() {
+        let cases = frozen_cases();
+        let sealed_bytes = serialize_cases(&cases).unwrap();
+        let holdout = FrozenHoldout {
+            manifest: manifest_for(&cases, &sealed_bytes, "test fixture"),
+            cases,
+        };
+        let specs = [
+            ConfidenceBucketSpec {
+                label: "0.70–0.80",
+                lower: 0.70,
+                upper: 0.80,
+            },
+            ConfidenceBucketSpec {
+                label: "0.80–0.90",
+                lower: 0.80,
+                upper: 0.90,
+            },
+            ConfidenceBucketSpec {
+                label: "0.90–0.95",
+                lower: 0.90,
+                upper: 0.95,
+            },
+            ConfidenceBucketSpec {
+                label: "0.95–1.00",
+                lower: 0.95,
+                upper: 1.00,
+            },
+        ];
+        let evaluation = evaluate_sealed_with_buckets(
+            &holdout,
+            &[
+                Some(SealedDecision {
+                    greeting_candidate: Some("Élodie".to_string()),
+                    confidence: 0.70,
+                }),
+                Some(SealedDecision {
+                    greeting_candidate: Some("Baris".to_string()),
+                    confidence: 1.00,
+                }),
+                None,
+            ],
+            0.70,
+            specs,
+        )
+        .unwrap();
+        assert_eq!(evaluation.confidence_buckets[0].correct, 1);
+        assert_eq!(evaluation.confidence_buckets[3].wrong, 1);
+
+        let mut invalid = specs;
+        invalid[1].lower = 0.81;
+        assert!(
+            evaluate_sealed_with_buckets(&holdout, &[None, None, None], 0.70, invalid).is_err()
+        );
     }
 }

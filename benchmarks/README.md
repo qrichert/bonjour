@@ -265,13 +265,32 @@ not held-out quality evidence; C2 now requires a fresh disjoint
 REAL_PROXY_V2. Full methodology and limitations are recorded in
 [`name-eval/README.md`](name-eval/README.md).
 
+The next evaluation layer draws a fixed 2,000-row REAL_PROXY_V2 after
+excluding every exact V1 display-name value. Two independent,
+classifier-blind annotations are merged mechanically: exact span or NULL
+agreement is evaluable, while every disagreement or annotator skip
+remains skipped. After checksum freezing, a digest-acknowledged command
+compares frozen C1 and C2 on the identical agreed subset and writes only
+aggregate metrics and algorithm-specific score buckets. This can test
+fresh proxy generalization, but model agreement is not human-validated
+worldwide ground truth and may select an easier subset.
+
+The first frozen V2 comparison retained 1,496 exact-agreement cases and
+skipped 504 disagreements, annotator skips, or unusable spans. C1
+emitted 43 greetings (39 correct, 4 wrong; 3.20% recall), while frozen
+C2 emitted 208 (206 correct, 2 wrong; 16.93% recall). Neither emitted on
+an expected-NULL case. This supports C2's relative improvement on fresh
+proxy evidence, not a 99% worldwide-production precision claim; V2 is
+not threshold-tuning data.
+
 The holdout workflow accepts only display name plus optional country and
 locale hints, stores exact original-text spans, supports intentional
 abstention and skipped labels, and freezes deterministic serialization
-with a SHA-256 manifest before inference. Labeling cannot access C1 or
-corpus evidence. Sealed evaluation is restricted to C1 at `0.93` and
-emits aggregate metrics and coarse confidence buckets only. No real
-holdout or personal-data source is included in the repository.
+with a SHA-256 manifest before inference. Labeling cannot access
+classifier or corpus evidence. The original sealed mode remains frozen
+to C1 at `0.93`; the explicit V2 comparison mode evaluates frozen C1 and
+C2 together. Both emit aggregate metrics and coarse score buckets only.
+No real holdout or personal-data source is included in the repository.
 
 ## Current storage choice
 

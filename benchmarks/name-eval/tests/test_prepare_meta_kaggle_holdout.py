@@ -35,6 +35,13 @@ def write_users(path: Path, names: list[str]) -> None:
             )
 
 
+def write_holdout_source(path: Path, names: list[str]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as destination:
+        writer = csv.writer(destination, lineterminator="\n")
+        writer.writerow(SCRIPT.OUTPUT_HEADER)
+        writer.writerows((name, "", "") for name in names)
+
+
 class PrepareMetaKaggleHoldoutTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -118,6 +125,74 @@ class PrepareMetaKaggleHoldoutTests(unittest.TestCase):
         write_users(self.source, ["", "Only One"])
         with self.assertRaisesRegex(ValueError, "only 1 nonblank"):
             self.prepare("small", sample_size=2)
+
+    def test_exact_exclusions_are_deterministic_and_preserve_remaining_duplicates(
+        self,
+    ) -> None:
+        write_users(self.source, ["V1", "V1", "Repeat", "Repeat", "Other", "Third"])
+        exclusion = self.directory / "v1-source.csv"
+        write_holdout_source(exclusion, ["V1", "V1"])
+
+        first_output = self.directory / "v2-one.csv"
+        first_provenance = self.directory / "v2-one.json"
+        second_output = self.directory / "v2-two.csv"
+        second_provenance = self.directory / "v2-two.json"
+        source_before = hashlib.sha256(self.source.read_bytes()).hexdigest()
+
+        first = SCRIPT.prepare(
+            self.source,
+            first_output,
+            first_provenance,
+            sample_size=4,
+            rng_seed=0x5632,
+            exclude_source_paths=[exclusion],
+        )
+        SCRIPT.prepare(
+            self.source,
+            second_output,
+            second_provenance,
+            sample_size=4,
+            rng_seed=0x5632,
+            exclude_source_paths=[exclusion],
+        )
+
+        self.assertEqual(first_output.read_bytes(), second_output.read_bytes())
+        with first_output.open(encoding="utf-8", newline="") as source:
+            names = [row["display_name"] for row in csv.DictReader(source)]
+        self.assertNotIn("V1", names)
+        self.assertEqual(names.count("Repeat"), 2)
+        self.assertEqual(first["nonblank_rows_before_exact_exclusions"], 6)
+        self.assertEqual(first["excluded_exact_display_name_rows"], 2)
+        self.assertEqual(first["excluded_unique_display_names"], 1)
+        self.assertEqual(first["eligible_nonblank_rows"], 4)
+        self.assertEqual(first["exclusion_sources"][0]["rows"], 2)
+        self.assertEqual(first["exclusion_sources"][0]["unique_display_names"], 1)
+        self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), source_before)
+
+    def test_rejects_bad_exclusion_schema_and_insufficient_remaining_population(
+        self,
+    ) -> None:
+        write_users(self.source, ["One", "Two", "Three"])
+        exclusion = self.directory / "exclusion.csv"
+        exclusion.write_text("display_name\nOne\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unsupported header"):
+            SCRIPT.prepare(
+                self.source,
+                self.directory / "bad-output.csv",
+                self.directory / "bad-provenance.json",
+                sample_size=1,
+                exclude_source_paths=[exclusion],
+            )
+
+        write_holdout_source(exclusion, ["One", "Two"])
+        with self.assertRaisesRegex(ValueError, "only 1 nonblank"):
+            SCRIPT.prepare(
+                self.source,
+                self.directory / "small-output.csv",
+                self.directory / "small-provenance.json",
+                sample_size=2,
+                exclude_source_paths=[exclusion],
+            )
 
 
 if __name__ == "__main__":

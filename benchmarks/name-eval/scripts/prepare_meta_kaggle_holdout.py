@@ -81,6 +81,16 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_RNG_SEED,
         help=f"RNG seed in decimal or 0x notation (default: 0x{DEFAULT_RNG_SEED:08X})",
     )
+    parser.add_argument(
+        "--exclude-source",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "minimal holdout source CSV whose exact display-name values must "
+            "be excluded; may be repeated"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -96,12 +106,16 @@ def sample_display_names(
     source_path: Path,
     sample_size: int,
     rng_seed: int,
+    excluded_display_names: set[str] | None = None,
 ) -> tuple[list[str], dict[str, int | str]]:
+    excluded_display_names = excluded_display_names or set()
     rng = random.Random(rng_seed)
     reservoir: list[str] = []
     source_rows = 0
+    nonblank_rows = 0
     eligible_rows = 0
     excluded_blank_rows = 0
+    excluded_exact_rows = 0
 
     with source_path.open("rb") as binary_source:
         hashing_source = HashingReader(binary_source)
@@ -126,6 +140,11 @@ def sample_display_names(
                     excluded_blank_rows += 1
                     continue
 
+                nonblank_rows += 1
+                if display_name in excluded_display_names:
+                    excluded_exact_rows += 1
+                    continue
+
                 eligible_rows += 1
                 if len(reservoir) < sample_size:
                     reservoir.append(display_name)
@@ -145,8 +164,10 @@ def sample_display_names(
 
     return reservoir, {
         "source_rows": source_rows,
+        "nonblank_rows_before_exact_exclusions": nonblank_rows,
         "eligible_nonblank_rows": eligible_rows,
         "excluded_blank_or_whitespace_rows": excluded_blank_rows,
+        "excluded_exact_display_name_rows": excluded_exact_rows,
         "source_sha256_before": source_sha256_before,
     }
 
@@ -165,7 +186,7 @@ def write_output(path: Path, display_names: list[str]) -> None:
         os.fsync(destination.fileno())
 
 
-def write_json(path: Path, value: dict[str, int | str]) -> None:
+def write_json(path: Path, value: dict[str, object]) -> None:
     with path.open("w", encoding="utf-8", newline="") as destination:
         json.dump(value, destination, ensure_ascii=False, indent=2, sort_keys=True)
         destination.write("\n")
@@ -204,16 +225,65 @@ def publish_pair(
         raise
 
 
+def load_exclusion_sources(
+    paths: list[Path],
+) -> tuple[set[str], list[dict[str, object]]]:
+    excluded: set[str] = set()
+    provenance: list[dict[str, object]] = []
+    for path in paths:
+        resolved = path.resolve(strict=True)
+        if not resolved.is_file():
+            raise ValueError(f"not a file: {resolved}")
+        with resolved.open(encoding="utf-8", newline="") as source:
+            reader = csv.reader(source)
+            header = tuple(next(reader, ()))
+            if header != OUTPUT_HEADER:
+                raise ValueError(
+                    f"exclusion source {resolved} has unsupported header: "
+                    f"expected {OUTPUT_HEADER!r}, got {header!r}"
+                )
+            rows = 0
+            source_values: set[str] = set()
+            for row in reader:
+                rows += 1
+                if len(row) != len(OUTPUT_HEADER):
+                    raise ValueError(
+                        f"{resolved}:{reader.line_num}: expected "
+                        f"{len(OUTPUT_HEADER)} fields, got {len(row)}"
+                    )
+                display_name = row[0]
+                if not display_name.strip():
+                    raise ValueError(
+                        f"{resolved}:{reader.line_num}: exclusion source contains "
+                        "an empty display_name"
+                    )
+                source_values.add(display_name)
+        excluded.update(source_values)
+        provenance.append(
+            {
+                "file": resolved.name,
+                "size_bytes": resolved.stat().st_size,
+                "sha256": sha256_file(resolved),
+                "rows": rows,
+                "unique_display_names": len(source_values),
+            }
+        )
+    return excluded, provenance
+
+
 def prepare(
     source_path: Path,
     output_path: Path,
     provenance_path: Path,
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     rng_seed: int = DEFAULT_RNG_SEED,
-) -> dict[str, int | str]:
+    exclude_source_paths: list[Path] | None = None,
+) -> dict[str, object]:
     source_path = source_path.resolve(strict=True)
     output_path = output_path.absolute()
     provenance_path = provenance_path.absolute()
+    exclude_source_paths = exclude_source_paths or []
+    resolved_exclusions = [path.resolve(strict=True) for path in exclude_source_paths]
 
     if not source_path.is_file():
         raise ValueError(f"not a file: {source_path}")
@@ -225,17 +295,22 @@ def prepare(
         raise ValueError(f"output parent does not exist: {output_path.parent}")
     if not provenance_path.parent.is_dir():
         raise ValueError(f"provenance parent does not exist: {provenance_path.parent}")
-    if len({source_path, output_path, provenance_path}) != 3:
-        raise ValueError("input, output, and provenance paths must differ")
+    all_paths = [source_path, output_path, provenance_path, *resolved_exclusions]
+    if len(set(all_paths)) != len(all_paths):
+        raise ValueError("input, outputs, and exclusion sources must all differ")
     if os.path.lexists(output_path):
         raise FileExistsError(f"refusing to overwrite: {output_path}")
     if os.path.lexists(provenance_path):
         raise FileExistsError(f"refusing to overwrite: {provenance_path}")
 
+    excluded_display_names, exclusion_provenance = load_exclusion_sources(
+        resolved_exclusions
+    )
     display_names, statistics = sample_display_names(
         source_path,
         sample_size,
         rng_seed,
+        excluded_display_names,
     )
     output_temporary = temporary_path(output_path)
     provenance_temporary = temporary_path(provenance_path)
@@ -246,7 +321,7 @@ def prepare(
         if source_sha256_after != statistics["source_sha256_before"]:
             raise RuntimeError("source checksum changed while preparing holdout")
 
-        provenance: dict[str, int | str] = {
+        provenance: dict[str, object] = {
             "format_version": 1,
             "source_dataset": "kaggle/meta-kaggle",
             "source_file": source_path.name,
@@ -254,11 +329,22 @@ def prepare(
             "source_sha256_before": statistics["source_sha256_before"],
             "source_sha256_after": source_sha256_after,
             "source_rows": statistics["source_rows"],
+            "nonblank_rows_before_exact_exclusions": statistics[
+                "nonblank_rows_before_exact_exclusions"
+            ],
             "eligible_nonblank_rows": statistics["eligible_nonblank_rows"],
             "excluded_blank_or_whitespace_rows": statistics[
                 "excluded_blank_or_whitespace_rows"
             ],
-            "sample_method": "uniform reservoir sample over eligible user rows",
+            "excluded_exact_display_name_rows": statistics[
+                "excluded_exact_display_name_rows"
+            ],
+            "excluded_unique_display_names": len(excluded_display_names),
+            "exclusion_sources": exclusion_provenance,
+            "sample_method": (
+                "uniform reservoir sample over nonblank user rows after exact "
+                "display-name exclusions"
+            ),
             "sample_size": sample_size,
             "rng": "Python random.Random (MT19937)",
             "rng_seed_decimal": rng_seed,
@@ -292,6 +378,7 @@ def main() -> None:
             args.provenance_json,
             args.sample_size,
             args.seed,
+            args.exclude_source,
         )
     except (OSError, ValueError, RuntimeError) as error:
         raise SystemExit(f"error: {error}") from error
@@ -301,6 +388,14 @@ def main() -> None:
     print(
         "Excluded blank/whitespace rows: "
         f"{provenance['excluded_blank_or_whitespace_rows']:,}"
+    )
+    print(
+        "Excluded exact display-name rows: "
+        f"{provenance['excluded_exact_display_name_rows']:,}"
+    )
+    print(
+        "Excluded unique display names: "
+        f"{provenance['excluded_unique_display_names']:,}"
     )
     print(f"Sample rows: {provenance['sample_size']:,}")
     print(f"RNG seed: {provenance['rng_seed_hex']}")

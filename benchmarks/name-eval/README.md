@@ -402,6 +402,143 @@ independently labeled, disjoint REAL_PROXY_V2 before any generalization
 or precision claim. Candidate generation, ranking, ordering,
 punctuation, and handle segmentation remain separate future experiments.
 
+### REAL_PROXY_V2 blind agreement workflow
+
+REAL_PROXY_V2 uses another fixed 2,000-row Meta Kaggle sample. It is
+value-disjoint from V1: every source row whose exact `DisplayName`
+occurs in the V1 source is excluded before reservoir sampling. This is
+stronger than row-level disjointness and avoids retaining Kaggle account
+IDs, although removing every repeated V1 value slightly changes the
+remaining population.
+
+Generate V2 with fixed seed `0x5245414C5F5632`:
+
+```console
+python3 benchmarks/name-eval/scripts/prepare_meta_kaggle_holdout.py \
+  /path/to/Users.csv \
+  _wip/real-proxy-v2/source.csv \
+  _wip/real-proxy-v2/source.provenance.json \
+  --seed=0x5245414C5F5632 \
+  --exclude-source=_wip/source.csv
+```
+
+The aggregate provenance records the source and exclusion-file hashes,
+unique excluded values, excluded source-row occurrences, remaining
+eligible population, RNG seed, and output hash. It contains no display
+names or account identifiers. The source and exclusion files are
+checksum-verified and never modified.
+
+Export two classifier-blind annotation templates:
+
+```console
+cargo run --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-holdout -- \
+  export-blind \
+  _wip/real-proxy-v2/source.csv \
+  _wip/real-proxy-v2/annotation-a.csv
+
+cargo run --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-holdout -- \
+  export-blind \
+  _wip/real-proxy-v2/source.csv \
+  _wip/real-proxy-v2/annotation-b.csv
+```
+
+Each annotator receives only:
+
+```csv
+id,display_name,country_hint,locale_hint,decision,expected_greeting
+```
+
+`decision` must be exactly `GREETING`, `NULL`, or `SKIP`.
+`expected_greeting` must be empty for `NULL`/`SKIP`; for `GREETING` it
+must reproduce an exact contiguous UTF-8 span of the original display
+name. The two files must be completed independently without classifier
+results, confidence, corpus membership, frequencies, or role evidence.
+
+Merge them mechanically:
+
+```console
+cargo run --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-holdout -- \
+  consensus \
+  _wip/real-proxy-v2/source.csv \
+  _wip/real-proxy-v2/annotation-a.csv \
+  _wip/real-proxy-v2/annotation-b.csv \
+  _wip/real-proxy-v2/consensus-draft.csv \
+  _wip/real-proxy-v2/consensus-summary.csv
+```
+
+Identical greeting spans become greeting labels and `NULL` + `NULL`
+becomes expected abstention. Any `SKIP` or disagreement becomes `SKIP`,
+with no manual guess. The tool rejects missing/duplicate IDs,
+source-field mutation, unsupported decisions, non-spans, and existing
+outputs. The aggregate summary reports greeting agreement, NULL
+agreement, annotator-skip, and disagreement counts. This agreement
+filter can select an easier subset, and independent models can still
+share cultural mistakes; V2 remains proxy evidence rather than human
+ground truth.
+
+Freeze the consensus before loading the classifier artifact:
+
+```console
+cargo run --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-holdout -- \
+  freeze \
+  _wip/real-proxy-v2/consensus-draft.csv \
+  _wip/real-proxy-v2/sealed.csv \
+  _wip/real-proxy-v2/sealed.manifest.csv \
+  --provenance="REAL_PROXY_V2: disjoint Meta Kaggle sample; exact agreement of two independent classifier-blind annotations"
+```
+
+Then substitute the printed frozen digest and run the paired comparison
+once:
+
+```console
+cargo run --release --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-eval -- \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-real-proxy-v2 \
+  --compare-sealed-c1-c2-sha256=FROZEN_SHA256 \
+  --sealed=_wip/real-proxy-v2/sealed.csv \
+  --sealed-manifest=_wip/real-proxy-v2/sealed.manifest.csv
+```
+
+The digest must match the verified manifest. The command evaluates
+frozen C1 at `0.93` and frozen C2 at `0.78975882405736963` on exactly
+the same evaluable cases. It writes only
+`sealed_comparison_summary.csv`,
+`sealed_comparison_confidence_buckets.csv`, and `report.md`; it does not
+write cases, predictions, failures, traces, threshold sweeps, or
+changed-row comparisons. C1 and C2 scores are different quantities, so
+their coarse buckets are reported separately and are diagnostic only. Do
+not inspect V2 failures or use its aggregates to retune either frozen
+algorithm.
+
+The first V2 sample was frozen before inference with SHA-256
+`7d704a646b8dd9fa3820f88b9504d4397b676af9435532cf2da9befda7663a73`. Of
+2,000 source rows, the two annotations agreed on 1,217 exact greeting
+spans and 279 expected abstentions. Another 416 rows had an annotator
+skip or unusable non-exact span and 88 had different usable labels, so
+the frozen comparison evaluated 1,496 rows and skipped 504.
+
+The single aggregate-only comparison produced:
+
+| Algorithm                   | Emitted | Correct | Wrong | Expected-NULL emissions | Observed precision | Recall | Abstention |
+| --------------------------- | ------: | ------: | ----: | ----------------------: | -----------------: | -----: | ---------: |
+| C1 at `0.93`                |      43 |      39 |     4 |                       0 |             90.70% |  3.20% |     97.13% |
+| C2 at `0.78975882405736963` |     208 |     206 |     2 |                       0 |             99.04% | 16.93% |     86.10% |
+
+C2 therefore emitted about 4.8 times as often, recovered about 5.3 times
+C1's greeting recall, and halved observed wrong emissions on the same
+agreed subset. Of C2's 208 emissions, 144 scored `0.789759–0.85` (142
+correct, 2 wrong) and 64 scored `0.85–0.90` (all 64 correct); none
+scored above `0.90`. These data validate the direction of the C2
+emission policy on this fresh proxy, but 208 emissions and
+machine-agreed labels do not establish 99% worldwide or production
+precision. V2 is now frozen comparison evidence and must not be used to
+retune C2.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.
