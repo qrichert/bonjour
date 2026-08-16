@@ -687,6 +687,93 @@ mistakes, and Meta Kaggle is not guaranteed to match the product
 population. These figures are relative proxy evidence, not worldwide or
 production-quality claims.
 
+### C3.1 segmented-candidate provenance gate
+
+After the aggregate V3 checkpoint above was preserved, V3 was
+deliberately spent only on the C2-to-C3 delta. The diagnostic reproduces
+the frozen C2/C3 V1, V3, and VALIDATION metrics before writing any
+row-level development output. It records the original input, expected
+span, both winners and emissions, handle-boundary mechanism, candidate
+length, candidate and emission scores, role LLR, winner margin,
+reliability, counts, and candidate count.
+
+On spent V3, C2 abstained while C3 emitted in 18 cases. Seventeen
+matched the proxy labels and one digit-boundary candidate was an
+expected-NULL emission. The 18 new emissions comprised:
+
+| Segmentation mechanism | Correct | Wrong greeting | Expected-NULL emission |
+| ---------------------- | ------: | -------------: | ---------------------: |
+| Lower-to-upper         |      13 |              0 |                      0 |
+| Digit                  |       2 |              0 |                      1 |
+| Dot                    |       1 |              0 |                      0 |
+| Underscore             |       1 |              0 |                      0 |
+
+The pre-threshold winner changed in 175 V3 cases, but 157 of those new
+winners still remained below the frozen C2 gate. On spent V1, all 27
+C3-only emissions matched the proxy labels: 13 lower-to-upper, 9 digit,
+4 underscore, and 1 mixed. Because only one unsafe delta exists and V1
+contains correct digit-derived emissions, the data do not support
+separate mechanism-specific constants.
+
+C3.1 freezes one simple provenance rule:
+
+```text
+native C3 winner:
+    emission_score = frozen C2 score
+
+handle-segment C3 winner:
+    emission_score = frozen C2 score - 0.025
+```
+
+Candidate generation, ranking, role evidence, organization vetoes, and
+gender evidence are unchanged. The public threshold remains
+`0.78975882405736963`; the effective segmented-winner requirement is
+`0.8147588240573696`. The penalty is independent of boundary mechanism
+and does not affect exact or compositional winners.
+
+Reproduce the spent diagnostics separately for V3 and V1:
+
+```console
+cargo run --release --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-eval -- \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-c31-v3-diagnostic \
+  --develop-c31-from-spent-holdout-sha256=d70e4d4b2ed7e49bed09dc1e8d2ba60ade8a752e3b86c772e964bd64883ee6fe \
+  --sealed=_wip/real-proxy-v3/sealed.csv \
+  --sealed-manifest=_wip/real-proxy-v3/sealed.manifest.csv
+
+cargo run --release --manifest-path benchmarks/name-eval/Cargo.toml \
+  --bin name-eval -- \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-c31-v1-diagnostic \
+  --develop-c31-from-spent-holdout-sha256=de95213f27fc1849032ee6788c8f16d7d515c1a991ae8b2e8414b7b155814c4e \
+  --sealed=_wip/real-proxy-v1/sealed.csv \
+  --sealed-manifest=_wip/real-proxy-v1/sealed.manifest.csv
+```
+
+The selected development checkpoints are:
+
+| Population        | Algorithm | Emitted | Correct | Wrong | Expected-NULL emissions | Observed precision | Recall |
+| ----------------- | --------- | ------: | ------: | ----: | ----------------------: | -----------------: | -----: |
+| REAL_PROXY_V1_DEV | C2        |     207 |     207 |     0 |                       0 |            100.00% | 12.81% |
+| REAL_PROXY_V1_DEV | C3        |     234 |     234 |     0 |                       0 |            100.00% | 14.48% |
+| REAL_PROXY_V1_DEV | C3.1      |     226 |     226 |     0 |                       0 |            100.00% | 13.99% |
+| REAL_PROXY_V3_DEV | C2        |     205 |     200 |     5 |                       2 |             97.56% | 16.23% |
+| REAL_PROXY_V3_DEV | C3        |     223 |     217 |     6 |                       3 |             97.31% | 17.61% |
+| REAL_PROXY_V3_DEV | C3.1      |     219 |     214 |     5 |                       2 |             97.72% | 17.37% |
+| VALIDATION        | C2        |  14,686 |  14,686 |     0 |                       0 |            100.00% | 37.44% |
+| VALIDATION        | C3        |  14,686 |  14,686 |     0 |                       0 |            100.00% | 37.44% |
+| VALIDATION        | C3.1      |  14,686 |  14,686 |     0 |                       0 |            100.00% | 37.44% |
+
+C3.1 retains 14 of C3's 17 additional correct V3 emissions while
+returning aggregate wrong and expected-NULL emission counts to C2's V3
+checkpoint. That is a spent-data selection result, not evidence that
+C3.1 generalizes or matches C2's safety. C2 remains the current
+production candidate; C3 and C3.1 remain experimental. C3.1 is frozen
+and requires a fresh, disjoint REAL_PROXY_V4 comparison before any
+promotion claim. REAL_PROXY_V2 remains untouched by this development
+pass.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.

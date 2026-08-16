@@ -218,6 +218,7 @@ struct RoleCandidate {
     compositional_evidence: f64,
     remainder_evidence: f64,
     origin: CandidateOrigin,
+    segmentation_mechanism: Option<HandleSegmentationMechanism>,
     lookup_query: Option<String>,
     lookup_mode: Option<LookupMode>,
     component_lookup_modes: Option<[LookupMode; 2]>,
@@ -230,6 +231,33 @@ enum CandidateOrigin {
     ComposedWhitespace,
     ComposedHyphen,
     HandleSegment,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HandleSegmentationMechanism {
+    Digit,
+    Underscore,
+    Dot,
+    LowerUpper,
+    Mixed,
+}
+
+impl HandleSegmentationMechanism {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Digit => "digit",
+            Self::Underscore => "underscore",
+            Self::Dot => "dot",
+            Self::LowerUpper => "lower_to_upper",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HandleSegment {
+    display: String,
+    mechanism: HandleSegmentationMechanism,
 }
 
 impl CandidateOrigin {
@@ -281,6 +309,7 @@ pub struct CandidateDiagnostic {
     pub compositional_evidence: f64,
     pub remainder_evidence: f64,
     pub origin: &'static str,
+    pub segmentation_mechanism: Option<&'static str>,
     pub lookup_query: Option<String>,
     pub lookup_mode: Option<&'static str>,
     pub left_lookup_mode: Option<&'static str>,
@@ -331,6 +360,7 @@ pub struct WinnerFeatures {
     pub global_given_count: u64,
     pub global_surname_count: u64,
     pub candidate_origin: &'static str,
+    pub segmentation_mechanism: Option<&'static str>,
     pub candidate_count: usize,
     pub alphabetic_length: usize,
     pub generic_organization_marker: bool,
@@ -348,6 +378,11 @@ pub struct C2EmissionConfig {
     pub threshold: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct C31EmissionConfig {
+    pub handle_segment_penalty: f64,
+}
+
 /// Frozen from REAL_PROXY_V1_DEV plus synthetic VALIDATION. This is a
 /// development operating point, not a real-world quality claim.
 pub const ALGORITHM_C2: C2EmissionConfig = C2EmissionConfig {
@@ -358,6 +393,13 @@ pub const ALGORITHM_C2: C2EmissionConfig = C2EmissionConfig {
     margin_scale: 0.5,
     minimum_candidate_letters: 3,
     threshold: 0.789_758_824_057_369_6,
+};
+
+/// Frozen from spent REAL_PROXY_V1_DEV, spent REAL_PROXY_V3, and synthetic
+/// VALIDATION. This is a development operating point requiring fresh V4
+/// evaluation, not a real-world quality claim.
+pub const ALGORITHM_C31: C31EmissionConfig = C31EmissionConfig {
+    handle_segment_penalty: 0.025,
 };
 
 pub fn infer_prethreshold(
@@ -596,6 +638,7 @@ fn role_candidate_from_lookup(
         compositional_evidence: 0.0,
         remainder_evidence: 0.0,
         origin,
+        segmentation_mechanism: None,
         lookup_query: Some(lookup.query),
         lookup_mode: Some(lookup.mode),
         component_lookup_modes: None,
@@ -611,8 +654,9 @@ fn add_handle_segment_candidates(
     candidates: &mut Vec<RoleCandidate>,
 ) {
     for (start, token) in tokens.iter().enumerate() {
-        for display in conservative_handle_segments(token) {
-            if display
+        for segment in conservative_handle_segments(token) {
+            if segment
+                .display
                 .chars()
                 .filter(|character| character.is_alphabetic())
                 .count()
@@ -621,28 +665,30 @@ fn add_handle_segment_candidates(
                     candidate.start == start
                         && candidate.length == 1
                         && canonicalize(&candidate.display).to_lowercase()
-                            == canonicalize(&display).to_lowercase()
+                            == canonicalize(&segment.display).to_lowercase()
                 })
             {
                 continue;
             }
-            let Some(lookup) = lookup_match_with_variants(corpus, &display, country) else {
+            let Some(lookup) = lookup_match_with_variants(corpus, &segment.display, country) else {
                 continue;
             };
-            candidates.push(role_candidate_from_lookup(
+            let mut candidate = role_candidate_from_lookup(
                 config,
-                display,
+                segment.display,
                 start,
                 1,
                 CandidateOrigin::HandleSegment,
                 lookup,
                 tokens.len() == 1,
-            ));
+            );
+            candidate.segmentation_mechanism = Some(segment.mechanism);
+            candidates.push(candidate);
         }
     }
 }
 
-fn conservative_handle_segments(token: &str) -> Vec<String> {
+fn conservative_handle_segments(token: &str) -> Vec<HandleSegment> {
     if token.chars().any(|character| {
         !(character.is_alphabetic()
             || is_combining_mark(character)
@@ -652,42 +698,68 @@ fn conservative_handle_segments(token: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut explicit_parts = Vec::new();
+    struct ExplicitPart<'a> {
+        display: &'a str,
+        left_boundary: Option<HandleSegmentationMechanism>,
+        right_boundary: Option<HandleSegmentationMechanism>,
+    }
+
+    let mut explicit_parts = Vec::<ExplicitPart<'_>>::new();
     let mut part_start = 0;
+    let mut left_boundary = None;
     let mut explicit_boundary = false;
     for (index, character) in token.char_indices() {
-        if character.is_ascii_digit() || matches!(character, '_' | '.') {
-            explicit_boundary = true;
-            if part_start < index {
-                explicit_parts.push(&token[part_start..index]);
-            }
-            part_start = index + character.len_utf8();
+        let boundary = if character.is_ascii_digit() {
+            Some(HandleSegmentationMechanism::Digit)
+        } else if character == '_' {
+            Some(HandleSegmentationMechanism::Underscore)
+        } else if character == '.' {
+            Some(HandleSegmentationMechanism::Dot)
+        } else {
+            None
+        };
+        let Some(boundary) = boundary else {
+            continue;
+        };
+        explicit_boundary = true;
+        if part_start < index {
+            explicit_parts.push(ExplicitPart {
+                display: &token[part_start..index],
+                left_boundary,
+                right_boundary: Some(boundary),
+            });
         }
+        part_start = index + character.len_utf8();
+        left_boundary = Some(boundary);
     }
     if part_start < token.len() {
-        explicit_parts.push(&token[part_start..]);
+        explicit_parts.push(ExplicitPart {
+            display: &token[part_start..],
+            left_boundary,
+            right_boundary: None,
+        });
     }
 
     let mut segments = Vec::new();
     let mut camel_boundary = false;
     for part in explicit_parts {
-        let mut part_segments = Vec::new();
+        let mut part_segments = Vec::<&str>::new();
         let mut part_has_camel_boundary = false;
         let mut segment_start = 0;
         let mut previous = None;
-        for (index, character) in part.char_indices() {
+        for (index, character) in part.display.char_indices() {
             if previous.is_some_and(char::is_lowercase) && character.is_uppercase() {
                 camel_boundary = true;
                 part_has_camel_boundary = true;
                 if segment_start < index {
-                    part_segments.push(part[segment_start..index].to_string());
+                    part_segments.push(&part.display[segment_start..index]);
                 }
                 segment_start = index;
             }
             previous = Some(character);
         }
-        if segment_start < part.len() {
-            part_segments.push(part[segment_start..].to_string());
+        if segment_start < part.display.len() {
+            part_segments.push(&part.display[segment_start..]);
         }
         // A trailing all-uppercase fragment is indistinguishable from a
         // credential, club marker, or handle suffix (`PrincessFC`). Treat the
@@ -699,7 +771,28 @@ fn conservative_handle_segments(token: &str) -> Vec<String> {
         {
             continue;
         }
-        segments.extend(part_segments);
+        let last_index = part_segments.len().saturating_sub(1);
+        for (index, display) in part_segments.into_iter().enumerate() {
+            let left = if index == 0 {
+                part.left_boundary
+            } else {
+                Some(HandleSegmentationMechanism::LowerUpper)
+            };
+            let right = if index == last_index {
+                part.right_boundary
+            } else {
+                Some(HandleSegmentationMechanism::LowerUpper)
+            };
+            let mechanism = match (left, right) {
+                (Some(left), Some(right)) if left != right => HandleSegmentationMechanism::Mixed,
+                (Some(mechanism), _) | (_, Some(mechanism)) => mechanism,
+                (None, None) => continue,
+            };
+            segments.push(HandleSegment {
+                display: display.to_string(),
+                mechanism,
+            });
+        }
     }
 
     if !explicit_boundary && !camel_boundary {
@@ -707,7 +800,7 @@ fn conservative_handle_segments(token: &str) -> Vec<String> {
     }
     segments
         .into_iter()
-        .filter(|segment| candidate_is_eligible(segment))
+        .filter(|segment| candidate_is_eligible(&segment.display))
         .collect()
 }
 
@@ -910,6 +1003,7 @@ fn composed_candidate(
         compositional_evidence,
         remainder_evidence: 0.0,
         origin,
+        segmentation_mechanism: None,
         lookup_query: Some(format!("{} + {}", left.lookup_query, right.lookup_query)),
         lookup_mode: None,
         component_lookup_modes: Some(component_lookup_modes),
@@ -994,6 +1088,7 @@ pub fn winner_features(diagnostic: &RoleInferenceDiagnostic) -> Option<WinnerFea
         global_given_count: winner.global_given_count,
         global_surname_count: winner.global_surname_count,
         candidate_origin: winner.origin,
+        segmentation_mechanism: winner.segmentation_mechanism,
         candidate_count: diagnostic.candidates.len(),
         alphabetic_length: selected
             .chars()
@@ -1046,6 +1141,24 @@ pub fn c2_inference_from_diagnostic(
     inference.confidence = winner_features(diagnostic)
         .as_ref()
         .map_or(0.0, |features| c2_decision_score(features, config));
+    inference
+}
+
+pub fn c31_inference_from_diagnostic(
+    diagnostic: &RoleInferenceDiagnostic,
+    c2_config: C2EmissionConfig,
+    c31_config: C31EmissionConfig,
+) -> RawInference {
+    debug_assert!(c31_config.handle_segment_penalty >= 0.0);
+    debug_assert!(c31_config.handle_segment_penalty.is_finite());
+    let mut inference = c2_inference_from_diagnostic(diagnostic, c2_config);
+    if winner_features(diagnostic)
+        .as_ref()
+        .is_some_and(|features| features.candidate_origin == "handle_segment")
+    {
+        inference.confidence =
+            (inference.confidence - c31_config.handle_segment_penalty).clamp(0.0, 1.0);
+    }
     inference
 }
 
@@ -1143,6 +1256,9 @@ fn candidate_diagnostic(candidate: RoleCandidate, token_count: usize) -> Candida
         compositional_evidence: candidate.compositional_evidence,
         remainder_evidence: candidate.remainder_evidence,
         origin: candidate.origin.as_str(),
+        segmentation_mechanism: candidate
+            .segmentation_mechanism
+            .map(HandleSegmentationMechanism::as_str),
         lookup_query: candidate.lookup_query,
         lookup_mode: candidate.lookup_mode.map(LookupMode::as_str),
         left_lookup_mode: left_lookup_mode.map(LookupMode::as_str),
@@ -1645,19 +1761,17 @@ mod tests {
 
     #[test]
     fn c3_segments_only_explicit_conservative_handle_boundaries() {
-        assert_eq!(conservative_handle_segments("Quentin42"), ["Quentin"]);
-        assert_eq!(
-            conservative_handle_segments("Jean.Dupont_2024"),
-            ["Jean", "Dupont"]
-        );
-        assert_eq!(
-            conservative_handle_segments("ÉlodieMartin"),
-            ["Élodie", "Martin"]
-        );
-        assert_eq!(
-            conservative_handle_segments("Fatima-ZahraCarla1"),
-            ["Fatima-Zahra", "Carla"]
-        );
+        fn displays(input: &str) -> Vec<String> {
+            conservative_handle_segments(input)
+                .into_iter()
+                .map(|segment| segment.display)
+                .collect()
+        }
+
+        assert_eq!(displays("Quentin42"), ["Quentin"]);
+        assert_eq!(displays("Jean.Dupont_2024"), ["Jean", "Dupont"]);
+        assert_eq!(displays("ÉlodieMartin"), ["Élodie", "Martin"]);
+        assert_eq!(displays("Fatima-ZahraCarla1"), ["Fatima-Zahra", "Carla"]);
 
         for input in [
             "quentindupont",
@@ -1668,8 +1782,41 @@ mod tests {
             "quentin@example.com",
             "a:quentin",
         ] {
-            assert!(conservative_handle_segments(input).is_empty(), "{input:?}");
+            assert!(displays(input).is_empty(), "{input:?}");
         }
+    }
+
+    #[test]
+    fn c3_records_the_boundaries_that_expose_each_segment() {
+        let mechanisms = |input| {
+            conservative_handle_segments(input)
+                .into_iter()
+                .map(|segment| (segment.display, segment.mechanism.as_str()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(mechanisms("Quentin42"), [("Quentin".to_string(), "digit")]);
+        assert_eq!(
+            mechanisms("Jean.Dupont"),
+            [("Jean".to_string(), "dot"), ("Dupont".to_string(), "dot"),]
+        );
+        assert_eq!(
+            mechanisms("Jean_Dupont"),
+            [
+                ("Jean".to_string(), "underscore"),
+                ("Dupont".to_string(), "underscore"),
+            ]
+        );
+        assert_eq!(
+            mechanisms("ÉlodieMartin"),
+            [
+                ("Élodie".to_string(), "lower_to_upper"),
+                ("Martin".to_string(), "lower_to_upper"),
+            ]
+        );
+        assert_eq!(
+            mechanisms("Jean.Dupont42"),
+            [("Jean".to_string(), "dot"), ("Dupont".to_string(), "mixed"),]
+        );
     }
 
     #[test]
@@ -1687,7 +1834,9 @@ mod tests {
         ] {
             let diagnostic = diagnose_role_inference(&corpus, ALGORITHM_C3, input, None, None);
             assert!(diagnostic.candidates.iter().any(|candidate| {
-                candidate.display == expected && candidate.origin == "handle_segment"
+                candidate.display == expected
+                    && candidate.origin == "handle_segment"
+                    && candidate.segmentation_mechanism.is_some()
             }));
             let c3 = c2_inference_from_diagnostic(&diagnostic, ALGORITHM_C2);
             assert_eq!(
@@ -1696,6 +1845,28 @@ mod tests {
                 "{input:?}"
             );
         }
+    }
+
+    #[test]
+    fn c31_penalizes_only_segmented_winners_without_changing_the_winner() {
+        let corpus = FakeCorpus(HashMap::from([
+            ("Quentin".to_string(), role_evidence(100_000, 100)),
+            ("Martin".to_string(), role_evidence(14_544, 46_409)),
+        ]));
+        let segmented = diagnose_role_inference(&corpus, ALGORITHM_C3, "Quentin42", None, None);
+        let c3 = c2_inference_from_diagnostic(&segmented, ALGORITHM_C2);
+        let c31 = c31_inference_from_diagnostic(&segmented, ALGORITHM_C2, ALGORITHM_C31);
+        assert_eq!(c31.greeting_candidate, c3.greeting_candidate);
+        assert!(
+            (c31.confidence - (c3.confidence - ALGORITHM_C31.handle_segment_penalty)).abs()
+                < f64::EPSILON
+        );
+
+        let native = diagnose_role_inference(&corpus, ALGORITHM_C3, "Quentin Martin", None, None);
+        assert_eq!(
+            c31_inference_from_diagnostic(&native, ALGORITHM_C2, ALGORITHM_C31),
+            c2_inference_from_diagnostic(&native, ALGORITHM_C2)
+        );
     }
 
     #[test]
@@ -1865,6 +2036,7 @@ mod tests {
             global_given_count: 100,
             global_surname_count: 10,
             candidate_origin: "exact",
+            segmentation_mechanism: None,
             candidate_count: 2,
             alphabetic_length: 7,
             generic_organization_marker: false,
@@ -1921,6 +2093,7 @@ mod tests {
             global_given_count: 1_000_000,
             global_surname_count: 0,
             candidate_origin: "exact",
+            segmentation_mechanism: None,
             candidate_count: 1,
             alphabetic_length: 6,
             generic_organization_marker: false,

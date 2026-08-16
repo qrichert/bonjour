@@ -1102,6 +1102,7 @@ mod tests {
                 global_given_count: 1_000,
                 global_surname_count: 10,
                 candidate_origin: "exact",
+                segmentation_mechanism: None,
                 candidate_count: 2,
                 alphabetic_length: 6,
                 generic_organization_marker: false,

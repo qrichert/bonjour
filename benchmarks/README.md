@@ -328,6 +328,27 @@ reachability benefit but does not establish unchanged safety or make C3
 an unambiguous replacement for C2. No V3 failure rows were inspected,
 and V3 cannot be used to change either frozen algorithm.
 
+After preserving that checkpoint, V3 was spent specifically on the C3
+delta. C2 abstained while C3 emitted in 18 cases: 17 matched the proxy
+labels and one digit-boundary candidate was an expected-NULL emission.
+The new emissions comprised 13 lower-to-upper, 3 digit, 1 dot, and 1
+underscore segment. V1's corresponding 27 emissions were all correct, so
+the single unsafe digit example does not justify mechanism-specific
+weights.
+
+C3.1 therefore keeps C3's candidate generation and ranking but subtracts
+a uniform `0.025` from the frozen C2 emission score only when the winner
+is a handle segment. Native winners retain their exact C2 score. This
+raises the effective handle threshold to `0.8147588240573696` without
+changing the shared public threshold. On spent V1, C3.1 emitted 226
+correct / 0 wrong; on spent V3, it emitted 214 correct / 5 wrong with 2
+expected-NULL emissions (97.72% observed precision, 17.37% recall); and
+synthetic VALIDATION remained 14,686 correct / 0 wrong. C3.1 preserves
+14 of C3's 17 additional V3 matches while returning aggregate error and
+NULL-emission counts to C2's checkpoint. These are selection results,
+not held-out validation. C2 remains the production candidate, C3/C3.1
+remain experimental, and C3.1 requires fresh REAL_PROXY_V4 evidence.
+
 ## Current storage choice
 
 The leading experimental artifact is therefore:
