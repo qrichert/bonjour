@@ -774,6 +774,84 @@ and requires a fresh, disjoint REAL_PROXY_V4 comparison before any
 promotion claim. REAL_PROXY_V2 remains untouched by this development
 pass.
 
+### REAL_PROXY_V4 frozen C2/C3/C3.1 comparison
+
+REAL_PROXY_V4 was sampled independently from Meta Kaggle `Users.csv`
+with fixed seed `0x5245414C5F5634`. Sampling excluded every exact
+display-name value in V1, V2, or V3. The 2,000-row source sample has
+SHA-256
+`234857bb418ddd3fe6b812b998ad514adf63569e81d62a873dfa4c6c5dc99a46`; the
+2.59 GB source checksum remained
+`30b95ff7d079289fe76a0fada39ebbb174f15f6f85a2e09f7a208c6fdf57dd82`
+before and after sampling. Explicit set checks found zero exact V4
+display-name overlap with V1, V2, or V3.
+
+Both annotations were produced without classifier output or corpus
+evidence. Their raw files were preserved and normalized mechanically
+under the V2/V3 policy. Annotator A supplied 1,653 exact spans, 259
+NULLs, 67 explicit skips, and 21 non-exact labels mapped to `SKIP`.
+Annotator B supplied 1,319 exact spans, 306 NULLs, 27 explicit skips,
+and 348 unusable or non-exact labels mapped to `SKIP`. Confidence and
+notes were ignored.
+
+Mechanical consensus yielded:
+
+| Source rows | Greeting agreements | NULL agreements | Annotator-skip cases | Other disagreements | Evaluable | Skipped |
+| ----------: | ------------------: | --------------: | -------------------: | ------------------: | --------: | ------: |
+|       2,000 |               1,220 |             221 |                  439 |                 120 |     1,441 |     559 |
+
+The deterministic holdout serialization was frozen before loading the
+artifact, with SHA-256
+`d95c589bec836faaeecaeda85b146989d2936914bff0209934f289ccb9446c7f`.
+After a non-evaluating release build, the sole V4 classifier invocation
+was:
+
+```console
+benchmarks/name-eval/target/release/name-eval \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-real-proxy-v4 \
+  --compare-sealed-c2-c3-c31-sha256=d95c589bec836faaeecaeda85b146989d2936914bff0209934f289ccb9446c7f \
+  --sealed=_wip/real-proxy-v4/sealed.csv \
+  --sealed-manifest=_wip/real-proxy-v4/sealed.manifest.csv
+```
+
+All algorithms used the frozen public threshold `0.78975882405736963`.
+C2 used C1 candidate generation and the frozen C2 emission score; C3
+used its frozen handle candidate generation and the same score; C3.1
+applied its frozen `0.025` penalty only when C3's winner came from
+handle segmentation:
+
+| Algorithm | Emitted | Correct | Wrong | Expected-NULL emissions | Observed precision | Recall | Abstention |
+| --------- | ------: | ------: | ----: | ----------------------: | -----------------: | -----: | ---------: |
+| C2        |     213 |     210 |     3 |                       0 |             98.59% | 17.21% |     85.22% |
+| C3        |     237 |     233 |     4 |                       0 |             98.31% | 19.10% |     83.55% |
+| C3.1      |     227 |     224 |     3 |                       0 |             98.68% | 18.36% |     84.25% |
+
+Relative to C2, C3 added 23 correct greetings and one wrong greeting,
+raising recall by `1.89` points. C3.1 retained 14 of those additional
+correct greetings, matched C2's three observed wrong greetings and zero
+expected-NULL emissions, and raised recall by `1.15` points. Relative to
+C3, its provenance gate withheld 10 emissions: 9 correct and the one
+additional wrong emission.
+
+The emitted-score buckets were:
+
+| Algorithm | `0.789759–0.85` correct/wrong | `0.85–0.90` correct/wrong | `0.90–0.95` correct/wrong | `0.95–1.00` correct/wrong |
+| --------- | ----------------------------: | ------------------------: | ------------------------: | ------------------------: |
+| C2        |                         164/2 |                      45/1 |                       1/0 |                       0/0 |
+| C3        |                         184/3 |                      47/1 |                       2/0 |                       0/0 |
+| C3.1      |                         177/2 |                      46/1 |                       1/0 |                       0/0 |
+
+V4 therefore independently reproduced the aggregate tradeoff C3.1 was
+selected to provide on spent V3. C3.1 is promoted to the leading
+classifier candidate; C2 and C3 remain permanently frozen baselines. The
+tiny error counts do not establish population-level safety equivalence,
+the agreement filter selects clearer labels, the machine annotators can
+share cultural mistakes, and Meta Kaggle may not match the product
+population. No row-level V4 predictions, failures, traces, or
+changed-case comparisons were written or inspected. V4 is now spent
+comparison evidence and must not tune C2, C3, or C3.1.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.

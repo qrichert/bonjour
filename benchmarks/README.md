@@ -349,6 +349,32 @@ NULL-emission counts to C2's checkpoint. These are selection results,
 not held-out validation. C2 remains the production candidate, C3/C3.1
 remain experimental, and C3.1 requires fresh REAL_PROXY_V4 evidence.
 
+REAL_PROXY_V4 was then drawn with fixed seed `0x5245414C5F5634` after
+excluding every exact V1, V2, and V3 display-name value. Its two blind
+machine annotations produced 1,220 exact greeting agreements, 221 NULL
+agreements, and 559 skipped cases. The holdout was frozen at SHA-256
+`d95c589bec836faaeecaeda85b146989d2936914bff0209934f289ccb9446c7f`
+before the sole aggregate-only comparison.
+
+On the 1,441 agreed V4 cases, frozen C2 emitted 213 greetings: 210
+correct, 3 wrong, and none on expected-NULL cases (98.59% observed
+precision, 17.21% recall). C3 emitted 237: 233 correct, 4 wrong, and no
+expected-NULL emissions (98.31%, 19.10%). C3.1 emitted 227: 224 correct,
+3 wrong, and no expected-NULL emissions (98.68%, 18.36%). Relative to
+C2, C3.1 therefore added 14 correct greetings and `1.15` recall points
+with the same observed wrong and NULL-emission counts. Relative to C3,
+the provenance penalty withheld 10 emissions, including the one
+additional wrong emission, while giving back 9 correct greetings.
+
+This fresh comparison independently reproduces the aggregate behavior
+C3.1 was selected to provide on spent V3, so C3.1 is promoted to the
+leading classifier candidate and C2/C3 remain frozen comparison
+baselines. Three errors versus three errors do not establish equal
+population precision, and exact machine-annotation consensus selects a
+clearer subset. No V4 row-level prediction or failure was written or
+inspected; V4 is now spent comparison evidence and cannot tune any of
+the three frozen algorithms.
+
 ## Current storage choice
 
 The leading experimental artifact is therefore:

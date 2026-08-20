@@ -396,8 +396,8 @@ pub const ALGORITHM_C2: C2EmissionConfig = C2EmissionConfig {
 };
 
 /// Frozen from spent REAL_PROXY_V1_DEV, spent REAL_PROXY_V3, and synthetic
-/// VALIDATION. This is a development operating point requiring fresh V4
-/// evaluation, not a real-world quality claim.
+/// VALIDATION, then independently evaluated once on REAL_PROXY_V4. This is a
+/// proxy-validated operating point, not a real-world quality claim.
 pub const ALGORITHM_C31: C31EmissionConfig = C31EmissionConfig {
     handle_segment_penalty: 0.025,
 };

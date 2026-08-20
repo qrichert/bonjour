@@ -32,9 +32,9 @@ use c2_calibration::run_c2_calibration;
 use c3_development::run_c3_development;
 use c31_development::run_c31_development;
 use classifier::{
-    ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3,
-    AlgorithmConfig, RawInference, c2_inference_from_diagnostic, candidate_diagnostics,
-    diagnose_role_inference, infer_prethreshold,
+    ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C31,
+    AlgorithmConfig, RawInference, c2_inference_from_diagnostic, c31_inference_from_diagnostic,
+    candidate_diagnostics, diagnose_role_inference, infer_prethreshold,
 };
 use corpus_audit::{LexicalAudit, audit_clean_v1};
 use dataset::{
@@ -55,6 +55,7 @@ const DEFAULT_REFERENCE_THRESHOLD: f64 = 0.80;
 const C0_FROZEN_THRESHOLD: f64 = 0.80;
 const C1_SELECTED_THRESHOLD: f64 = 0.93;
 const C2_NAME: &str = "C2-proxy-calibrated-emission-v1";
+const C31_NAME: &str = "C3.1-handle-provenance-gate-v1";
 const THRESHOLD_SWEEP: [f64; 12] = [
     0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.99, 1.00,
 ];
@@ -95,6 +96,13 @@ struct C2C3SealedRun {
     holdout: FrozenHoldout,
     c2: SealedEvaluation,
     c3: SealedEvaluation,
+}
+
+struct C2C3C31SealedRun {
+    holdout: FrozenHoldout,
+    c2: SealedEvaluation,
+    c3: SealedEvaluation,
+    c31: SealedEvaluation,
 }
 
 fn main() {
@@ -161,6 +169,7 @@ struct Arguments {
     develop_c31_spent_holdout_sha256: Option<String>,
     compare_sealed_c1_c2_sha256: Option<String>,
     compare_sealed_c2_c3_sha256: Option<String>,
+    compare_sealed_c2_c3_c31_sha256: Option<String>,
 }
 
 fn parse_arguments() -> Result<Arguments> {
@@ -181,6 +190,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut develop_c31_spent_holdout_sha256 = None;
     let mut compare_sealed_c1_c2_sha256 = None;
     let mut compare_sealed_c2_c3_sha256 = None;
+    let mut compare_sealed_c2_c3_c31_sha256 = None;
     for argument in arguments {
         let text = argument.to_string_lossy();
         if let Some(value) = text.strip_prefix("--sealed=") {
@@ -241,6 +251,14 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
                 );
             }
             compare_sealed_c2_c3_sha256 = Some(value.to_ascii_lowercase());
+        } else if let Some(value) = text.strip_prefix("--compare-sealed-c2-c3-c31-sha256=") {
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(
+                    "sealed comparison SHA-256 must contain exactly 64 hexadecimal characters"
+                        .into(),
+                );
+            }
+            compare_sealed_c2_c3_c31_sha256 = Some(value.to_ascii_lowercase());
         } else if text.starts_with('-') {
             return Err(format!("unknown option: {text}").into());
         } else {
@@ -256,9 +274,10 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         + usize::from(develop_c3_spent_holdout_sha256.is_some())
         + usize::from(develop_c31_spent_holdout_sha256.is_some())
         + usize::from(compare_sealed_c1_c2_sha256.is_some())
-        + usize::from(compare_sealed_c2_c3_sha256.is_some());
+        + usize::from(compare_sealed_c2_c3_sha256.is_some())
+        + usize::from(compare_sealed_c2_c3_c31_sha256.is_some());
     if explicit_modes > 1 {
-        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, sealed C1/C2 comparison, and sealed C2/C3 comparison modes are mutually exclusive".into());
+        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, sealed C1/C2 comparison, sealed C2/C3 comparison, and sealed C2/C3/C3.1 comparison modes are mutually exclusive".into());
     }
     let development_mode = develop_c2_spent_holdout_sha256.is_some()
         || develop_c3_spent_holdout_sha256.is_some()
@@ -266,7 +285,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let diagnostic_only = diagnose_spent_holdout_sha256.is_some()
         || development_mode
         || compare_sealed_c1_c2_sha256.is_some()
-        || compare_sealed_c2_c3_sha256.is_some();
+        || compare_sealed_c2_c3_sha256.is_some()
+        || compare_sealed_c2_c3_c31_sha256.is_some();
     let (artifact, clean_csv, output) = if sealed_only || diagnostic_only {
         if positional.len() != 2 {
             return Err(usage().into());
@@ -274,6 +294,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         if sealed.is_none() || development_only || reference_threshold_set {
             let mode = if sealed_only {
                 "--sealed-only"
+            } else if compare_sealed_c2_c3_c31_sha256.is_some() {
+                "--compare-sealed-c2-c3-c31-sha256"
             } else if compare_sealed_c2_c3_sha256.is_some() {
                 "--compare-sealed-c2-c3-sha256"
             } else if compare_sealed_c1_c2_sha256.is_some() {
@@ -315,11 +337,12 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         develop_c31_spent_holdout_sha256,
         compare_sealed_c1_c2_sha256,
         compare_sealed_c2_c3_sha256,
+        compare_sealed_c2_c3_c31_sha256,
     })
 }
 
 fn usage() -> &'static str {
-    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
+    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
 }
 
 #[allow(clippy::too_many_lines)]
@@ -339,7 +362,8 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
             .or(arguments.develop_c3_spent_holdout_sha256.as_deref())
             .or(arguments.develop_c31_spent_holdout_sha256.as_deref())
             .or(arguments.compare_sealed_c1_c2_sha256.as_deref())
-            .or(arguments.compare_sealed_c2_c3_sha256.as_deref()),
+            .or(arguments.compare_sealed_c2_c3_sha256.as_deref())
+            .or(arguments.compare_sealed_c2_c3_c31_sha256.as_deref()),
         frozen_holdout.as_ref(),
     ) {
         validate_spent_holdout_digest(acknowledged, &holdout.manifest.holdout_sha256)?;
@@ -349,6 +373,21 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
         &fixtures.join("artifact-manifest.csv"),
         &fixtures.join("surname-artifact-manifest.csv"),
     )?;
+    if let Some(acknowledged_sha256) = &arguments.compare_sealed_c2_c3_c31_sha256 {
+        let holdout =
+            frozen_holdout.ok_or("--compare-sealed-c2-c3-c31-sha256 requires a frozen holdout")?;
+        validate_spent_holdout_digest(acknowledged_sha256, &holdout.manifest.holdout_sha256)?;
+        let comparison = evaluate_frozen_holdout_c2_c3_c31(&corpus, holdout)?;
+        fs::write(
+            output.join("sealed_comparison_summary.csv"),
+            c2_c3_c31_sealed_summary_csv(&comparison)?,
+        )?;
+        fs::write(
+            output.join("sealed_comparison_confidence_buckets.csv"),
+            c2_c3_c31_sealed_buckets_csv(&comparison)?,
+        )?;
+        return Ok(build_c2_c3_c31_sealed_report(&comparison));
+    }
     if let Some(acknowledged_sha256) = &arguments.compare_sealed_c2_c3_sha256 {
         let holdout =
             frozen_holdout.ok_or("--compare-sealed-c2-c3-sha256 requires a frozen holdout")?;
@@ -674,6 +713,72 @@ fn evaluate_frozen_holdout_c2_c3(
     Ok(C2C3SealedRun { holdout, c2, c3 })
 }
 
+fn evaluate_frozen_holdout_c2_c3_c31(
+    corpus: &C32Artifact,
+    holdout: FrozenHoldout,
+) -> Result<C2C3C31SealedRun> {
+    let mut c2_decisions = Vec::with_capacity(holdout.cases.len());
+    let mut c3_decisions = Vec::with_capacity(holdout.cases.len());
+    let mut c31_decisions = Vec::with_capacity(holdout.cases.len());
+    for case in &holdout.cases {
+        if !case.is_evaluable() {
+            c2_decisions.push(None);
+            c3_decisions.push(None);
+            c31_decisions.push(None);
+            continue;
+        }
+        let c2_diagnostic = diagnose_role_inference(
+            corpus,
+            ALGORITHM_C1,
+            &case.display_name,
+            nonempty(&case.country_hint),
+            nonempty(&case.locale_hint),
+        );
+        let c2 = c2_inference_from_diagnostic(&c2_diagnostic, ALGORITHM_C2);
+        c2_decisions.push(Some(sealed_decision(c2)));
+
+        let c3_diagnostic = diagnose_role_inference(
+            corpus,
+            ALGORITHM_C3,
+            &case.display_name,
+            nonempty(&case.country_hint),
+            nonempty(&case.locale_hint),
+        );
+        let c3 = c2_inference_from_diagnostic(&c3_diagnostic, ALGORITHM_C2);
+        c3_decisions.push(Some(sealed_decision(c3)));
+        let c31 = c31_inference_from_diagnostic(&c3_diagnostic, ALGORITHM_C2, ALGORITHM_C31);
+        c31_decisions.push(Some(sealed_decision(c31)));
+    }
+    let c2 = evaluate_c2_decisions(&holdout, &c2_decisions)?;
+    let c3 = evaluate_c2_decisions(&holdout, &c3_decisions)?;
+    let c31 = evaluate_c2_decisions(&holdout, &c31_decisions)?;
+    Ok(C2C3C31SealedRun {
+        holdout,
+        c2,
+        c3,
+        c31,
+    })
+}
+
+fn sealed_decision(inference: RawInference) -> SealedDecision {
+    SealedDecision {
+        greeting_candidate: inference.greeting_candidate,
+        confidence: inference.confidence,
+    }
+}
+
+fn evaluate_c2_decisions(
+    holdout: &FrozenHoldout,
+    decisions: &[Option<SealedDecision>],
+) -> Result<SealedEvaluation> {
+    evaluate_sealed_with_buckets(
+        holdout,
+        decisions,
+        ALGORITHM_C2.threshold,
+        c2_confidence_bucket_specs(),
+    )
+}
+
 fn c2_confidence_bucket_specs() -> [ConfidenceBucketSpec; 4] {
     [
         ConfidenceBucketSpec {
@@ -707,6 +812,14 @@ fn c2_c3_evaluations(run: &C2C3SealedRun) -> [(&'static str, &SealedEvaluation);
     [(C2_NAME, &run.c2), (ALGORITHM_C3.name, &run.c3)]
 }
 
+fn c2_c3_c31_evaluations(run: &C2C3C31SealedRun) -> [(&'static str, &SealedEvaluation); 3] {
+    [
+        (C2_NAME, &run.c2),
+        (ALGORITHM_C3.name, &run.c3),
+        (C31_NAME, &run.c31),
+    ]
+}
+
 fn paired_sealed_summary_csv(run: &PairedSealedRun) -> Result<Vec<u8>> {
     sealed_comparison_summary_csv(paired_evaluations(run))
 }
@@ -715,7 +828,13 @@ fn c2_c3_sealed_summary_csv(run: &C2C3SealedRun) -> Result<Vec<u8>> {
     sealed_comparison_summary_csv(c2_c3_evaluations(run))
 }
 
-fn sealed_comparison_summary_csv(evaluations: [(&str, &SealedEvaluation); 2]) -> Result<Vec<u8>> {
+fn c2_c3_c31_sealed_summary_csv(run: &C2C3C31SealedRun) -> Result<Vec<u8>> {
+    sealed_comparison_summary_csv(c2_c3_c31_evaluations(run))
+}
+
+fn sealed_comparison_summary_csv<const N: usize>(
+    evaluations: [(&str, &SealedEvaluation); N],
+) -> Result<Vec<u8>> {
     let mut writer = csv::WriterBuilder::new()
         .has_headers(false)
         .terminator(csv::Terminator::Any(b'\n'))
@@ -770,7 +889,13 @@ fn c2_c3_sealed_buckets_csv(run: &C2C3SealedRun) -> Result<Vec<u8>> {
     sealed_comparison_buckets_csv(c2_c3_evaluations(run))
 }
 
-fn sealed_comparison_buckets_csv(evaluations: [(&str, &SealedEvaluation); 2]) -> Result<Vec<u8>> {
+fn c2_c3_c31_sealed_buckets_csv(run: &C2C3C31SealedRun) -> Result<Vec<u8>> {
+    sealed_comparison_buckets_csv(c2_c3_c31_evaluations(run))
+}
+
+fn sealed_comparison_buckets_csv<const N: usize>(
+    evaluations: [(&str, &SealedEvaluation); N],
+) -> Result<Vec<u8>> {
     let mut writer = csv::WriterBuilder::new()
         .has_headers(false)
         .terminator(csv::Terminator::Any(b'\n'))
@@ -2089,6 +2214,63 @@ fn build_c2_c3_sealed_report(run: &C2C3SealedRun) -> String {
     report
 }
 
+fn build_c2_c3_c31_sealed_report(run: &C2C3C31SealedRun) -> String {
+    let mut report = String::new();
+    writeln!(report, "# Sealed C2/C3/C3.1 proxy comparison\n").unwrap();
+    writeln!(
+        report,
+        "The frozen holdout was checksum-verified as `{}` before inference. Provenance: {}. This aggregate-only run evaluated permanently frozen C2, C3, and C3.1 on exactly the same evaluable rows at the identical public threshold `{:.17}`; it did not generate cases, tune thresholds, or write row-level labels, predictions, failures, traces, or changed-case comparisons.\n",
+        run.holdout.manifest.holdout_sha256,
+        markdown(&run.holdout.manifest.provenance),
+        ALGORITHM_C2.threshold,
+    )
+    .unwrap();
+    writeln!(report, "| Algorithm | Threshold | Total | Evaluable | SKIP | Expected greeting | Expected NULL | Emitted | Correct | Wrong | Missed greeting | False emission on NULL | Precision | Recall | Abstention |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|").unwrap();
+    for (algorithm, evaluation) in c2_c3_c31_evaluations(run) {
+        let metrics = evaluation.metrics;
+        writeln!(
+            report,
+            "| {} | {:.15} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            algorithm,
+            evaluation.threshold,
+            metrics.total_labeled_cases,
+            metrics.evaluable_cases,
+            metrics.skipped_cases,
+            metrics.expected_greetings,
+            metrics.expected_abstentions,
+            metrics.emitted_greetings,
+            metrics.correct_greetings,
+            metrics.wrong_greetings,
+            metrics.expected_greetings_missed,
+            metrics.false_emissions_on_expected_abstentions,
+            percent(metrics.greeting_precision()),
+            percent(metrics.greeting_recall()),
+            percent(metrics.abstention_rate()),
+        )
+        .unwrap();
+    }
+    writeln!(report, "\n## Coarse emitted-score distributions\n").unwrap();
+    writeln!(report, "C2, C3, and C3.1 use the same frozen public threshold. C3.1 applies its frozen `0.025` penalty only to handle-segment winners before thresholding. These aggregate buckets are diagnostic only and must not be used to retune any frozen algorithm.\n").unwrap();
+    writeln!(
+        report,
+        "| Algorithm | Score bucket | Emitted | Correct | Wrong |\n|---|---|---:|---:|---:|"
+    )
+    .unwrap();
+    for (algorithm, evaluation) in c2_c3_c31_evaluations(run) {
+        for bucket in evaluation.confidence_buckets {
+            writeln!(
+                report,
+                "| {} | {} | {} | {} | {} |",
+                algorithm, bucket.label, bucket.emitted, bucket.correct, bucket.wrong,
+            )
+            .unwrap();
+        }
+    }
+    writeln!(report, "\n## Interpretation boundary\n").unwrap();
+    writeln!(report, "The labels are accepted only where two independent classifier-blind annotations agree exactly; every disagreement or annotator `SKIP` is excluded and counted in the frozen manifest. This agreement filter can select an easier subset, and the annotators can share systematic cultural errors. Results therefore measure fresh proxy agreement, not human-validated worldwide accuracy or product-population quality. V4 must not be used to change C2, C3, or C3.1 after this one-shot comparison.\n").unwrap();
+    report
+}
+
 fn write_sealed_report(report: &mut String, sealed_run: Option<&SealedRun>) {
     writeln!(report, "## Sealed real-world holdout\n").unwrap();
     let Some(sealed_run) = sealed_run else {
@@ -2747,6 +2929,58 @@ mod argument_tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn sealed_c2_c3_c31_comparison_requires_digest_and_rejects_tuning_modes() {
+        let arguments = parse(&[
+            "artifact",
+            "output",
+            &format!("--compare-sealed-c2-c3-c31-sha256={DIGEST}"),
+            "--sealed=sealed.csv",
+            "--sealed-manifest=manifest.csv",
+        ])
+        .unwrap();
+        assert_eq!(
+            arguments.compare_sealed_c2_c3_c31_sha256.as_deref(),
+            Some(DIGEST)
+        );
+        assert_eq!(arguments.clean_csv, None);
+
+        for extra in [
+            "--sealed-only",
+            "--development-only",
+            "--reference-threshold=0.80",
+            &format!("--diagnose-spent-holdout-sha256={DIGEST}"),
+            &format!("--develop-c2-from-spent-holdout-sha256={DIGEST}"),
+            &format!("--develop-c3-from-spent-holdout-sha256={DIGEST}"),
+            &format!("--develop-c31-from-spent-holdout-sha256={DIGEST}"),
+            &format!("--compare-sealed-c1-c2-sha256={DIGEST}"),
+            &format!("--compare-sealed-c2-c3-sha256={DIGEST}"),
+        ] {
+            assert!(
+                parse(&[
+                    "artifact",
+                    "output",
+                    &format!("--compare-sealed-c2-c3-c31-sha256={DIGEST}"),
+                    "--sealed=sealed.csv",
+                    "--sealed-manifest=manifest.csv",
+                    extra,
+                ])
+                .is_err(),
+                "{extra}"
+            );
+        }
+        assert!(
+            parse(&[
+                "artifact",
+                "output",
+                "--compare-sealed-c2-c3-c31-sha256=short",
+                "--sealed=sealed.csv",
+                "--sealed-manifest=manifest.csv",
+            ])
+            .is_err()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2995,6 +3229,92 @@ mod sealed_report_tests {
             assert!(!output.contains("case-private-v3"));
             assert!(output.contains(C2_NAME));
             assert!(output.contains(ALGORITHM_C3.name));
+        }
+    }
+
+    #[test]
+    fn c2_c3_c31_sealed_outputs_are_aggregate_only_and_algorithm_keyed() {
+        let private_name = "Private V4 Display Name";
+        let holdout = FrozenHoldout {
+            cases: vec![HoldoutCase {
+                id: "case-private-v4".to_string(),
+                display_name: private_name.to_string(),
+                country_hint: String::new(),
+                locale_hint: String::new(),
+                label_status: LabelStatus::Greeting,
+                expected_greeting: "Private".to_string(),
+                span_start: Some(0),
+                span_end: Some(7),
+                case_kind: CaseKind::Person,
+            }],
+            manifest: HoldoutManifest {
+                format_version: 1,
+                holdout_sha256: "0123456789abcdef".to_string(),
+                total_cases: 1,
+                evaluable_cases: 1,
+                skipped_cases: 0,
+                expected_greetings: 1,
+                expected_abstentions: 0,
+                person_cases: 1,
+                non_person_cases: 0,
+                unknown_kind_cases: 0,
+                provenance: "fresh dual blind proxy agreement".to_string(),
+            },
+        };
+        let evaluation = || SealedEvaluation {
+            threshold: ALGORITHM_C2.threshold,
+            metrics: SealedMetrics {
+                total_labeled_cases: 1,
+                evaluable_cases: 1,
+                emitted_greetings: 1,
+                correct_greetings: 1,
+                expected_greetings: 1,
+                ..SealedMetrics::default()
+            },
+            confidence_buckets: [
+                ConfidenceBucket {
+                    label: "0.789759–0.85",
+                    emitted: 1,
+                    correct: 1,
+                    wrong: 0,
+                },
+                ConfidenceBucket {
+                    label: "two",
+                    emitted: 0,
+                    correct: 0,
+                    wrong: 0,
+                },
+                ConfidenceBucket {
+                    label: "three",
+                    emitted: 0,
+                    correct: 0,
+                    wrong: 0,
+                },
+                ConfidenceBucket {
+                    label: "four",
+                    emitted: 0,
+                    correct: 0,
+                    wrong: 0,
+                },
+            ],
+        };
+        let comparison = C2C3C31SealedRun {
+            holdout,
+            c2: evaluation(),
+            c3: evaluation(),
+            c31: evaluation(),
+        };
+        let report = build_c2_c3_c31_sealed_report(&comparison);
+        let summary =
+            String::from_utf8(c2_c3_c31_sealed_summary_csv(&comparison).unwrap()).unwrap();
+        let buckets =
+            String::from_utf8(c2_c3_c31_sealed_buckets_csv(&comparison).unwrap()).unwrap();
+        for output in [&report, &summary, &buckets] {
+            assert!(!output.contains(private_name));
+            assert!(!output.contains("case-private-v4"));
+            assert!(output.contains(C2_NAME));
+            assert!(output.contains(ALGORITHM_C3.name));
+            assert!(output.contains(C31_NAME));
         }
     }
 }
