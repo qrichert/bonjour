@@ -1333,4 +1333,64 @@ mod tests {
             assert_ne!(classify_name(name).0 & URL_EMAIL_RULE, 0);
         }
     }
+
+    #[test]
+    fn reapplies_global_minimum_after_row_pruning() {
+        let mut rows = vec![
+            PackedRow {
+                count: 2,
+                country: 1,
+                gender: 0,
+            },
+            PackedRow {
+                count: 1,
+                country: 2,
+                gender: 0,
+            },
+            PackedRow {
+                count: 1,
+                country: 3,
+                gender: 0,
+            },
+            PackedRow {
+                count: 1,
+                country: 4,
+                gender: 0,
+            },
+        ];
+        let mut rows_per_name = [4];
+        let mut observations_per_name = [5];
+        let (_, final_ids, audit) = compact_rows(
+            &mut rows,
+            &[0, 4],
+            &[true],
+            &mut rows_per_name,
+            &mut observations_per_name,
+        )
+        .unwrap();
+
+        assert!(final_ids.is_empty());
+        assert!(rows.is_empty());
+        assert_eq!(audit.post_row_global.names, 1);
+        assert_eq!(audit.post_row_global.observations, 2);
+    }
+
+    #[test]
+    fn rejects_aggregated_tuple_count_above_u32() {
+        let mut rows = vec![PackedRow {
+            count: u64::from(u32::MAX) + 1,
+            country: 1,
+            gender: 0,
+        }];
+        let mut rows_per_name = [1];
+        let mut observations_per_name = [u64::from(u32::MAX) + 1];
+        let result = compact_rows(
+            &mut rows,
+            &[0, 1],
+            &[true],
+            &mut rows_per_name,
+            &mut observations_per_name,
+        );
+        assert!(result.is_err());
+    }
 }

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "target": "x86_64-unknown-linux-gnu",
+  "rust_version": "1.93.0",
+  "production_manifest_sha256": "3dc5d96d7d4ea5e52821c442f5086865d760f0820349f6f090a307fe8c743474",
+  "case_counts": {
+    "regression": 14,
+    "dev": 60000,
+    "validation": 60000,
+    "total": 120014
+  },
+  "behavior_sha256": "9fd21be0cdc49b9f5e5e6f82f5c286514cf34ea9164d732b6d8a252d9111eab7"
+}

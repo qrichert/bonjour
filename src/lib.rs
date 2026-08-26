@@ -1,528 +1,402 @@
-//! Extract a probable first name from an arbitrary display name, with a
+//! Extract a probable greeting name from an arbitrary display name, with a
 //! confidence score.
 //!
 //! A display name is not necessarily a person: it may be a company or a club
 //! (`ACME Corporation`, `Club de Tennis Strasbourg`). So rather than assuming a
-//! `[first] [last]` structure, we treat the name as a *bag of tokens*, look each
-//! one up in a frequency-weighted first-name table, and penalize organization
-//! evidence. Uncertain cases yield low confidence (or `None`), and the caller
-//! decides whether to greet by name. Precision over recall: a missed greeting is
-//! cheap, greeting a tennis club "Bonjour, Martin" is not.
+//! `[first] [last]` structure, we evaluate candidate spans using
+//! frequency-weighted first-name evidence, surname-role evidence, and
+//! organization evidence. Uncertain cases yield `None`; precision over recall:
+//! a missed greeting is cheap, greeting a tennis club "Bonjour, Martin" is not.
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::error::Error;
+use std::fmt;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
-/// Embedded first-name table (`name,weight` CSV). Weights are synthetic
-/// placeholders — see the file header.
-const FIRST_NAMES_CSV: &str = include_str!("../data/first_names.csv");
+mod artifact;
+mod classifier;
+#[cfg(feature = "standalone")]
+mod embedded;
+mod lexical;
 
-/// Lowercased organization markers. Their presence strongly suggests the display
-/// name is a company/club rather than a person, so we crush confidence.
-/// Multilingual on purpose — obvious non-person names should read as such
-/// regardless of country.
-const ORG_MARKERS: &[&str] = &[
-    "sas",
-    "sarl",
-    "sa",
-    "sasu",
-    "eurl",
-    "sci",
-    "gie",
-    "gmbh",
-    "ag",
-    "ug",
-    "ltd",
-    "llc",
-    "inc",
-    "corp",
-    "corporation",
-    "co",
-    "company",
-    "plc",
-    "bv",
-    "nv",
-    "oy",
-    "ab",
-    "srl",
-    "spa",
-    "pty",
-    "association",
-    "asso",
-    "club",
-    "fc",
-    "foundation",
-    "fondation",
-    "group",
-    "groupe",
-    "holding",
-    "holdings",
-    "partners",
-    "fils",
-    "frères",
-    "cie",
-];
+pub use artifact::GenderHint;
 
-/// Confidence multiplier applied once when any organization evidence is present.
-/// Tuned so a strong name (`quentin` ≈ 0.95) drops to ≈ 0.1, matching the
-/// README's `Quentin Richert SAS` example.
-const ORG_MULTIPLIER: f64 = 0.1;
+/// Proxy-validated default for selecting a greeting from an inference.
+pub const DEFAULT_GREETING_THRESHOLD: f64 = classifier::ALGORITHM_C2.threshold;
 
-/// Suggested confidence cut-off for callers deciding whether to use the greeting
-/// name. Below this, fall back to the full display name.
-pub const DEFAULT_THRESHOLD: f64 = 0.4;
-
-// TODO: Check out <https://github.com/postgres/postgres/blob/master/contrib/unaccent/unaccent.rules>
-// TODO: Not sure it's a good idea to do that, removing accents could conflict with words.
-trait Unaccent {
-    fn unaccent(&self) -> String;
+/// Invalid greeting threshold supplied by a caller.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InvalidThreshold {
+    threshold: f64,
 }
 
-impl<T: AsRef<str>> Unaccent for T {
-    fn unaccent(&self) -> String {
-        self.as_ref()
-            // TODO: Try `nfkd`?
-            .nfd()
-            .filter(|c| !is_combining_mark(*c))
-            .nfc()
-            .collect()
-    }
-}
-
-/// Normalize canonically equivalent spellings (for example, precomposed `é`
-/// and `e` plus a combining acute accent) while preserving accents.
-fn normalize(s: &str) -> String {
-    s.to_lowercase().nfc().collect()
-}
-
-/// Binary gender label for a name in a given country.
-///
-/// Gender is country-dependent (`Simone` is `Female` in France, `Male` in
-/// Italy), so it belongs to a `(name, country)` row, never to a name alone.
-/// This is an output/normalization type; the `extract` hints are plain strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Gender {
-    Female,
-    Male,
-}
-
-impl Gender {
-    /// Parse a gender hint or dataset cell, leniently: `f`/`female` and
-    /// `m`/`male` in any case. Anything else is `None`, so an unrecognized hint
-    /// is simply treated as absent.
-    fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_lowercase().as_str() {
-            "f" | "female" => Some(Self::Female),
-            "m" | "male" => Some(Self::Male),
-            _ => None,
-        }
-    }
-}
-
-/// One `(country, gender, weight)` observation for a name. A name maps to a
-/// `Vec` of these; several rows are how country-dependent gender and popularity
-/// are expressed.
-#[derive(Debug, Clone)]
-struct NameEntry {
-    /// ISO 3166-1 alpha-2 country code, uppercase.
-    country: String,
-    gender: Gender,
-    /// First-name likelihood in `0.0..=1.0` for this country.
-    weight: f64,
-}
-
-/// Exact name rows plus unambiguous accent-folded aliases.
-struct NameTable {
-    exact: HashMap<String, Vec<NameEntry>>,
-    unaccented: HashMap<String, Option<String>>,
-}
-
-impl NameTable {
-    /// Look up an exact normalized spelling first, then an unambiguous
-    /// accent-folded alias.
-    fn get(&self, name: &str) -> Option<&[NameEntry]> {
-        let normalized = normalize(name);
-        if let Some(entries) = self.exact.get(&normalized) {
-            return Some(entries);
-        }
-
-        let canonical = self.unaccented.get(&normalized.unaccent())?.as_deref()?;
-        self.exact.get(canonical).map(Vec::as_slice)
-    }
-
-    /// Parse CSV rows while retaining their canonical accented spelling.
-    fn from_csv(csv: &str) -> Self {
-        let mut exact: HashMap<String, Vec<NameEntry>> = HashMap::new();
-        let mut unaccented: HashMap<String, Option<String>> = HashMap::new();
-
-        for line in csv.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue; // blank or comment line
-            }
-            // Exactly four fields, or skip the row.
-            let mut fields = line.split(',');
-            let (Some(name), Some(country), Some(gender), Some(weight), None) = (
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-            ) else {
-                continue;
-            };
-            // The header row's non-numeric `weight`/`gender` fail to parse and
-            // are skipped here too.
-            let Ok(weight) = weight.trim().parse::<f64>() else {
-                continue;
-            };
-            let Some(gender) = Gender::parse(gender) else {
-                continue;
-            };
-
-            let name = normalize(name.trim());
-            unaccented
-                .entry(name.unaccent())
-                .and_modify(|canonical| {
-                    if canonical.as_deref() != Some(name.as_str()) {
-                        *canonical = None;
-                    }
-                })
-                .or_insert_with(|| Some(name.clone()));
-            exact.entry(name).or_default().push(NameEntry {
-                country: country.trim().to_uppercase(),
-                gender,
-                weight,
-            });
-        }
-
-        Self { exact, unaccented }
-    }
-}
-
-/// The result of [`extract`].
-#[derive(Debug, Clone, Serialize)]
-pub struct Extraction {
-    /// The original display name, unchanged.
-    pub input: String,
-    /// Best first-name candidate, echoed as it appeared in `input` (so output
-    /// reads `Quentin`, not `quentin`). `None` only when no token matched the
-    /// first-name table at all.
-    pub first_name: Option<String>,
-    /// Confidence in `first_name`, in `0.0..=1.0`.
-    pub confidence: f64,
-    /// Resolved gender, reported only when the surviving candidate rows agree
-    /// on one (a country/gender hint can force agreement). `None` when the name
-    /// is unknown, or when rows disagree and nothing disambiguates — the caller
-    /// then greets neutrally rather than guessing.
-    pub gender: Option<Gender>,
-    /// Country of the resolved row: the hinted one, else the highest-weight one.
-    /// `None` only when the name is unknown.
-    pub country: Option<String>,
-}
-
-impl Extraction {
-    /// The greeting name, but only when we are confident enough
-    /// (`confidence >= threshold`).
-    ///
-    /// This is the value a consumer would persist as `greeting_name`; below the
-    /// threshold it returns `None` so the caller falls back to the display name.
+impl InvalidThreshold {
+    /// Return the rejected threshold.
     #[must_use]
-    pub fn greeting_name(&self, threshold: f64) -> Option<&str> {
-        match &self.first_name {
-            Some(name) if self.confidence >= threshold => Some(name),
-            _ => None,
+    pub fn threshold(self) -> f64 {
+        self.threshold
+    }
+}
+
+impl fmt::Display for InvalidThreshold {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "greeting threshold must be a finite value in 0.0..=1.0, got {}",
+            self.threshold
+        )
+    }
+}
+
+impl Error for InvalidThreshold {}
+
+/// One unthresholded C3.1 inference over a display name.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Inference<'a> {
+    /// Best exact source-span candidate, or `None` when no safe candidate exists.
+    pub greeting_name: Option<&'a str>,
+    /// Pre-threshold C3.1 decision score, not a calibrated probability.
+    pub confidence: f64,
+    /// Conservatively gated gender evidence for the candidate.
+    pub gender_hint: Option<GenderHint>,
+    /// Majority-gender share, or zero when no gender evidence is emitted.
+    pub gender_confidence: f64,
+}
+
+impl<'a> Inference<'a> {
+    /// Select the greeting candidate using the proxy-validated default threshold.
+    #[must_use]
+    pub fn greeting(&self) -> Option<&'a str> {
+        self.greeting_name
+            .filter(|_| self.confidence >= DEFAULT_GREETING_THRESHOLD)
+    }
+
+    /// Select the greeting candidate using an explicit threshold.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidThreshold`] unless `threshold` is finite and within
+    /// `0.0..=1.0`.
+    pub fn greeting_at(&self, threshold: f64) -> Result<Option<&'a str>, InvalidThreshold> {
+        validate_threshold(threshold)?;
+        Ok(self.greeting_name.filter(|_| self.confidence >= threshold))
+    }
+}
+
+fn validate_threshold(threshold: f64) -> Result<(), InvalidThreshold> {
+    if threshold.is_finite() && (0.0..=1.0).contains(&threshold) {
+        Ok(())
+    } else {
+        Err(InvalidThreshold { threshold })
+    }
+}
+
+/// Stable category for artifact-loading failures.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LoadErrorKind {
+    MissingData,
+    StandaloneDataUnavailable,
+    ManifestMismatch,
+    UnsupportedFormat,
+    CorruptArtifact,
+    Io,
+}
+
+/// Failure to load or validate the pinned production artifact.
+#[derive(Debug)]
+pub struct LoadError {
+    kind: LoadErrorKind,
+    path: Option<PathBuf>,
+    message: String,
+    source: Option<Box<dyn Error + Send + Sync>>,
+}
+
+impl LoadError {
+    /// Return the stable failure category.
+    #[must_use]
+    pub fn kind(&self) -> LoadErrorKind {
+        self.kind
+    }
+
+    /// Return the file or directory associated with the failure, if any.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub(crate) fn new(
+        kind: LoadErrorKind,
+        path: Option<PathBuf>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            path,
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    pub(crate) fn with_source(
+        kind: LoadErrorKind,
+        path: Option<PathBuf>,
+        message: impl Into<String>,
+        source: impl Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            kind,
+            path,
+            message: message.into(),
+            source: Some(Box::new(source)),
         }
     }
 }
 
-/// Extract a probable first name from a display name, with confidence, gender
-/// and country.
-///
-/// `country` and `gender` are optional hints — typically the user's locale and
-/// profile gender. They act as *symmetric filters*: a country pins down gender
-/// (`Simone` + `IT` → male), a gender pins down country (`Simone` + `M` → `IT`).
-/// A hint that matches no row for the name is ignored (a hint never rejects a
-/// name we know). With no hint and rows that disagree on gender, `gender` is
-/// left `None` and `country` reports the highest-weight row.
-///
-/// # Examples
-///
-/// ```
-/// use bonjour::Gender;
-///
-/// let e = bonjour::extract("Quentin Richert", None, None);
-/// assert_eq!(e.first_name.as_deref(), Some("Quentin"));
-/// assert_eq!(e.gender, Some(Gender::Male));
-/// assert_eq!(e.country.as_deref(), Some("FR"));
-///
-/// // Country resolves the gender of an otherwise-ambiguous name.
-/// assert_eq!(bonjour::extract("Simone", Some("IT"), None).gender, Some(Gender::Male));
-/// assert_eq!(bonjour::extract("Simone", Some("FR"), None).gender, Some(Gender::Female));
-///
-/// let e = bonjour::extract("ACME Corporation", None, None);
-/// assert_eq!(e.first_name, None);
-/// assert_eq!(e.confidence, 0.0);
-/// ```
-#[must_use]
-pub fn extract(input: &str, country: Option<&str>, gender: Option<&str>) -> Extraction {
-    let table = first_names();
-
-    // Organization evidence applies to the whole name, once (not per token).
-    let looks_like_org = input.contains('&')
-        || input.split_whitespace().any(|token| {
-            let normalized = strip_surrounding_punctuation(token).to_lowercase();
-            ORG_MARKERS.contains(&normalized.as_str())
-        });
-    let org_multiplier = if looks_like_org { ORG_MULTIPLIER } else { 1.0 };
-
-    // Normalize hints once. Country matches case-insensitively via uppercase; an
-    // unparsable gender hint is dropped (treated as absent).
-    let country_hint = country.map(|c| c.trim().to_uppercase());
-    let gender_hint = gender.and_then(Gender::parse);
-
-    // Resolve each matching token under the hints, then keep the token whose
-    // resolved weight is highest. A hyphenated token is looked up whole —
-    // `jean-pierre` is a single row.
-    let best = input
-        .split_whitespace()
-        .filter_map(|token| {
-            let entries = table.get(token)?;
-            Some((
-                token,
-                resolve(entries, country_hint.as_deref(), gender_hint)?,
-            ))
-        })
-        .max_by(|a, b| a.1.weight.total_cmp(&b.1.weight));
-
-    match best {
-        Some((token, resolution)) => Extraction {
-            input: input.to_string(),
-            first_name: Some(token.to_string()),
-            confidence: (resolution.weight * org_multiplier).clamp(0.0, 1.0),
-            gender: resolution.gender,
-            country: Some(resolution.country),
-        },
-        None => Extraction {
-            input: input.to_string(),
-            first_name: None,
-            confidence: 0.0,
-            gender: None,
-            country: None,
-        },
+impl fmt::Display for LoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)?;
+        if let Some(path) = &self.path {
+            write!(formatter, ": {}", path.display())?;
+        }
+        Ok(())
     }
 }
 
-/// A name's rows collapsed to a single answer under the active hints.
-struct Resolution {
-    country: String,
-    gender: Option<Gender>,
-    weight: f64,
+impl Error for LoadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn Error + 'static))
+    }
 }
 
-/// Resolve a name's rows under optional country/gender hints.
-///
-/// Hints are equality filters: keep rows matching every hint present. If that
-/// leaves nothing (the hint doesn't apply to this name), fall back to all rows —
-/// a hint must never reject a name we know. From the survivors, the
-/// highest-weight row sets `country` and `weight`; `gender` is reported only
-/// when every survivor agrees on it.
-fn resolve(
-    entries: &[NameEntry],
-    country: Option<&str>,
-    gender: Option<Gender>,
-) -> Option<Resolution> {
-    let matches = |e: &&NameEntry| {
-        country.is_none_or(|c| e.country == c) && gender.is_none_or(|g| e.gender == g)
-    };
+/// Immutable, reusable greeting-name classifier.
+pub struct Classifier {
+    artifact: artifact::C32Artifact,
+}
 
-    let mut candidates: Vec<&NameEntry> = entries.iter().filter(matches).collect();
-    if candidates.is_empty() {
-        candidates = entries.iter().collect();
+impl fmt::Debug for Classifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Classifier")
+            .field("artifact_id", &artifact::ARTIFACT_ID)
+            .field("format_version", &artifact::FORMAT_VERSION)
+            .field("key_count", &self.artifact.key_count())
+            .field("row_count", &self.artifact.row_count())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Classifier {
+    /// Load the exact pinned production artifact from `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError`] when the directory is unavailable or any pinned
+    /// manifest, constituent, or structural invariant fails validation.
+    pub fn from_dir(path: impl AsRef<Path>) -> Result<Self, LoadError> {
+        artifact::C32Artifact::from_dir(path.as_ref()).map(|artifact| Self { artifact })
     }
 
-    let best = *candidates
-        .iter()
-        .max_by(|a, b| a.weight.total_cmp(&b.weight))?;
+    /// Load the production artifact embedded by the `standalone` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError`] when the feature was built without the pinned
+    /// artifact or when embedded data fail structural validation.
+    #[cfg(feature = "standalone")]
+    pub fn standalone() -> Result<Self, LoadError> {
+        embedded::artifact().map(|artifact| Self { artifact })
+    }
 
-    let first = candidates[0].gender;
-    let gender = candidates
-        .iter()
-        .all(|e| e.gender == first)
-        .then_some(first);
+    /// Infer the best exact greeting candidate from `display_name` using C3.1.
+    #[must_use]
+    pub fn infer<'a>(
+        &self,
+        display_name: &'a str,
+        country_hint: Option<&str>,
+        locale_hint: Option<&str>,
+    ) -> Inference<'a> {
+        self.infer_with_gender(display_name, country_hint, locale_hint, None)
+    }
 
-    Some(Resolution {
-        country: best.country.clone(),
-        gender,
-        weight: best.weight,
-    })
+    /// Infer with an optional caller-supplied gender hint.
+    #[must_use]
+    pub fn infer_with_gender<'a>(
+        &self,
+        display_name: &'a str,
+        country_hint: Option<&str>,
+        locale_hint: Option<&str>,
+        gender_hint: Option<GenderHint>,
+    ) -> Inference<'a> {
+        let diagnostic = classifier::diagnose_role_inference(
+            &self.artifact,
+            classifier::ALGORITHM_C3,
+            display_name,
+            country_hint,
+            locale_hint,
+        );
+        let mut raw = classifier::c31_inference_from_diagnostic(
+            &diagnostic,
+            classifier::ALGORITHM_C2,
+            classifier::ALGORITHM_C31,
+        );
+        if let Some(gender_hint) = gender_hint {
+            classifier::apply_gender_hint(&diagnostic, &mut raw, gender_hint);
+        }
+        let greeting_name = raw
+            .greeting_candidate
+            .is_some()
+            .then(|| source_greeting_span(display_name, diagnostic.candidates.first()))
+            .flatten();
+        debug_assert_eq!(raw.greeting_candidate.is_some(), greeting_name.is_some());
+        let gender_emitted = greeting_name.is_some()
+            && raw.confidence >= DEFAULT_GREETING_THRESHOLD
+            && raw.gender_hint.is_some();
+
+        Inference {
+            greeting_name,
+            confidence: raw.confidence,
+            gender_hint: gender_emitted.then_some(raw.gender_hint).flatten(),
+            gender_confidence: if gender_emitted {
+                raw.gender_confidence
+            } else {
+                0.0
+            },
+        }
+    }
 }
 
-/// Parse the embedded CSV once into exact rows and unaccented aliases.
-fn first_names() -> &'static NameTable {
-    static TABLE: OnceLock<NameTable> = OnceLock::new();
-    TABLE.get_or_init(|| NameTable::from_csv(FIRST_NAMES_CSV))
+fn source_greeting_span<'a>(
+    display_name: &'a str,
+    winner: Option<&classifier::CandidateDiagnostic>,
+) -> Option<&'a str> {
+    let winner = winner?;
+    display_name.get(winner.byte_start?..winner.byte_end?)
 }
 
-/// Strip surrounding non-alphanumerics (for org-marker matching), keeping inner
-/// characters such as the hyphen in `jean-pierre`.
-fn strip_surrounding_punctuation(token: &str) -> &str {
-    token.trim_matches(|c: char| !c.is_alphanumeric())
+/// Frozen evaluator internals. This is not part of the supported 0.1 API.
+#[cfg(feature = "benchmark-internals")]
+#[doc(hidden)]
+pub mod benchmark {
+    use std::path::Path;
+
+    pub use crate::GenderHint;
+    pub use crate::artifact::{C32Artifact, Evidence, EvidenceSource};
+    pub use crate::classifier::*;
+    pub use crate::lexical::candidate_is_eligible;
+
+    pub fn open_artifact(path: &Path) -> Result<C32Artifact, crate::LoadError> {
+        C32Artifact::from_dir(path)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn simple_first_last() {
-        let e = extract("Quentin Richert", None, None);
-        assert_eq!(e.first_name.as_deref(), Some("Quentin"));
-        assert!(e.confidence > 0.9, "confidence was {}", e.confidence);
+    fn production_directory() -> Option<PathBuf> {
+        std::env::var_os("BONJOUR_TEST_DATA_DIR").map(PathBuf::from)
     }
 
     #[test]
-    fn order_independent() {
-        // The family-name-first ordering must still find the first name.
-        assert_eq!(name_of("Richert Quentin").as_deref(), Some("Quentin"));
+    fn load_error_kind_is_stable() {
+        let error = Classifier::from_dir("definitely-missing-bonjour-name-data").unwrap_err();
+        assert_eq!(error.kind(), LoadErrorKind::MissingData);
+        assert!(error.path().is_some());
+    }
+
+    fn assert_classifier_traits<T: fmt::Debug + Send + Sync>() {}
+
+    fn assert_value_traits<T: fmt::Debug + Clone + Copy + PartialEq + serde::Serialize>() {}
+
+    fn assert_enum_traits<T: fmt::Debug + Clone + Copy + Eq + std::hash::Hash>() {}
+
+    fn assert_error_traits<T: fmt::Debug + Error>() {}
+
+    #[test]
+    fn public_types_implement_the_locked_traits() {
+        assert_classifier_traits::<Classifier>();
+        assert_value_traits::<GenderHint>();
+        assert_value_traits::<Inference<'static>>();
+        assert_enum_traits::<GenderHint>();
+        assert_enum_traits::<LoadErrorKind>();
+        assert_error_traits::<InvalidThreshold>();
+        assert_error_traits::<LoadError>();
     }
 
     #[test]
-    fn compound_name_is_atomic() {
-        assert_eq!(
-            name_of("Jean-Pierre Dupont").as_deref(),
-            Some("Jean-Pierre")
-        );
-    }
+    fn greeting_threshold_is_configurable_and_validated() {
+        let inference = Inference {
+            greeting_name: Some("Quentin"),
+            confidence: DEFAULT_GREETING_THRESHOLD,
+            gender_hint: Some(GenderHint::Male),
+            gender_confidence: 0.9,
+        };
+        assert_eq!(inference.greeting(), Some("Quentin"));
+        assert_eq!(inference.greeting_at(0.0).unwrap(), Some("Quentin"));
+        assert_eq!(inference.greeting_at(1.0).unwrap(), None);
 
-    #[test]
-    fn frequency_beats_ambiguous_surname() {
-        // Both "Jean" and "Martin" are in the table; the more common wins.
-        assert_eq!(name_of("Jean Martin").as_deref(), Some("Jean"));
-    }
-
-    #[test]
-    fn accents_match_and_output_is_preserved() {
-        assert_eq!(name_of("Éric Tabarly").as_deref(), Some("Éric"));
-        assert_eq!(name_of("Eric Tabarly").as_deref(), Some("Eric"));
-    }
-
-    #[test]
-    fn unaccented_fallback_requires_an_unambiguous_name() {
-        let table = NameTable::from_csv("rene,GB,M,0.60\nrené,FR,M,0.70");
-
-        assert!((table.get("Rene").unwrap()[0].weight - 0.60).abs() < f64::EPSILON);
-        assert!((table.get("René").unwrap()[0].weight - 0.70).abs() < f64::EPSILON);
-        assert!(table.get("Rène").is_none());
-    }
-
-    #[test]
-    fn unambiguous_name_reports_gender_and_country() {
-        let e = extract("Quentin Richert", None, None);
-        assert_eq!(e.gender, Some(Gender::Male));
-        assert_eq!(e.country.as_deref(), Some("FR"));
-    }
-
-    #[test]
-    fn ambiguous_gender_without_hint_is_none() {
-        // "Simone" is FR=F, IT=M — no signal to choose, so no gender is claimed.
-        let e = extract("Simone", None, None);
-        assert_eq!(e.first_name.as_deref(), Some("Simone"));
-        assert_eq!(e.gender, None);
-        assert_eq!(e.country.as_deref(), Some("FR")); // best weight: 0.70 > 0.65
-    }
-
-    #[test]
-    fn country_hint_resolves_gender() {
-        let it = extract("Simone", Some("IT"), None);
-        assert_eq!(it.gender, Some(Gender::Male));
-        assert_eq!(it.country.as_deref(), Some("IT"));
-        assert!((it.confidence - 0.65).abs() < 1e-9, "was {}", it.confidence);
-
-        let fr = extract("Simone", Some("fr"), None); // case-insensitive
-        assert_eq!(fr.gender, Some(Gender::Female));
-        assert_eq!(fr.country.as_deref(), Some("FR"));
-    }
-
-    #[test]
-    fn gender_hint_resolves_country() {
-        // Symmetric: knowing the gender pins the country for a unisex name.
-        let e = extract("Simone", None, Some("M"));
-        assert_eq!(e.gender, Some(Gender::Male));
-        assert_eq!(e.country.as_deref(), Some("IT"));
-    }
-
-    #[test]
-    fn gender_hint_accepts_long_form_and_ignores_garbage() {
-        assert_eq!(
-            extract("Simone", None, Some("female")).country.as_deref(),
-            Some("FR")
-        );
-        // Unparsable hint → treated as absent → still ambiguous.
-        assert_eq!(extract("Simone", None, Some("bogus")).gender, None);
-    }
-
-    #[test]
-    fn hint_that_matches_nothing_is_ignored() {
-        // No IT row for "Quentin" — a hint must not reject a name we know.
-        let e = extract("Quentin", Some("IT"), None);
-        assert_eq!(e.first_name.as_deref(), Some("Quentin"));
-        assert_eq!(e.gender, Some(Gender::Male));
-        assert_eq!(e.country.as_deref(), Some("FR"));
-    }
-
-    #[test]
-    fn org_marker_crushes_confidence() {
-        let e = extract("Quentin Richert SAS", None, None);
-        assert_eq!(e.first_name.as_deref(), Some("Quentin"));
-        assert!(e.confidence < 0.2, "confidence was {}", e.confidence);
-        assert!(e.greeting_name(DEFAULT_THRESHOLD).is_none());
-    }
-
-    #[test]
-    fn ampersand_is_org_evidence() {
-        let e = extract("Martin & Fils", None, None);
-        assert!(
-            e.confidence < DEFAULT_THRESHOLD,
-            "confidence was {}",
-            e.confidence
-        );
-        assert!(e.greeting_name(DEFAULT_THRESHOLD).is_none());
-    }
-
-    #[test]
-    fn no_candidate_yields_null() {
-        for input in [
-            "Les Motards d'Alsace",
-            "ACME Corporation",
-            "Club de Tennis Strasbourg",
-        ] {
-            let e = extract(input, None, None);
-            assert_eq!(e.first_name, None, "input: {input}");
-            assert_eq!(e.gender, None, "input: {input}");
-            assert_eq!(e.country, None, "input: {input}");
-            assert!(e.confidence.abs() < f64::EPSILON, "input: {input}");
+        for threshold in [f64::NAN, f64::NEG_INFINITY, -0.1, 1.1, f64::INFINITY] {
+            let error = inference.greeting_at(threshold).unwrap_err();
+            assert_eq!(error.threshold().to_bits(), threshold.to_bits());
+            assert!(error.to_string().contains("finite value in 0.0..=1.0"));
         }
     }
 
     #[test]
-    fn greeting_name_respects_threshold() {
-        let e = extract("Quentin Richert", None, None);
-        assert_eq!(e.greeting_name(DEFAULT_THRESHOLD), Some("Quentin"));
-        assert_eq!(e.greeting_name(0.99), None); // 0.95 < 0.99
+    fn load_error_display_and_source_contracts_are_stable() {
+        let plain = LoadError::new(LoadErrorKind::MissingData, None, "missing data");
+        assert_eq!(plain.to_string(), "missing data");
+        assert!(plain.source().is_none());
+
+        let sourced = LoadError::with_source(
+            LoadErrorKind::Io,
+            Some(PathBuf::from("artifact.bin")),
+            "cannot read artifact",
+            std::io::Error::other("disk failure"),
+        );
+        assert_eq!(sourced.to_string(), "cannot read artifact: artifact.bin");
+        assert!(sourced.source().is_some());
+        assert!(format!("{sourced:?}").contains("disk failure"));
     }
 
     #[test]
-    fn empty_input_is_null() {
-        let e = extract("   ", None, None);
-        assert_eq!(e.first_name, None);
-        assert!(e.confidence.abs() < f64::EPSILON);
+    fn classifier_debug_and_hidden_benchmark_loader_use_pinned_data() {
+        let Some(directory) = production_directory() else {
+            return;
+        };
+        let classifier = Classifier::from_dir(&directory).unwrap();
+        let debug = format!("{classifier:?}");
+        assert!(debug.contains("bonjour-name-data-v1"));
+        assert!(debug.contains("1803175"));
+
+        #[cfg(feature = "benchmark-internals")]
+        {
+            let artifact = benchmark::open_artifact(&directory).unwrap();
+            assert_eq!(artifact.key_count(), artifact::KEY_COUNT);
+        }
     }
 
-    fn name_of(input: &str) -> Option<String> {
-        extract(input, None, None).first_name
+    #[test]
+    fn missing_winner_has_no_source_span() {
+        assert_eq!(source_greeting_span("Quentin", None), None);
+    }
+
+    #[cfg(all(feature = "standalone", not(bonjour_embedded_data)))]
+    #[test]
+    fn unavailable_standalone_returns_typed_error() {
+        let error = Classifier::standalone().unwrap_err();
+        assert_eq!(error.kind(), LoadErrorKind::StandaloneDataUnavailable);
+    }
+
+    #[cfg(all(feature = "standalone", bonjour_embedded_data))]
+    #[test]
+    fn embedded_production_artifact_performs_known_lookup() {
+        let classifier = Classifier::standalone().unwrap();
+        let inference = classifier.infer("Quentin Richert", Some("FR"), None);
+        assert_eq!(inference.greeting_name, Some("Quentin"));
     }
 }

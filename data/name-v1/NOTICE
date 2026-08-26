@@ -1,0 +1,14 @@
+Bonjour Name Data v1
+
+The artifact was derived from a separately maintained corpus assembled
+primarily from public data and subsequently cleaned, aggregated, and
+quantized.
+
+This package contains no original source rows or name strings. It
+contains a hash-based index and coarse statistical metadata derived from
+the reworked corpus.
+
+These data files are not covered by bonjour's 0BSD source-code license.
+No rights in the source data are granted by that license. Users and
+redistributors are responsible for determining whether their use is
+lawful. The data files are provided without warranty.

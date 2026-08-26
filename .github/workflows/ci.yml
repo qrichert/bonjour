@@ -26,6 +26,10 @@ jobs:
       - name: Set up Just
         uses: taiki-e/install-action@just
 
+      - name: Set up uv
+        if: matrix.target == 'test'
+        uses: astral-sh/setup-uv@v7
+
       - name: Set up Bun
         if: matrix.target == 'lint'
         uses: oven-sh/setup-bun@v2

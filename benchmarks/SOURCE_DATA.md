@@ -35,6 +35,11 @@ definition.
   `57a82801894facf883769403271e68094bcedb563d31c81f853192dc05e66b47`.
 - Global-surname C32+q8 archive: SHA-256
   `a5f2d839f659fbe9f3a72dbedc1ecd68f69048d08ec276d11fa9281f2c6bb702`.
+- Production `bonjour-name-data-v1` manifest: SHA-256
+  `3dc5d96d7d4ea5e52821c442f5086865d760f0820349f6f090a307fe8c743474`.
+  Its twelve no-name-string constituents total 36,632,687 bytes and are
+  pinned individually by that manifest; no source or intermediate CSV is
+  distributed.
 - Fresh generated TEST snapshot: SHA-256
   `1be896d0febaade25d6c6f8ac8f9b55c382600df1a25f70c135f84fa7425d9ff`.
 - Former inspected 120,000-case TEST snapshot: SHA-256

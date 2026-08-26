@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::error::Error;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
@@ -374,10 +374,7 @@ fn second_pass(path: &Path, first: &FirstPass) -> Result<Rows> {
     let mut genders = vec![0_u8; row_count];
     let mut counts = vec![0_u32; row_count];
     let mut positions = offsets_by_id[..first.rows_per_name.len()].to_vec();
-    let mut country_ids = vec![u8::MAX; 65_536].into_boxed_slice();
-    for (id, &code) in first.country_codes.iter().enumerate() {
-        country_ids[usize::from(code)] = u8::try_from(id)?;
-    }
+    let country_ids = build_country_ids(&first.country_codes)?;
 
     let mut reader = open_csv(path)?;
     let mut seen_rows = 0_u32;
@@ -393,10 +390,9 @@ fn second_pass(path: &Path, first: &FirstPass) -> Result<Rows> {
             return Err(format!("too many second-pass rows for name ID {id}").into());
         }
         let position = usize::try_from(position)?;
-        let country_id = country_ids[usize::from(country)];
-        if country_id == u8::MAX {
-            return Err("country disappeared between CSV passes".into());
-        }
+        let country_id = *country_ids
+            .get(&country)
+            .ok_or("country disappeared between CSV passes")?;
         countries[position] = country_id;
         genders[position] = gender;
         counts[position] = count;
@@ -416,6 +412,17 @@ fn second_pass(path: &Path, first: &FirstPass) -> Result<Rows> {
         genders,
         counts,
     })
+}
+
+fn build_country_ids(country_codes: &[u16]) -> Result<BTreeMap<u16, u8>> {
+    if country_codes.len() > 256 {
+        return Err("more than 256 countries".into());
+    }
+    country_codes
+        .iter()
+        .enumerate()
+        .map(|(id, &country)| Ok((country, u8::try_from(id)?)))
+        .collect()
 }
 
 fn parse_record(record: &ByteRecord, line: u64) -> Result<(&[u8], u16, u8, u32)> {
@@ -953,14 +960,10 @@ fn write_quantized_metadata(
             stats.observe(original, decoded);
             observations += u128::from(original);
         }
-        row_offsets.push(
-            row_offsets
-                .last()
-                .copied()
-                .ok_or("missing row offset")?
-                .checked_add(u32::try_from(range.len())?)
-                .ok_or("row offset overflow")?,
-        );
+        row_offsets.push(next_row_offset(
+            row_offsets.last().copied().ok_or("missing row offset")?,
+            range.len(),
+        )?);
     }
     country_writer.flush()?;
     gender_writer.finish()?;
@@ -971,6 +974,12 @@ fn write_quantized_metadata(
         max_count.to_le_bytes(),
     )?;
     Ok((stats.rows, observations, stats))
+}
+
+fn next_row_offset(current: u32, additional: usize) -> Result<u32> {
+    current
+        .checked_add(u32::try_from(additional)?)
+        .ok_or_else(|| "row offset overflow".into())
 }
 
 struct TwoBitWriter<W: Write> {
@@ -1022,8 +1031,11 @@ fn write_u32_file(path: &Path, values: &[u32]) -> Result<()> {
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn quantize_count(count: u32, max_count: u32) -> u8 {
-    if count == 0 || max_count <= 1 {
+    if count == 0 {
         return 0;
+    }
+    if max_count <= 1 {
+        return 1;
     }
     let position = f64::from(count).ln() / f64::from(max_count).ln();
     (1.0 + position * 254.0).round().clamp(1.0, 255.0) as u8
@@ -1281,4 +1293,39 @@ fn format_percentage(numerator: u128, denominator: u128) -> String {
 #[allow(clippy::cast_precision_loss)]
 fn mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn q8_degenerate_maximum_preserves_nonzero_counts() {
+        assert_eq!(quantize_count(0, 0), 0);
+        assert_eq!(quantize_count(0, 1), 0);
+        assert_eq!(quantize_count(1, 1), 1);
+        assert_eq!(dequantize_count(1, 1), 1);
+    }
+
+    #[test]
+    fn country_ids_support_all_256_values_and_reject_257() {
+        let countries = (0_u16..256).collect::<Vec<_>>();
+        let ids = build_country_ids(&countries).unwrap();
+        assert_eq!(ids.len(), 256);
+        assert_eq!(ids[&0], 0);
+        assert_eq!(ids[&255], u8::MAX);
+
+        let mut too_many = countries;
+        too_many.push(256);
+        assert!(build_country_ids(&too_many).is_err());
+    }
+
+    #[test]
+    fn row_offsets_accept_u32_maximum_and_reject_overflow() {
+        assert_eq!(next_row_offset(u32::MAX - 1, 1).unwrap(), u32::MAX);
+        assert!(next_row_offset(u32::MAX, 1).is_err());
+        if usize::BITS > 32 {
+            assert!(next_row_offset(0, usize::try_from(u64::from(u32::MAX) + 1).unwrap()).is_err());
+        }
+    }
 }

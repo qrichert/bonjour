@@ -1,0 +1,73 @@
+{
+  "manifest_schema": 1,
+  "artifact_id": "bonjour-name-data-v1",
+  "format_version": 1,
+  "key_count": 1803175,
+  "row_count": 8722920,
+  "given_total_observations": 444154759,
+  "surname_total_observations": 489631377,
+  "files": [
+    {
+      "name": "clean_given_total_observations.u64",
+      "bytes": 8,
+      "sha256": "dbf438a42e84433caabed58f27497ac64aaf106ab92e90a9875a13d91bbc079a"
+    },
+    {
+      "name": "countries.dict",
+      "bytes": 210,
+      "sha256": "8399f5af051bc23a3fd3034dba654097bd79602ff18431073239a632f46cb448"
+    },
+    {
+      "name": "country_ids.u8",
+      "bytes": 8722920,
+      "sha256": "930a5b31968e0c18c8540e4b437dc3cb752b6095c7a6314689d149459de8edb5"
+    },
+    {
+      "name": "counts.q8",
+      "bytes": 8722920,
+      "sha256": "712afcce765ec2938df1286fc73b257b6a12dad305143f13f0ab6312e4f71c79"
+    },
+    {
+      "name": "fingerprints.u32",
+      "bytes": 7212700,
+      "sha256": "2912219f6fac33f60c2a96f91a42b997f5c573f5cf7ee08b649a525773c7b0ae"
+    },
+    {
+      "name": "genders.2bit",
+      "bytes": 2180730,
+      "sha256": "b1599781299157bc4886b412ccc9cd5c2f0314f55c7fe9769ea9d9aa22286dd2"
+    },
+    {
+      "name": "names.mphf",
+      "bytes": 777304,
+      "sha256": "46421259bc1937c3cc1ff4ae47dcbae1e1ec39af1276aa40493668682fd5fa00"
+    },
+    {
+      "name": "quantization_max_count.u32",
+      "bytes": 4,
+      "sha256": "5300d6f57ade10e19ba3478d9ad39af40c7a54eba394d8038a811a3df1842ac7"
+    },
+    {
+      "name": "row_offsets.u32",
+      "bytes": 7212704,
+      "sha256": "481132efd790dd4b7f806cab31372a1a26dbefa6f3ac62e81b37447e327c05ff"
+    },
+    {
+      "name": "surname_counts.q8",
+      "bytes": 1803175,
+      "sha256": "7bf0be8a2ec7104d76bfdaa1ef63092cf931be627cd889b6ee32042e73f04c3f"
+    },
+    {
+      "name": "surname_quantization_max_count.u32",
+      "bytes": 4,
+      "sha256": "8965e019408c5e217ab157f8550cd9fc7329cd71cd28a67c273c766999379823"
+    },
+    {
+      "name": "surname_total_observations.u64",
+      "bytes": 8,
+      "sha256": "b78c1275acb159b93ba69443445333806c7703a08ecab0928854afd8ec1a3cd1"
+    }
+  ],
+  "readme_sha256": "df3f4b2a008423e2d94c9abf9513b7d5ebabefed6f64e6343f67973a0680c43d",
+  "notice_sha256": "b674311829614e28a552937ed0796d314bf735020bb2b823fe1fd18fdae1bdfb"
+}

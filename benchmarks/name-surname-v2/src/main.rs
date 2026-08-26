@@ -205,6 +205,7 @@ fn generate(
 
     eprintln!("Scanning raw surname columns");
     let mut surname = scan_raw_surnames(raw_directory, &clean)?;
+    validate_observation_denominators(clean.total_given, surname.nonempty_surnames)?;
     add_clean_country_totals(&mut surname.countries, &clean.given_pairs);
     eprintln!(
         "Scanned {} files and {} rows; {} surname observations matched retained keys",
@@ -287,7 +288,7 @@ fn load_clean_v1(path: &Path) -> Result<CleanData> {
 
     for result in reader.byte_records() {
         let record = result?;
-        source_rows += 1;
+        source_rows = source_rows.checked_add(1).ok_or("clean-v1 row overflow")?;
         if record.len() != 4 {
             return Err(
                 format!("clean-v1 row {} does not have four fields", source_rows + 1).into(),
@@ -346,7 +347,9 @@ fn load_clean_v1(path: &Path) -> Result<CleanData> {
         global_given[id as usize] = global_given[id as usize]
             .checked_add(count)
             .ok_or("given-name global count overflow")?;
-        total_given += u128::from(count);
+        total_given = total_given
+            .checked_add(u128::from(count))
+            .ok_or("given-name denominator overflow")?;
     }
 
     if names.is_empty() {
@@ -397,7 +400,7 @@ fn scan_raw_surnames(directory: &Path, clean: &CleanData) -> Result<SurnameData>
 
         for result in reader.byte_records() {
             let record = result?;
-            file_rows += 1;
+            file_rows = file_rows.checked_add(1).ok_or("raw row count overflow")?;
             if record.len() != 4 {
                 return Err(format!(
                     "{} row {} has {} fields, expected 4",
@@ -421,13 +424,20 @@ fn scan_raw_surnames(directory: &Path, clean: &CleanData) -> Result<SurnameData>
             if surname.is_empty() {
                 continue;
             }
-            file_nonempty += 1;
+            file_nonempty = file_nonempty
+                .checked_add(1)
+                .ok_or("surname denominator overflow")?;
             if let Some(&id) = clean.name_ids.get(surname) {
-                *local.entry(id).or_insert(0) += 1;
+                let local_count = local.entry(id).or_insert(0);
+                *local_count = local_count
+                    .checked_add(1)
+                    .ok_or("country surname count overflow")?;
                 global_counts[id as usize] = global_counts[id as usize]
                     .checked_add(1)
                     .ok_or("global surname count overflow")?;
-                file_matched += 1;
+                file_matched = file_matched
+                    .checked_add(1)
+                    .ok_or("matched surname count overflow")?;
             }
         }
 
@@ -448,9 +458,15 @@ fn scan_raw_surnames(directory: &Path, clean: &CleanData) -> Result<SurnameData>
                 ..CountryStats::default()
             },
         );
-        raw_rows += file_rows;
-        nonempty_surnames += file_nonempty;
-        matched_surnames += file_matched;
+        raw_rows = raw_rows
+            .checked_add(file_rows)
+            .ok_or("raw row count overflow")?;
+        nonempty_surnames = nonempty_surnames
+            .checked_add(file_nonempty)
+            .ok_or("surname denominator overflow")?;
+        matched_surnames = matched_surnames
+            .checked_add(file_matched)
+            .ok_or("matched surname count overflow")?;
         eprintln!(
             "  [{}/{}] {}: {} rows, {} matched observations, {} matched keys, {:.1?}",
             file_index + 1,
@@ -490,6 +506,14 @@ fn scan_raw_surnames(directory: &Path, clean: &CleanData) -> Result<SurnameData>
         nonempty_surnames,
         matched_surnames,
     })
+}
+
+fn validate_observation_denominators(given: u128, surname: u64) -> Result<()> {
+    if given == 0 || surname == 0 {
+        return Err("given and surname denominators must be nonzero".into());
+    }
+    u64::try_from(given).map_err(|_| "given-name denominator exceeds u64")?;
+    Ok(())
 }
 
 fn add_clean_country_totals(
@@ -1413,6 +1437,23 @@ mod tests {
             country_direct_estimate(100, 4, 7, 2),
             100 + 20 + 14 + 4 + 36
         );
+    }
+
+    #[test]
+    fn observation_denominators_are_nonzero_and_fit_the_format() {
+        assert!(validate_observation_denominators(1, 1).is_ok());
+        assert!(validate_observation_denominators(0, 1).is_err());
+        assert!(validate_observation_denominators(1, 0).is_err());
+        assert!(validate_observation_denominators(u128::from(u64::MAX) + 1, 1).is_err());
+    }
+
+    #[test]
+    fn empty_clean_corpus_is_rejected() -> Result<()> {
+        let temporary = tempdir()?;
+        let clean_path = temporary.path().join("clean-v1.csv");
+        fs::write(&clean_path, "name,country,gender,count\n")?;
+        assert!(load_clean_v1(&clean_path).is_err());
+        Ok(())
     }
 
     #[test]

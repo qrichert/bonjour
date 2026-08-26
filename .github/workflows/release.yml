@@ -10,9 +10,61 @@ jobs:
     name: CI
     uses: ./.github/workflows/ci.yml
 
+  metadata:
+    name: Verify release metadata
+    needs: ci
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify tag, Cargo version, CLI version, and package
+        run: |
+          version=$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          test "${{ github.ref_name }}" = "$version"
+          test "$(cargo run --quiet -- --version)" = "bonjour $version"
+          cargo package --locked
+          cargo package --list | grep -F 'data/name-v1/manifest.json'
+          if cargo package --list | grep -E 'data/name-v1/.*\.(u8|u32|u64|q8|dict|mphf|2bit)$'; then
+            echo 'large name-data constituent entered the crate package' >&2
+            exit 1
+          fi
+
+  name-data:
+    name: Package name data
+    needs: metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Build deterministic name-data archive
+        run: |
+          uv run scripts/package_name_data.py data/name-v1 --output-directory dist
+          (cd dist && sha256sum --check bonjour-name-data-v1.tar.zst.sha256)
+          sha256sum dist/bonjour-name-data-v1.tar.zst > dist/independent.sha256
+          test "$(cut -d' ' -f1 dist/independent.sha256)" = "$(cut -d' ' -f1 dist/bonjour-name-data-v1.tar.zst.sha256)"
+
+      - name: Upload name-data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bonjour-name-data-v1
+          path: |
+            dist/bonjour-name-data-v1.tar.zst
+            dist/bonjour-name-data-v1.tar.zst.sha256
+          if-no-files-found: error
+
   build:
     name: Build
-    needs: ci
+    needs: [metadata, name-data]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -45,6 +97,12 @@ jobs:
       - name: Build release binary
         run: just build
 
+      - name: Verify embedded artifact and version
+        run: |
+          version=$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          test "$(target/release/bonjour --version)" = "bonjour $version"
+          target/release/bonjour 'Quentin Richert' | grep -F '"greeting_name": "Quentin"'
+
       - name: Prepare artifact
         run: |
           mkdir -p dist/
@@ -62,7 +120,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, name-data]
     runs-on: ubuntu-latest
     permissions:
       contents: write

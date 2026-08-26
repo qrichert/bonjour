@@ -1,8 +1,11 @@
 # Greeting-name classifier evaluation harness
 
-This isolated crate evaluates greeting-name inference against labels
-that are independent of the clean-v1 statistical corpus. It does not
-change corpus sanitation, C32 encoding, or application runtime behavior.
+This crate evaluates greeting-name inference against labels that are
+independent of the clean-v1 statistical corpus. The production crate and
+evaluator now consume the same artifact, lexical, and classifier
+implementation through the root crate's hidden `benchmark-internals`
+feature. Corpus sanitation and C32 encoding remain separate benchmark
+stages.
 
 The harness contains five candidate-generation algorithms:
 
@@ -76,6 +79,32 @@ Both generators use SplitMix64 with the fixed seeds documented above,
 with additional domain separation by split.
 
 ## Fixed artifact baseline
+
+C3.1 is the frozen production algorithm for bonjour 0.1.0. C2 and C3
+remain available here as historical comparison baselines; production
+does not expose algorithm selection or tuning controls.
+
+Before the benchmark-local implementation was retired, same-process
+comparisons ran old and shared C3.1 over regression, DEV, and
+VALIDATION:
+
+| Target/toolchain                        |   Cases | Maximum decision difference | Maximum gender difference | Decision mismatches |
+| --------------------------------------- | ------: | --------------------------: | ------------------------: | ------------------: |
+| `x86_64-apple-darwin`, Rust 1.93.0      | 120,014 |                           0 |                         0 |                   0 |
+| `x86_64-unknown-linux-gnu`, Rust 1.93.0 | 120,014 |                           0 |                         0 |                   0 |
+
+Both targets produced the frozen behavior digest
+`9fd21be0cdc49b9f5e5e6f82f5c286514cf34ea9164d732b6d8a252d9111eab7`. The
+committed `check-c31-parity` command reproduces that digest on the
+pinned Linux target and toolchain. Other targets use semantic tests
+rather than an assumed portable exact-bit guarantee for floating-point
+transcendental functions.
+
+```console
+cargo +1.93.0 run --locked --release \
+  --bin check-c31-parity -- \
+  ../../_wip/name-eval-artifact-c/c32-q8-surname-global
+```
 
 `fixtures/artifact-manifest.csv` pins the eight files in the existing
 clean-v1 C32 + q8 artifact by byte length and SHA-256.

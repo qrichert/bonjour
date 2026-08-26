@@ -368,11 +368,7 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
     ) {
         validate_spent_holdout_digest(acknowledged, &holdout.manifest.holdout_sha256)?;
     }
-    let corpus = C32Artifact::open(
-        &arguments.artifact,
-        &fixtures.join("artifact-manifest.csv"),
-        &fixtures.join("surname-artifact-manifest.csv"),
-    )?;
+    let corpus = bonjour::benchmark::open_artifact(&arguments.artifact)?;
     if let Some(acknowledged_sha256) = &arguments.compare_sealed_c2_c3_c31_sha256 {
         let holdout =
             frozen_holdout.ok_or("--compare-sealed-c2-c3-c31-sha256 requires a frozen holdout")?;

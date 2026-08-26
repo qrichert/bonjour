@@ -14,7 +14,9 @@ external names-dataset country CSVs
   -> name-indexes / name-corpus-audit      representation and tail experiments
   -> name-clean-v1                         selected sanitation and 5/2 policy
   -> name-surname-v2                       selected global surname role evidence
-  -> name-eval                             independent A/B/C0/C1 evaluation
+  -> name-eval                             independent A/B/C/C1/C2/C3/C3.1 evaluation
+  -> root crate                            frozen C3.1 production implementation
+  -> name-runtime                          load/startup/inference benchmark
 ```
 
 `scripts/extract_name_counts.py` validates the raw four-column country
@@ -102,10 +104,10 @@ The surname probability denominator is all 489,631,377 non-empty surname
 observations, not merely the 364,386,816 observations whose strings
 overlap a retained first-name key.
 
-## Current model: Algorithms C0 and C1
+## Role-scoring foundation: Algorithms C0 and C1
 
-Algorithms C0 and C1 exist only in the evaluation harness; application
-runtime behavior has not changed. Their input is conceptually:
+Algorithms C0 and C1 remain evaluation baselines and form the ranking
+foundation inherited by production C3.1. Their input is conceptually:
 
 ```text
 infer(display_name, country_hint, locale_hint)
@@ -186,8 +188,9 @@ an additional `0.04` structural bonus. Unsupported two-token whitespace
 inputs are deliberately not combined: without direct phrase evidence,
 `Mary Jane` cannot safely be distinguished from given + surname.
 
-C1's synthetic operating threshold is frozen at `0.93`, selected on
-VALIDATION. It is not yet a production threshold.
+C1's historical synthetic operating threshold is frozen at `0.93`,
+selected on VALIDATION. Production C3.1 uses the later proxy-calibrated
+decision policy.
 
 ## Current evaluation result
 
@@ -346,8 +349,8 @@ expected-NULL emissions (97.72% observed precision, 17.37% recall); and
 synthetic VALIDATION remained 14,686 correct / 0 wrong. C3.1 preserves
 14 of C3's 17 additional V3 matches while returning aggregate error and
 NULL-emission counts to C2's checkpoint. These are selection results,
-not held-out validation. C2 remains the production candidate, C3/C3.1
-remain experimental, and C3.1 requires fresh REAL_PROXY_V4 evidence.
+not held-out validation. At that historical checkpoint C2 remained the
+leading candidate and C3.1 still required fresh REAL_PROXY_V4 evidence.
 
 REAL_PROXY_V4 was then drawn with fixed seed `0x5245414C5F5634` after
 excluding every exact V1, V2, and V3 display-name value. Its two blind
@@ -375,9 +378,55 @@ clearer subset. No V4 row-level prediction or failure was written or
 inspected; V4 is now spent comparison evidence and cannot tune any of
 the three frozen algorithms.
 
+## Current production model: C3.1
+
+Production inference now uses exactly the evaluator's frozen C3.1 code.
+The display name is NFC/punctuation/whitespace-canonicalized for lookup
+while its original UTF-8 text is retained for output. Candidate lookup
+tries canonical, title-case, lowercase, and accent-folded variants,
+subject to the Unicode lexical eligibility gate.
+
+Candidate generation consists of:
+
+- exact contiguous one- and two-token spans present in the first-name
+  MPHF;
+- conservative whitespace/hyphen compounds whose two components are both
+  statistically given-like;
+- corpus-backed handle segments exposed only by ASCII digit runs, `_`,
+  `.`, or safe Unicode lower-to-upper transitions.
+
+The candidate ranker uses the C1 role model documented above. It
+compares global given-name likelihood against global surname likelihood,
+adds count reliability and country-specific given evidence, and uses
+direct/compositional compound and competing-candidate evidence. It does
+not parse, index, or return arbitrary surnames.
+
+The winner is then passed through frozen C2 emission calibration:
+
+```text
+margin_signal = clamp(winner_margin / 0.5, 0, 1)
+
+decision_score = 0.10 * margin_signal
+               + 0.70 * role_signal
+               + 0.20 * count_reliability
+```
+
+Generic organization evidence, an ampersand, or a candidate shorter than
+three alphabetic characters vetoes this score. Strong legal markers
+hard-abstain earlier. C3.1 subtracts `0.025` only when the winning
+candidate came from handle segmentation. The final threshold is
+`0.78975882405736963`; neither value is runtime-configurable in 0.1.0.
+
+If the final score crosses the threshold, the API returns the
+corresponding contiguous span of the original input—not the canonical
+lookup string. Gender is returned only alongside an emitted greeting and
+only when its majority share meets the frozen `0.80` threshold.
+Otherwise the classifier returns `None`, and the caller safely retains
+the complete display name.
+
 ## Current storage choice
 
-The leading experimental artifact is therefore:
+The selected production artifact is:
 
 ```text
 1,803,175 clean-v1 first-name keys
@@ -388,8 +437,11 @@ The leading experimental artifact is therefore:
 = 34.94 MiB direct
 ```
 
-No generated artifact is committed because the application does not
-consume this format yet and its binary layout may still change. Exact
-evaluator inputs are pinned by the manifests under `name-eval/fixtures`;
-external bulk-input checksums are recorded in
-[SOURCE_DATA.md](SOURCE_DATA.md).
+The root crate now consumes this fixed format in runtime-loaded and
+standalone modes. Its twelve no-name-string constituents total
+36,632,687 bytes; the small trusted production manifest is committed
+under `data/name-v1/`. The large constituents remain outside the current
+change until redistribution and the exact NOTICE are explicitly
+approved. External bulk-input checksums are recorded in
+[SOURCE_DATA.md](SOURCE_DATA.md), and the complete format/pipeline is
+documented in [`docs/name-data-format.md`](../docs/name-data-format.md).
