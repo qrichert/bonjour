@@ -1,5 +1,5 @@
 //! Extract a probable greeting name from an arbitrary display name, with a
-//! confidence score.
+//! decision score.
 //!
 //! A display name is not necessarily a person: it may be a company or a club
 //! (`ACME Corporation`, `Club de Tennis Strasbourg`). So rather than assuming a
@@ -8,6 +8,7 @@
 //! organization evidence. Uncertain cases yield `None`; precision over recall:
 //! a missed greeting is cheap, greeting a tennis club "Bonjour, Martin" is not.
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -57,7 +58,7 @@ pub struct Inference<'a> {
     /// Best exact source-span candidate, or `None` when no safe candidate exists.
     pub greeting_name: Option<&'a str>,
     /// Pre-threshold C3.1 decision score, not a calibrated probability.
-    pub confidence: f64,
+    pub decision_score: f64,
     /// Conservatively gated gender evidence for the candidate.
     pub gender_hint: Option<GenderHint>,
     /// Majority-gender share, or zero when no gender evidence is emitted.
@@ -69,7 +70,7 @@ impl<'a> Inference<'a> {
     #[must_use]
     pub fn greeting(&self) -> Option<&'a str> {
         self.greeting_name
-            .filter(|_| self.confidence >= DEFAULT_GREETING_THRESHOLD)
+            .filter(|_| self.decision_score >= DEFAULT_GREETING_THRESHOLD)
     }
 
     /// Select the greeting candidate using an explicit threshold.
@@ -80,8 +81,108 @@ impl<'a> Inference<'a> {
     /// `0.0..=1.0`.
     pub fn greeting_at(&self, threshold: f64) -> Result<Option<&'a str>, InvalidThreshold> {
         validate_threshold(threshold)?;
-        Ok(self.greeting_name.filter(|_| self.confidence >= threshold))
+        Ok(self
+            .greeting_name
+            .filter(|_| self.decision_score >= threshold))
     }
+}
+
+/// One lexically eligible candidate exposed by detailed diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct CandidateScore<'a> {
+    /// Exact contiguous candidate span from the original display name.
+    pub candidate: &'a str,
+    /// Internal candidate-ranking score, or `None` without scorer support.
+    pub ranking_score: Option<f64>,
+    /// Scores supplied by the currently available evidence layers.
+    pub signals: CandidateSignals,
+}
+
+/// Extensible scorer signals attached to an enumerated candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct CandidateSignals {
+    /// Score supplied by the statistical name corpus, when available.
+    pub corpus_score: Option<f64>,
+}
+
+/// Weighted terms in the frozen C2 emission score.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct DecisionContributions {
+    /// Candidate-quality contribution. This is zero in frozen C3.1.
+    pub candidate_quality: f64,
+    /// Contribution from separation between the top two candidates.
+    pub winner_margin: f64,
+    /// Contribution from given-name versus surname-role evidence.
+    pub role: f64,
+    /// Contribution from the amount of supporting evidence.
+    pub reliability: f64,
+}
+
+/// Existing hard and soft vetoes applied by frozen C3.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct DecisionVetoes {
+    /// A strong legal or organization marker forced an immediate abstention.
+    pub strong_organization_marker: bool,
+    /// A generic organization marker forced the emission score to zero.
+    pub generic_organization_marker: bool,
+    /// An ampersand forced the emission score to zero.
+    pub ampersand: bool,
+    /// The selected candidate did not contain the minimum number of letters.
+    pub candidate_too_short: bool,
+}
+
+/// Diagnostic trace of the frozen C3.1 pre-threshold decision.
+///
+/// Winner-only values are absent when no candidate was selected, including a
+/// hard organization-marker abstention. The separately ranked candidates may
+/// still contain counterfactual entries in that case.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct DecisionTrace {
+    /// Ranking score of the selected candidate.
+    pub candidate_quality: Option<f64>,
+    /// Difference between the first- and second-ranked candidates.
+    pub winner_margin: Option<f64>,
+    /// Winner margin normalized by the frozen margin scale.
+    pub margin_signal: Option<f64>,
+    /// Log likelihood ratio of given-name to surname evidence.
+    pub role_llr: Option<f64>,
+    /// Bounded role signal derived from `role_llr`.
+    pub role_signal: Option<f64>,
+    /// Evidence reliability used by the emission model.
+    pub reliability: Option<f64>,
+    /// Number of Unicode alphabetic characters in the selected candidate.
+    pub alphabetic_length: Option<usize>,
+    /// Frozen minimum alphabetic length used by the veto.
+    pub minimum_alphabetic_length: usize,
+    /// Weighted C2 terms before vetoes, when a winner exists.
+    pub contributions: Option<DecisionContributions>,
+    /// Clamped weighted sum before soft vetoes, when a winner exists.
+    pub pre_veto_score: Option<f64>,
+    /// Score after soft vetoes and before the segmentation penalty.
+    pub post_veto_score: f64,
+    /// Whether the winner came from conservative handle segmentation.
+    pub segmented_candidate: Option<bool>,
+    /// Handle segmentation boundary used for the winner, when applicable.
+    pub segmentation_mechanism: Option<&'static str>,
+    /// C3.1 provenance penalty actually applied to the winner.
+    pub segmented_candidate_penalty: f64,
+    /// Veto states used by the decision.
+    pub vetoes: DecisionVetoes,
+}
+
+/// Unthresholded inference together with every eligible candidate.
+///
+/// Candidate output is diagnostic: inclusion or scorer support does not imply
+/// that a candidate is safe to use as a greeting.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DetailedInference<'a> {
+    /// Selected pre-threshold candidate and final C3.1 decision score.
+    pub inference: Inference<'a>,
+    /// Existing inputs and arithmetic behind the final decision score.
+    pub decision: DecisionTrace,
+    /// Ranked candidates followed by unscored candidates in source order.
+    pub candidates: Vec<CandidateScore<'a>>,
 }
 
 fn validate_threshold(threshold: f64) -> Result<(), InvalidThreshold> {
@@ -231,6 +332,53 @@ impl Classifier {
         locale_hint: Option<&str>,
         gender_hint: Option<GenderHint>,
     ) -> Inference<'a> {
+        let (diagnostic, raw) =
+            self.diagnose_with_gender(display_name, country_hint, locale_hint, gender_hint);
+        inference_from_diagnostic(display_name, &diagnostic, &raw)
+    }
+
+    /// Infer and return every ranked C3.1 candidate for diagnostics.
+    #[must_use]
+    pub fn infer_detailed<'a>(
+        &self,
+        display_name: &'a str,
+        country_hint: Option<&str>,
+        locale_hint: Option<&str>,
+    ) -> DetailedInference<'a> {
+        self.infer_detailed_with_gender(display_name, country_hint, locale_hint, None)
+    }
+
+    /// Infer with a gender hint and return every ranked C3.1 candidate.
+    #[must_use]
+    pub fn infer_detailed_with_gender<'a>(
+        &self,
+        display_name: &'a str,
+        country_hint: Option<&str>,
+        locale_hint: Option<&str>,
+        gender_hint: Option<GenderHint>,
+    ) -> DetailedInference<'a> {
+        let (diagnostic, raw) =
+            self.diagnose_with_gender(display_name, country_hint, locale_hint, gender_hint);
+        let decision = decision_trace(&diagnostic);
+        let candidates = candidate_scores(display_name, &diagnostic.candidates);
+        let inference = inference_from_diagnostic(display_name, &diagnostic, &raw);
+        DetailedInference {
+            inference,
+            decision,
+            candidates,
+        }
+    }
+
+    fn diagnose_with_gender(
+        &self,
+        display_name: &str,
+        country_hint: Option<&str>,
+        locale_hint: Option<&str>,
+        gender_hint: Option<GenderHint>,
+    ) -> (
+        classifier::RoleInferenceDiagnostic,
+        classifier::RawInference,
+    ) {
         let diagnostic = classifier::diagnose_role_inference(
             &self.artifact,
             classifier::ALGORITHM_C3,
@@ -246,35 +394,128 @@ impl Classifier {
         if let Some(gender_hint) = gender_hint {
             classifier::apply_gender_hint(&diagnostic, &mut raw, gender_hint);
         }
-        let greeting_name = raw
-            .greeting_candidate
-            .is_some()
-            .then(|| source_greeting_span(display_name, diagnostic.candidates.first()))
-            .flatten();
-        debug_assert_eq!(raw.greeting_candidate.is_some(), greeting_name.is_some());
-        let gender_emitted = greeting_name.is_some()
-            && raw.confidence >= DEFAULT_GREETING_THRESHOLD
-            && raw.gender_hint.is_some();
-
-        Inference {
-            greeting_name,
-            confidence: raw.confidence,
-            gender_hint: gender_emitted.then_some(raw.gender_hint).flatten(),
-            gender_confidence: if gender_emitted {
-                raw.gender_confidence
-            } else {
-                0.0
-            },
-        }
+        (diagnostic, raw)
     }
+}
+
+fn decision_trace(diagnostic: &classifier::RoleInferenceDiagnostic) -> DecisionTrace {
+    let breakdown = classifier::c31_decision_breakdown(
+        diagnostic,
+        classifier::ALGORITHM_C2,
+        classifier::ALGORITHM_C31,
+    );
+    let winner = breakdown.winner.as_ref();
+    DecisionTrace {
+        candidate_quality: winner.map(|features| features.winner_score),
+        winner_margin: winner.map(|features| features.winner_margin),
+        margin_signal: breakdown.margin_signal,
+        role_llr: winner.map(|features| features.role_llr),
+        role_signal: winner.map(|features| features.role_signal),
+        reliability: winner.map(|features| features.reliability),
+        alphabetic_length: winner.map(|features| features.alphabetic_length),
+        minimum_alphabetic_length: classifier::ALGORITHM_C2.minimum_candidate_letters,
+        contributions: breakdown
+            .contributions
+            .map(|contributions| DecisionContributions {
+                candidate_quality: contributions.candidate_quality,
+                winner_margin: contributions.winner_margin,
+                role: contributions.role,
+                reliability: contributions.reliability,
+            }),
+        pre_veto_score: breakdown.pre_veto_score,
+        post_veto_score: breakdown.post_veto_score,
+        segmented_candidate: breakdown.segmented_candidate,
+        segmentation_mechanism: winner.and_then(|features| features.segmentation_mechanism),
+        segmented_candidate_penalty: breakdown.segmented_candidate_penalty,
+        vetoes: DecisionVetoes {
+            strong_organization_marker: breakdown.hard_organization_marker,
+            generic_organization_marker: breakdown.generic_organization_marker,
+            ampersand: breakdown.ampersand,
+            candidate_too_short: breakdown.candidate_too_short,
+        },
+    }
+}
+
+fn inference_from_diagnostic<'a>(
+    display_name: &'a str,
+    diagnostic: &classifier::RoleInferenceDiagnostic,
+    raw: &classifier::RawInference,
+) -> Inference<'a> {
+    let greeting_name = raw
+        .greeting_candidate
+        .is_some()
+        .then(|| source_greeting_span(display_name, diagnostic.candidates.first()))
+        .flatten();
+    debug_assert_eq!(raw.greeting_candidate.is_some(), greeting_name.is_some());
+    let gender_emitted = greeting_name.is_some()
+        && raw.confidence >= DEFAULT_GREETING_THRESHOLD
+        && raw.gender_hint.is_some();
+
+    Inference {
+        greeting_name,
+        decision_score: raw.confidence,
+        gender_hint: gender_emitted.then_some(raw.gender_hint).flatten(),
+        gender_confidence: if gender_emitted {
+            raw.gender_confidence
+        } else {
+            0.0
+        },
+    }
+}
+
+fn candidate_scores<'a>(
+    display_name: &'a str,
+    candidates: &[classifier::CandidateDiagnostic],
+) -> Vec<CandidateScore<'a>> {
+    let mut supported_bounds = HashSet::with_capacity(candidates.len());
+    let mut scores = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let (Some(byte_start), Some(byte_end), Some(candidate_span)) = (
+            candidate.byte_start,
+            candidate.byte_end,
+            source_candidate_span(display_name, candidate),
+        ) else {
+            continue;
+        };
+        supported_bounds.insert((byte_start, byte_end));
+        scores.push(CandidateScore {
+            candidate: candidate_span,
+            ranking_score: Some(candidate.score),
+            signals: CandidateSignals {
+                corpus_score: Some(candidate.score),
+            },
+        });
+    }
+    debug_assert_eq!(scores.len(), candidates.len());
+    scores.extend(
+        classifier::enumerate_candidate_spans(display_name)
+            .into_iter()
+            .filter(|span| !supported_bounds.contains(&(span.byte_start, span.byte_end)))
+            .filter_map(|span| {
+                display_name
+                    .get(span.byte_start..span.byte_end)
+                    .map(|candidate| CandidateScore {
+                        candidate,
+                        ranking_score: None,
+                        signals: CandidateSignals { corpus_score: None },
+                    })
+            }),
+    );
+    scores
 }
 
 fn source_greeting_span<'a>(
     display_name: &'a str,
     winner: Option<&classifier::CandidateDiagnostic>,
 ) -> Option<&'a str> {
-    let winner = winner?;
-    display_name.get(winner.byte_start?..winner.byte_end?)
+    source_candidate_span(display_name, winner?)
+}
+
+fn source_candidate_span<'a>(
+    display_name: &'a str,
+    candidate: &classifier::CandidateDiagnostic,
+) -> Option<&'a str> {
+    display_name.get(candidate.byte_start?..candidate.byte_end?)
 }
 
 /// Frozen evaluator internals. This is not part of the supported 0.1 API.
@@ -312,6 +553,8 @@ mod tests {
 
     fn assert_value_traits<T: fmt::Debug + Clone + Copy + PartialEq + serde::Serialize>() {}
 
+    fn assert_detailed_traits<T: fmt::Debug + Clone + PartialEq + serde::Serialize>() {}
+
     fn assert_enum_traits<T: fmt::Debug + Clone + Copy + Eq + std::hash::Hash>() {}
 
     fn assert_error_traits<T: fmt::Debug + Error>() {}
@@ -321,6 +564,12 @@ mod tests {
         assert_classifier_traits::<Classifier>();
         assert_value_traits::<GenderHint>();
         assert_value_traits::<Inference<'static>>();
+        assert_value_traits::<CandidateScore<'static>>();
+        assert_value_traits::<CandidateSignals>();
+        assert_value_traits::<DecisionContributions>();
+        assert_value_traits::<DecisionTrace>();
+        assert_value_traits::<DecisionVetoes>();
+        assert_detailed_traits::<DetailedInference<'static>>();
         assert_enum_traits::<GenderHint>();
         assert_enum_traits::<LoadErrorKind>();
         assert_error_traits::<InvalidThreshold>();
@@ -331,7 +580,7 @@ mod tests {
     fn greeting_threshold_is_configurable_and_validated() {
         let inference = Inference {
             greeting_name: Some("Quentin"),
-            confidence: DEFAULT_GREETING_THRESHOLD,
+            decision_score: DEFAULT_GREETING_THRESHOLD,
             gender_hint: Some(GenderHint::Male),
             gender_confidence: 0.9,
         };
@@ -383,6 +632,114 @@ mod tests {
     #[test]
     fn missing_winner_has_no_source_span() {
         assert_eq!(source_greeting_span("Quentin", None), None);
+    }
+
+    #[cfg(all(feature = "standalone", bonjour_embedded_data))]
+    #[test]
+    fn detailed_inference_matches_lightweight_and_preserves_unicode_spans() {
+        let classifier = Classifier::standalone().unwrap();
+        let input = "E\u{301}lodie Martin";
+        let lightweight = classifier.infer(input, Some("FR"), None);
+        let detailed = classifier.infer_detailed(input, Some("FR"), None);
+
+        assert_eq!(detailed.inference, lightweight);
+        assert_eq!(detailed.inference.greeting(), lightweight.greeting());
+        assert_eq!(
+            detailed.inference.greeting_at(0.5).unwrap(),
+            lightweight.greeting_at(0.5).unwrap()
+        );
+        assert!(!detailed.candidates.is_empty());
+        assert!(
+            detailed
+                .candidates
+                .iter()
+                .all(|candidate| input.contains(candidate.candidate))
+        );
+        let contributions = detailed.decision.contributions.unwrap();
+        let reconstructed = contributions.candidate_quality
+            + contributions.winner_margin
+            + contributions.role
+            + contributions.reliability;
+        assert_eq!(
+            reconstructed.clamp(0.0, 1.0).to_bits(),
+            detailed.decision.pre_veto_score.unwrap().to_bits()
+        );
+        assert_eq!(
+            detailed.decision.post_veto_score.to_bits(),
+            detailed.inference.decision_score.to_bits()
+        );
+    }
+
+    #[cfg(all(feature = "standalone", bonjour_embedded_data))]
+    #[test]
+    fn detailed_hard_abstention_retains_only_counterfactual_candidates() {
+        let classifier = Classifier::standalone().unwrap();
+        let detailed = classifier.infer_detailed("Quentin Richert GmbH", None, None);
+
+        assert_eq!(detailed.inference.greeting_name, None);
+        assert_eq!(
+            detailed.inference.decision_score.to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(detailed.decision.candidate_quality, None);
+        assert_eq!(detailed.decision.contributions, None);
+        assert!(detailed.decision.vetoes.strong_organization_marker);
+        assert!(!detailed.candidates.is_empty());
+    }
+
+    #[cfg(all(feature = "standalone", bonjour_embedded_data))]
+    #[test]
+    fn detailed_inference_exposes_soft_veto_and_segmentation_penalty() {
+        let classifier = Classifier::standalone().unwrap();
+        let organization = classifier.infer_detailed("Baris Kebab", None, None);
+        assert!(organization.decision.vetoes.generic_organization_marker);
+        assert!(organization.decision.pre_veto_score.unwrap() > 0.0);
+        assert_eq!(
+            organization.decision.post_veto_score.to_bits(),
+            0.0_f64.to_bits()
+        );
+
+        let segmented = classifier.infer_detailed("QuentinQuentin42", None, None);
+        assert_eq!(segmented.decision.segmented_candidate, Some(true));
+        assert_eq!(
+            segmented.decision.segmentation_mechanism,
+            Some("lower_to_upper")
+        );
+        assert_eq!(
+            segmented.decision.segmented_candidate_penalty.to_bits(),
+            classifier::ALGORITHM_C31.handle_segment_penalty.to_bits()
+        );
+        assert_eq!(
+            (segmented.decision.post_veto_score - segmented.decision.segmented_candidate_penalty)
+                .clamp(0.0, 1.0)
+                .to_bits(),
+            segmented.inference.decision_score.to_bits()
+        );
+    }
+
+    #[cfg(all(feature = "standalone", bonjour_embedded_data))]
+    #[test]
+    fn detailed_inference_keeps_unknown_eligible_spans_as_unscored_candidates() {
+        let classifier = Classifier::standalone().unwrap();
+        // Redacted: Name that has a corpus-backed given name and unscored surname/full-name spans.
+        let detailed = classifier.infer_detailed("Olivier REDACTED", None, None);
+
+        assert_eq!(detailed.inference.greeting_name, Some("Olivier"));
+        assert_eq!(detailed.candidates[0].candidate, "Olivier");
+        assert!(detailed.candidates[0].ranking_score.is_some());
+        assert_eq!(
+            detailed.candidates[0].ranking_score,
+            detailed.candidates[0].signals.corpus_score
+        );
+        assert!(detailed.candidates.iter().skip(1).all(|candidate| {
+            candidate.ranking_score.is_none() && candidate.signals.corpus_score.is_none()
+        }));
+        assert!(detailed.candidates.iter().any(|candidate| {
+            candidate.candidate == "Olivier REDACTED" && candidate.ranking_score.is_none()
+        }));
+        assert!(detailed.candidates.iter().any(|candidate| {
+            candidate.candidate == "REDACTED" && candidate.ranking_score.is_none()
+        }));
     }
 
     #[cfg(all(feature = "standalone", not(bonjour_embedded_data)))]

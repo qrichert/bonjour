@@ -77,7 +77,10 @@ fn benchmark_inference(label: &str, classifier: &Classifier, iterations: usize) 
             let inference = classifier.infer(input, country, locale);
             checksum = fold_bytes(checksum, input.as_bytes());
             checksum = fold_bytes(checksum, inference.greeting().unwrap_or("").as_bytes());
-            checksum = fold_bytes(checksum, &inference.confidence.to_bits().to_le_bytes());
+            checksum = fold_bytes(
+                checksum,
+                &inference.decision_score.to_bits().to_le_bytes(),
+            );
         }
     }
     let elapsed = started.elapsed();
