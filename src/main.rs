@@ -4,9 +4,11 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use bonjour::Classifier;
+#[cfg(test)]
+use bonjour::CandidateSignals;
 #[cfg(not(feature = "standalone"))]
 use bonjour::LoadErrorKind;
+use bonjour::{CandidateScore, Classifier, DecisionTrace};
 use serde::Serialize;
 
 #[derive(Default)]
@@ -23,8 +25,10 @@ struct Arguments {
 #[derive(Serialize)]
 struct Output<'a> {
     input: &'a str,
-    greeting_name: Option<&'a str>,
-    confidence: f64,
+    selected_candidate: Option<&'a str>,
+    decision_score: f64,
+    decision: DecisionTrace,
+    candidates: Vec<CandidateScore<'a>>,
     gender_hint: Option<bonjour::GenderHint>,
     gender_confidence: f64,
 }
@@ -50,24 +54,32 @@ fn run(arguments: impl Iterator<Item = String>) -> Result<(), (u8, String)> {
         return Err((2, usage_line()));
     }
     let classifier = load_classifier(arguments.data_dir)?;
-    let inference = classifier.infer_with_gender(
-        &display_name,
-        arguments.country.as_deref(),
-        arguments.locale.as_deref(),
-        arguments.gender,
-    );
     if arguments.json {
+        let detailed = classifier.infer_detailed_with_gender(
+            &display_name,
+            arguments.country.as_deref(),
+            arguments.locale.as_deref(),
+            arguments.gender,
+        );
         let output = Output {
             input: &display_name,
-            greeting_name: inference.greeting_name,
-            confidence: inference.confidence,
-            gender_hint: inference.gender_hint,
-            gender_confidence: inference.gender_confidence,
+            selected_candidate: detailed.inference.greeting_name,
+            decision_score: detailed.inference.decision_score,
+            decision: detailed.decision,
+            candidates: detailed.candidates,
+            gender_hint: detailed.inference.gender_hint,
+            gender_confidence: detailed.inference.gender_confidence,
         };
         let json = serde_json::to_string_pretty(&output)
             .map_err(|error| (1, format!("cannot serialize inference: {error}")))?;
         println!("{json}");
     } else {
+        let inference = classifier.infer_with_gender(
+            &display_name,
+            arguments.country.as_deref(),
+            arguments.locale.as_deref(),
+            arguments.gender,
+        );
         let greeting_name = match arguments.threshold {
             Some(threshold) => inference
                 .greeting_at(threshold)
@@ -255,39 +267,112 @@ mod tests {
     fn json_contract_covers_emission_abstention_and_absent_gender() {
         let emission = Output {
             input: "Quentin Richert",
-            greeting_name: Some("Quentin"),
-            confidence: 0.9,
+            selected_candidate: Some("Quentin"),
+            decision_score: 0.9,
+            decision: example_decision(),
+            candidates: vec![CandidateScore {
+                candidate: "Quentin",
+                ranking_score: Some(0.8),
+                signals: CandidateSignals {
+                    corpus_score: Some(0.8),
+                },
+            }],
             gender_hint: Some(bonjour::GenderHint::Male),
             gender_confidence: 0.95,
         };
         assert_eq!(
             serde_json::to_string(&emission).unwrap(),
-            r#"{"input":"Quentin Richert","greeting_name":"Quentin","confidence":0.9,"gender_hint":"male","gender_confidence":0.95}"#
+            r#"{"input":"Quentin Richert","selected_candidate":"Quentin","decision_score":0.9,"decision":{"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false}},"candidates":[{"candidate":"Quentin","ranking_score":0.8,"signals":{"corpus_score":0.8}}],"gender_hint":"male","gender_confidence":0.95}"#
         );
 
         let abstention = Output {
             input: "Baris Kebab",
-            greeting_name: None,
-            confidence: 0.0,
+            selected_candidate: None,
+            decision_score: 0.0,
+            decision: empty_decision(),
+            candidates: Vec::new(),
             gender_hint: None,
             gender_confidence: 0.0,
         };
         assert_eq!(
             serde_json::to_string_pretty(&abstention).unwrap(),
-            "{\n  \"input\": \"Baris Kebab\",\n  \"greeting_name\": null,\n  \"confidence\": 0.0,\n  \"gender_hint\": null,\n  \"gender_confidence\": 0.0\n}"
+            "{\n  \"input\": \"Baris Kebab\",\n  \"selected_candidate\": null,\n  \"decision_score\": 0.0,\n  \"decision\": {\n    \"candidate_quality\": null,\n    \"winner_margin\": null,\n    \"margin_signal\": null,\n    \"role_llr\": null,\n    \"role_signal\": null,\n    \"reliability\": null,\n    \"alphabetic_length\": null,\n    \"minimum_alphabetic_length\": 3,\n    \"contributions\": null,\n    \"pre_veto_score\": null,\n    \"post_veto_score\": 0.0,\n    \"segmented_candidate\": null,\n    \"segmentation_mechanism\": null,\n    \"segmented_candidate_penalty\": 0.0,\n    \"vetoes\": {\n      \"strong_organization_marker\": false,\n      \"generic_organization_marker\": false,\n      \"ampersand\": false,\n      \"candidate_too_short\": false\n    }\n  },\n  \"candidates\": [],\n  \"gender_hint\": null,\n  \"gender_confidence\": 0.0\n}"
         );
 
         let absent_gender = Output {
             input: "Example Person",
-            greeting_name: Some("Example"),
-            confidence: 0.8,
+            selected_candidate: Some("Example"),
+            decision_score: 0.8,
+            decision: example_decision(),
+            candidates: vec![CandidateScore {
+                candidate: "Example",
+                ranking_score: Some(0.7),
+                signals: CandidateSignals {
+                    corpus_score: Some(0.7),
+                },
+            }],
             gender_hint: None,
             gender_confidence: 0.6,
         };
         assert_eq!(
             serde_json::to_string(&absent_gender).unwrap(),
-            r#"{"input":"Example Person","greeting_name":"Example","confidence":0.8,"gender_hint":null,"gender_confidence":0.6}"#
+            r#"{"input":"Example Person","selected_candidate":"Example","decision_score":0.8,"decision":{"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false}},"candidates":[{"candidate":"Example","ranking_score":0.7,"signals":{"corpus_score":0.7}}],"gender_hint":null,"gender_confidence":0.6}"#
         );
+    }
+
+    fn example_decision() -> DecisionTrace {
+        DecisionTrace {
+            candidate_quality: Some(0.8),
+            winner_margin: Some(1.0),
+            margin_signal: Some(1.0),
+            role_llr: Some(2.0),
+            role_signal: Some(0.8),
+            reliability: Some(0.7),
+            alphabetic_length: Some(7),
+            minimum_alphabetic_length: 3,
+            contributions: Some(bonjour::DecisionContributions {
+                candidate_quality: 0.0,
+                winner_margin: 0.1,
+                role: 0.56,
+                reliability: 0.14,
+            }),
+            pre_veto_score: Some(0.8),
+            post_veto_score: 0.8,
+            segmented_candidate: Some(false),
+            segmentation_mechanism: None,
+            segmented_candidate_penalty: 0.0,
+            vetoes: bonjour::DecisionVetoes {
+                strong_organization_marker: false,
+                generic_organization_marker: false,
+                ampersand: false,
+                candidate_too_short: false,
+            },
+        }
+    }
+
+    fn empty_decision() -> DecisionTrace {
+        DecisionTrace {
+            candidate_quality: None,
+            winner_margin: None,
+            margin_signal: None,
+            role_llr: None,
+            role_signal: None,
+            reliability: None,
+            alphabetic_length: None,
+            minimum_alphabetic_length: 3,
+            contributions: None,
+            pre_veto_score: None,
+            post_veto_score: 0.0,
+            segmented_candidate: None,
+            segmentation_mechanism: None,
+            segmented_candidate_penalty: 0.0,
+            vetoes: bonjour::DecisionVetoes {
+                strong_organization_marker: false,
+                generic_organization_marker: false,
+                ampersand: false,
+                candidate_too_short: false,
+            },
+        }
     }
 
     #[cfg(feature = "standalone")]

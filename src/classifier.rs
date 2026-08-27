@@ -348,6 +348,12 @@ pub struct CandidateDiagnostic {
     pub algorithm_b_score: f64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnumeratedCandidateSpan {
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExpectedLookupDiagnostic {
     pub eligible: bool,
@@ -410,6 +416,40 @@ pub struct C2EmissionConfig {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct C31EmissionConfig {
     pub handle_segment_penalty: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecisionContributions {
+    pub candidate_quality: f64,
+    pub winner_margin: f64,
+    pub role: f64,
+    pub reliability: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct C31DecisionBreakdown {
+    pub winner: Option<WinnerFeatures>,
+    pub margin_signal: Option<f64>,
+    pub contributions: Option<DecisionContributions>,
+    pub pre_veto_score: Option<f64>,
+    pub post_veto_score: f64,
+    pub hard_organization_marker: bool,
+    pub generic_organization_marker: bool,
+    pub ampersand: bool,
+    pub candidate_too_short: bool,
+    pub segmented_candidate: Option<bool>,
+    pub segmented_candidate_penalty: f64,
+    pub final_score: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C2ScoreBreakdown {
+    margin_signal: f64,
+    contributions: DecisionContributions,
+    pre_veto_score: f64,
+    post_veto_score: f64,
+    candidate_too_short: bool,
 }
 
 /// Frozen from `REAL_PROXY_V1_DEV` plus synthetic VALIDATION. This is a
@@ -635,6 +675,66 @@ fn source_candidate_bounds(
             .checked_sub(1)?,
     )?;
     Some((first.byte_start, last.byte_end))
+}
+
+pub fn enumerate_candidate_spans(display_name: &str) -> Vec<EnumeratedCandidateSpan> {
+    let tokens = source_tokens(display_name);
+    let mut spans = contiguous_candidate_spans(display_name, &tokens);
+    spans.extend(handle_candidate_spans(display_name, &tokens));
+    spans.sort_by_key(|span| (span.byte_start, span.byte_end));
+    spans.dedup();
+    spans
+}
+
+fn contiguous_candidate_spans(
+    display_name: &str,
+    tokens: &[SourceToken<'_>],
+) -> Vec<EnumeratedCandidateSpan> {
+    let mut spans = Vec::new();
+    for start in 0..tokens.len() {
+        for length in 1..=2.min(tokens.len() - start) {
+            let first = tokens[start];
+            let last = tokens[start + length - 1];
+            let span = EnumeratedCandidateSpan {
+                byte_start: first.byte_start,
+                byte_end: last.byte_end,
+            };
+            if display_name
+                .get(span.byte_start..span.byte_end)
+                .is_some_and(candidate_is_eligible)
+            {
+                spans.push(span);
+            }
+        }
+    }
+    spans
+}
+
+fn handle_candidate_spans(
+    display_name: &str,
+    tokens: &[SourceToken<'_>],
+) -> Vec<EnumeratedCandidateSpan> {
+    let mut spans = Vec::new();
+    for token in tokens {
+        let canonical = canonicalize(token.source);
+        for segment in conservative_handle_segments(&canonical) {
+            let Some((byte_start, byte_end)) =
+                source_handle_bounds(token, (segment.canonical_start, segment.canonical_end))
+            else {
+                continue;
+            };
+            if display_name
+                .get(byte_start..byte_end)
+                .is_some_and(candidate_is_eligible)
+            {
+                spans.push(EnumeratedCandidateSpan {
+                    byte_start,
+                    byte_end,
+                });
+            }
+        }
+    }
+    spans
 }
 
 fn source_handle_bounds(
@@ -1224,19 +1324,34 @@ pub fn winner_features(diagnostic: &RoleInferenceDiagnostic) -> Option<WinnerFea
 }
 
 pub fn c2_decision_score(features: &WinnerFeatures, config: C2EmissionConfig) -> f64 {
+    c2_score_breakdown(features, config).post_veto_score
+}
+
+fn c2_score_breakdown(features: &WinnerFeatures, config: C2EmissionConfig) -> C2ScoreBreakdown {
     debug_assert!(c2_config_is_valid(config));
-    if features.generic_organization_marker
-        || features.ampersand_negative_evidence
-        || (features.alphabetic_length < config.minimum_candidate_letters)
-    {
-        return 0.0;
-    }
     let margin_signal = (features.winner_margin / config.margin_scale).clamp(0.0, 1.0);
-    (config.quality_weight * features.winner_score
-        + config.margin_weight * margin_signal
-        + config.role_weight * features.role_signal
-        + config.reliability_weight * features.reliability)
-        .clamp(0.0, 1.0)
+    let contributions = DecisionContributions {
+        candidate_quality: config.quality_weight * features.winner_score,
+        winner_margin: config.margin_weight * margin_signal,
+        role: config.role_weight * features.role_signal,
+        reliability: config.reliability_weight * features.reliability,
+    };
+    let pre_veto_score = (contributions.candidate_quality
+        + contributions.winner_margin
+        + contributions.role
+        + contributions.reliability)
+        .clamp(0.0, 1.0);
+    let candidate_too_short = features.alphabetic_length < config.minimum_candidate_letters;
+    let vetoed = features.generic_organization_marker
+        || features.ampersand_negative_evidence
+        || candidate_too_short;
+    C2ScoreBreakdown {
+        margin_signal,
+        contributions,
+        pre_veto_score,
+        post_veto_score: if vetoed { 0.0 } else { pre_veto_score },
+        candidate_too_short,
+    }
 }
 
 pub fn c2_config_is_valid(config: C2EmissionConfig) -> bool {
@@ -1273,17 +1388,57 @@ pub fn c31_inference_from_diagnostic(
     c2_config: C2EmissionConfig,
     c31_config: C31EmissionConfig,
 ) -> RawInference {
+    let decision = c31_decision_breakdown(diagnostic, c2_config, c31_config);
+    let mut inference = diagnostic.inference.clone();
+    inference.confidence = decision.final_score;
+    inference
+}
+
+pub fn c31_decision_breakdown(
+    diagnostic: &RoleInferenceDiagnostic,
+    c2_config: C2EmissionConfig,
+    c31_config: C31EmissionConfig,
+) -> C31DecisionBreakdown {
     debug_assert!(c31_config.handle_segment_penalty >= 0.0);
     debug_assert!(c31_config.handle_segment_penalty.is_finite());
-    let mut inference = c2_inference_from_diagnostic(diagnostic, c2_config);
-    if winner_features(diagnostic)
-        .as_ref()
-        .is_some_and(|features| features.candidate_origin == "handle_segment")
-    {
-        inference.confidence =
-            (inference.confidence - c31_config.handle_segment_penalty).clamp(0.0, 1.0);
+    let Some(winner) = winner_features(diagnostic) else {
+        return C31DecisionBreakdown {
+            winner: None,
+            margin_signal: None,
+            contributions: None,
+            pre_veto_score: None,
+            post_veto_score: 0.0,
+            hard_organization_marker: diagnostic.hard_organization_abstention,
+            generic_organization_marker: diagnostic.generic_organization_marker,
+            ampersand: diagnostic.ampersand_negative_evidence,
+            candidate_too_short: false,
+            segmented_candidate: None,
+            segmented_candidate_penalty: 0.0,
+            final_score: 0.0,
+        };
+    };
+    let c2 = c2_score_breakdown(&winner, c2_config);
+    let segmented_candidate = winner.candidate_origin == "handle_segment";
+    let segmented_candidate_penalty = if segmented_candidate {
+        c31_config.handle_segment_penalty
+    } else {
+        0.0
+    };
+    let final_score = (c2.post_veto_score - segmented_candidate_penalty).clamp(0.0, 1.0);
+    C31DecisionBreakdown {
+        winner: Some(winner),
+        margin_signal: Some(c2.margin_signal),
+        contributions: Some(c2.contributions),
+        pre_veto_score: Some(c2.pre_veto_score),
+        post_veto_score: c2.post_veto_score,
+        hard_organization_marker: diagnostic.hard_organization_abstention,
+        generic_organization_marker: diagnostic.generic_organization_marker,
+        ampersand: diagnostic.ampersand_negative_evidence,
+        candidate_too_short: c2.candidate_too_short,
+        segmented_candidate: Some(segmented_candidate),
+        segmented_candidate_penalty,
+        final_score,
     }
-    inference
 }
 
 pub fn apply_gender_hint(
@@ -1960,6 +2115,27 @@ mod tests {
     }
 
     #[test]
+    fn candidate_enumeration_is_evidence_independent_and_source_relative() {
+        fn displays(input: &str) -> Vec<&str> {
+            enumerate_candidate_spans(input)
+                .into_iter()
+                .map(|span| &input[span.byte_start..span.byte_end])
+                .collect()
+        }
+
+        assert_eq!(
+            displays("Olivier  Sieffert"),
+            ["Olivier", "Olivier  Sieffert", "Sieffert"]
+        );
+        assert_eq!(displays("Jean.Dupont"), ["Jean", "Dupont"]);
+        assert_eq!(
+            displays("E\u{301}lodieMartin42"),
+            ["E\u{301}lodie", "Martin"]
+        );
+        assert!(displays("kaggle.com/quentin").is_empty());
+    }
+
+    #[test]
     fn c3_records_the_boundaries_that_expose_each_segment() {
         let mechanisms = |input| {
             conservative_handle_segments(input)
@@ -2335,6 +2511,46 @@ mod tests {
             .abs()
                 < f64::EPSILON
         );
+    }
+
+    #[test]
+    fn c31_breakdown_reconstructs_scores_and_preserves_veto_semantics() {
+        let corpus = FakeCorpus(HashMap::from([(
+            "Quentin".to_string(),
+            role_evidence(100_000, 100),
+        )]));
+        let diagnostic = diagnose_role_inference(&corpus, ALGORITHM_C3, "Quentin", None, None);
+        let breakdown = c31_decision_breakdown(&diagnostic, ALGORITHM_C2, ALGORITHM_C31);
+        let contributions = breakdown.contributions.unwrap();
+        assert_eq!(
+            (contributions.candidate_quality
+                + contributions.winner_margin
+                + contributions.role
+                + contributions.reliability)
+                .clamp(0.0, 1.0)
+                .to_bits(),
+            breakdown.pre_veto_score.unwrap().to_bits()
+        );
+        assert_eq!(
+            breakdown.final_score.to_bits(),
+            c31_inference_from_diagnostic(&diagnostic, ALGORITHM_C2, ALGORITHM_C31)
+                .confidence
+                .to_bits()
+        );
+
+        let soft_veto =
+            diagnose_role_inference(&corpus, ALGORITHM_C3, "Quentin Consulting", None, None);
+        let breakdown = c31_decision_breakdown(&soft_veto, ALGORITHM_C2, ALGORITHM_C31);
+        assert!(breakdown.pre_veto_score.unwrap() > 0.0);
+        assert_eq!(breakdown.post_veto_score.to_bits(), 0.0_f64.to_bits());
+        assert!(breakdown.generic_organization_marker);
+
+        let hard_veto = diagnose_role_inference(&corpus, ALGORITHM_C3, "Quentin GmbH", None, None);
+        let breakdown = c31_decision_breakdown(&hard_veto, ALGORITHM_C2, ALGORITHM_C31);
+        assert!(breakdown.hard_organization_marker);
+        assert_eq!(breakdown.winner, None);
+        assert_eq!(breakdown.contributions, None);
+        assert_eq!(breakdown.final_score.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]
