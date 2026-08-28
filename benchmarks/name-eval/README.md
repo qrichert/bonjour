@@ -881,6 +881,101 @@ population. No row-level V4 predictions, failures, traces, or
 changed-case comparisons were written or inspected. V4 is now spent
 comparison evidence and must not tune C2, C3, or C3.1.
 
+### Relational emission diagnosis before C4
+
+After V4 became spent development evidence, a checksum-gated diagnostic
+combined V1, V3, and V4 with synthetic VALIDATION. It did not load TEST,
+create V5, change C3.1, or implement C4. The exact command was:
+
+```console
+benchmarks/name-eval/target/release/name-eval \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-relational-c4-diagnostic-final \
+  --diagnose-relational-emission \
+  --spent-holdout=_wip/real-proxy-v1/sealed.csv \
+  --spent-manifest=_wip/real-proxy-v1/sealed.manifest.csv \
+  --spent-sha256=de95213f27fc1849032ee6788c8f16d7d515c1a991ae8b2e8414b7b155814c4e \
+  --spent-holdout=_wip/real-proxy-v3/sealed.csv \
+  --spent-manifest=_wip/real-proxy-v3/sealed.manifest.csv \
+  --spent-sha256=d70e4d4b2ed7e49bed09dc1e8d2ba60ade8a752e3b86c772e964bd64883ee6fe \
+  --spent-holdout=_wip/real-proxy-v4/sealed.csv \
+  --spent-manifest=_wip/real-proxy-v4/sealed.manifest.csv \
+  --spent-sha256=d95c589bec836faaeecaeda85b146989d2936914bff0209934f289ccb9446c7f
+```
+
+The command revalidated these frozen C3.1 checkpoints before searching:
+
+| Population        | Emitted | Correct | Wrong | Expected-NULL emissions |
+| ----------------- | ------: | ------: | ----: | ----------------------: |
+| REAL_PROXY_V1_DEV |     226 |     226 |     0 |                       0 |
+| REAL_PROXY_V3_DEV |     219 |     214 |     5 |                       2 |
+| REAL_PROXY_V4_DEV |     227 |     224 |     3 |                       0 |
+| COMBINED_SPENT    |     672 |     664 |     8 |                       2 |
+| VALIDATION        |  14,686 |  14,686 |     0 |                       0 |
+
+Sole-candidate status was not independently safe. Among native spent
+proxy winners, the sole-candidate bucket contained 891 correct winners,
+122 wrong winners, and 78 expected-NULL winners; C3.1 currently
+abstained on 672 of the correct winners. A strict sole path could
+recover 17 additional correct greetings with no observed new errors, but
+it added nothing on VALIDATION.
+
+Large-margin competition was substantially more useful. The best
+zero-error operating point on the documented monotonic grid was:
+
+```text
+native candidate
+candidate_count >= 2
+winner_margin >= 0.50
+candidate_quality >= 0.70
+reliability >= 0.75
+role_signal >= 0.40
+all frozen C3.1 vetoes pass
+```
+
+As an additive path over C3.1, it recovered 124 correct COMBINED_SPENT
+greetings and 1,609 VALIDATION greetings with zero observed new wrong or
+expected-NULL emissions in either population. Lowering only reliability
+to `0.70` recovered 160 spent-proxy greetings but introduced one new
+wrong emission. The shared-threshold combined sole-or-dominant family
+recovered 79 spent-proxy greetings at its best zero-error point, so the
+dominant-only rule is the C4 development candidate.
+
+Candidate quality did not independently define that safe region. With
+margin, reliability, and role floors fixed, lowering quality from the
+selected conservative tie-break of `0.70` to the searched floor `0.40`
+changed no emission or outcome. The diagnostic therefore supports the
+relational margin and reliability conditions, but not a claim that
+candidate quality becomes useful conditionally within this grid.
+
+Country hints could not be measured on the real proxies because all
+three sealed samples have empty country and locale fields. On synthetic
+VALIDATION, 37,801 of 40,047 hint-bearing rows allowed the same
+candidate to be compared with and without hints. Candidate quality
+changed by at least `0.05` in 23,582 rows, including 6,998 currently
+abstained correct winners, while the median final-score change was zero.
+This confirms that the frozen zero weight discards country-aware quality
+on the synthetic distribution; it does not establish the same effect on
+real proxy data.
+
+The deterministic qualitative sample also explains the safety limits.
+Wrong sole winners frequently arose when an unfamiliar expected given
+name lacked usable corpus support and another token became the only
+recognized candidate. Large-margin correct abstentions commonly looked
+like ordinary person names, while sampled large-margin errors included
+culturally diverse expected given names losing to another recognized
+token. Handle segmentation included both useful names and unsafe
+fragments, so relational alternatives remain native-only and do not
+weaken C3.1's `0.025` provenance penalty.
+
+Generated outputs include topology outcomes, percentile and categorical
+feature summaries, the country audit, every operating point, selected
+zero-error and one-error points, and a separate spent-only qualitative
+review sample. These are development diagnostics over machine-generated
+or machine-consensus proxy labels, not worldwide precision estimates.
+The proposed operating point still requires untouched REAL_PROXY_V5
+validation before any C4 promotion.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.
