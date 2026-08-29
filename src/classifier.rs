@@ -419,6 +419,17 @@ pub struct C31EmissionConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct C4EmissionConfig {
+    pub sole_quality_min: f64,
+    pub sole_reliability_min: f64,
+    pub sole_role_signal_min: f64,
+    pub dominant_quality_min: f64,
+    pub dominant_reliability_min: f64,
+    pub dominant_role_signal_min: f64,
+    pub dominant_winner_margin_min: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecisionContributions {
     pub candidate_quality: f64,
     pub winner_margin: f64,
@@ -441,6 +452,56 @@ pub struct C31DecisionBreakdown {
     pub segmented_candidate: Option<bool>,
     pub segmented_candidate_penalty: f64,
     pub final_score: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum C4EmissionSource {
+    C31,
+    SoleNative,
+    DominantWinner,
+    Abstain,
+}
+
+impl C4EmissionSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::C31 => "c3_1",
+            Self::SoleNative => "sole_native",
+            Self::DominantWinner => "dominant_winner",
+            Self::Abstain => "abstain",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct C4RuleBreakdown {
+    pub c31_abstained: bool,
+    pub native_candidate: bool,
+    pub candidate_count: usize,
+    pub candidate_count_pass: bool,
+    pub candidate_quality: Option<f64>,
+    pub candidate_quality_min: f64,
+    pub candidate_quality_pass: bool,
+    pub winner_margin: Option<f64>,
+    pub winner_margin_min: Option<f64>,
+    pub winner_margin_pass: bool,
+    pub reliability: Option<f64>,
+    pub reliability_min: f64,
+    pub reliability_pass: bool,
+    pub role_signal: Option<f64>,
+    pub role_signal_min: f64,
+    pub role_signal_pass: bool,
+    pub vetoes_pass: bool,
+    pub passed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct C4DecisionBreakdown {
+    pub c31: C31DecisionBreakdown,
+    pub emission_source: C4EmissionSource,
+    pub sole_native: C4RuleBreakdown,
+    pub dominant_winner: C4RuleBreakdown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -470,6 +531,19 @@ pub const ALGORITHM_C2: C2EmissionConfig = C2EmissionConfig {
 /// proxy-validated operating point, not a real-world quality claim.
 pub const ALGORITHM_C31: C31EmissionConfig = C31EmissionConfig {
     handle_segment_penalty: 0.025,
+};
+
+/// Frozen from the completed relational diagnostic over spent
+/// `REAL_PROXY_V1`, `REAL_PROXY_V3`, `REAL_PROXY_V4`, and synthetic
+/// VALIDATION. This remains a development candidate pending untouched V5.
+pub const ALGORITHM_C4: C4EmissionConfig = C4EmissionConfig {
+    sole_quality_min: 0.75,
+    sole_reliability_min: 0.40,
+    sole_role_signal_min: 0.80,
+    dominant_quality_min: 0.40,
+    dominant_reliability_min: 0.75,
+    dominant_role_signal_min: 0.40,
+    dominant_winner_margin_min: 0.50,
 };
 
 pub fn infer_prethreshold(
@@ -1441,6 +1515,151 @@ pub fn c31_decision_breakdown(
     }
 }
 
+pub fn c4_decision_breakdown(
+    diagnostic: &RoleInferenceDiagnostic,
+    c2_config: C2EmissionConfig,
+    c31_config: C31EmissionConfig,
+    c4_config: C4EmissionConfig,
+) -> C4DecisionBreakdown {
+    debug_assert!(c4_config_is_valid(c4_config));
+    let c31 = c31_decision_breakdown(diagnostic, c2_config, c31_config);
+    c4_decision_from_c31(c31, c2_config.threshold, c4_config)
+}
+
+pub fn c4_emitted_candidate(decision: &C4DecisionBreakdown) -> Option<&str> {
+    (decision.emission_source != C4EmissionSource::Abstain)
+        .then(|| {
+            decision
+                .c31
+                .winner
+                .as_ref()
+                .map(|winner| winner.greeting_candidate.as_str())
+        })
+        .flatten()
+}
+
+pub fn c4_config_is_valid(config: C4EmissionConfig) -> bool {
+    [
+        config.sole_quality_min,
+        config.sole_reliability_min,
+        config.sole_role_signal_min,
+        config.dominant_quality_min,
+        config.dominant_reliability_min,
+        config.dominant_role_signal_min,
+        config.dominant_winner_margin_min,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+}
+
+pub fn c4_decision_from_c31(
+    c31: C31DecisionBreakdown,
+    c31_threshold: f64,
+    config: C4EmissionConfig,
+) -> C4DecisionBreakdown {
+    let c31_emits = c31.winner.is_some() && c31.final_score >= c31_threshold;
+    let sole_native = c4_rule_breakdown(&c31, c31_emits, config, C4RuleKind::SoleNative);
+    let dominant_winner = c4_rule_breakdown(&c31, c31_emits, config, C4RuleKind::DominantWinner);
+    let emission_source = if c31_emits {
+        C4EmissionSource::C31
+    } else if sole_native.passed {
+        C4EmissionSource::SoleNative
+    } else if dominant_winner.passed {
+        C4EmissionSource::DominantWinner
+    } else {
+        C4EmissionSource::Abstain
+    };
+    C4DecisionBreakdown {
+        c31,
+        emission_source,
+        sole_native,
+        dominant_winner,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum C4RuleKind {
+    SoleNative,
+    DominantWinner,
+}
+
+fn c4_rule_breakdown(
+    c31: &C31DecisionBreakdown,
+    c31_emits: bool,
+    config: C4EmissionConfig,
+    kind: C4RuleKind,
+) -> C4RuleBreakdown {
+    let winner = c31.winner.as_ref();
+    let c31_abstained = !c31_emits;
+    let native_candidate = c31.segmented_candidate == Some(false);
+    let candidate_count = winner.map_or(0, |winner| winner.candidate_count);
+    let (candidate_count_pass, candidate_quality_min, reliability_min, role_signal_min) = match kind
+    {
+        C4RuleKind::SoleNative => (
+            candidate_count == 1,
+            config.sole_quality_min,
+            config.sole_reliability_min,
+            config.sole_role_signal_min,
+        ),
+        C4RuleKind::DominantWinner => (
+            candidate_count >= 2,
+            config.dominant_quality_min,
+            config.dominant_reliability_min,
+            config.dominant_role_signal_min,
+        ),
+    };
+    let candidate_quality = winner.map(|winner| winner.winner_score);
+    let winner_margin = winner.map(|winner| winner.winner_margin);
+    let reliability = winner.map(|winner| winner.reliability);
+    let role_signal = winner.map(|winner| winner.role_signal);
+    let candidate_quality_pass =
+        candidate_quality.is_some_and(|quality| quality >= candidate_quality_min);
+    let reliability_pass = reliability.is_some_and(|reliability| reliability >= reliability_min);
+    let role_signal_pass = role_signal.is_some_and(|role| role >= role_signal_min);
+    let winner_margin_min = match kind {
+        C4RuleKind::SoleNative => None,
+        C4RuleKind::DominantWinner => Some(config.dominant_winner_margin_min),
+    };
+    let winner_margin_pass = winner_margin_min
+        .is_none_or(|minimum| winner_margin.is_some_and(|margin| margin >= minimum));
+    let vetoes_pass = c31_vetoes_pass(c31);
+    let passed = c31_abstained
+        && native_candidate
+        && candidate_count_pass
+        && candidate_quality_pass
+        && winner_margin_pass
+        && reliability_pass
+        && role_signal_pass
+        && vetoes_pass;
+    C4RuleBreakdown {
+        c31_abstained,
+        native_candidate,
+        candidate_count,
+        candidate_count_pass,
+        candidate_quality,
+        candidate_quality_min,
+        candidate_quality_pass,
+        winner_margin,
+        winner_margin_min,
+        winner_margin_pass,
+        reliability,
+        reliability_min,
+        reliability_pass,
+        role_signal,
+        role_signal_min,
+        role_signal_pass,
+        vetoes_pass,
+        passed,
+    }
+}
+
+fn c31_vetoes_pass(c31: &C31DecisionBreakdown) -> bool {
+    !c31.hard_organization_marker
+        && !c31.generic_organization_marker
+        && !c31.ampersand
+        && !c31.candidate_too_short
+}
+
 pub fn apply_gender_hint(
     diagnostic: &RoleInferenceDiagnostic,
     inference: &mut RawInference,
@@ -1884,6 +2103,53 @@ mod tests {
             given_total: 444_154_759,
             surname_total: 489_631_377,
         }
+    }
+
+    fn c4_winner(candidate_count: usize) -> WinnerFeatures {
+        WinnerFeatures {
+            greeting_candidate: "Selected".to_string(),
+            winner_score: ALGORITHM_C4.sole_quality_min,
+            second_score: (candidate_count >= 2).then_some(0.25),
+            winner_margin: ALGORITHM_C4.dominant_winner_margin_min,
+            no_competitor: candidate_count == 1,
+            role_llr: 2.0,
+            role_signal: ALGORITHM_C4.sole_role_signal_min,
+            reliability: ALGORITHM_C4.dominant_reliability_min,
+            global_given_count: 10_000,
+            global_surname_count: 100,
+            candidate_origin: "exact",
+            segmentation_mechanism: None,
+            candidate_count,
+            alphabetic_length: 8,
+            generic_organization_marker: false,
+            ampersand_negative_evidence: false,
+        }
+    }
+
+    fn c31_breakdown_for_c4(winner: WinnerFeatures) -> C31DecisionBreakdown {
+        C31DecisionBreakdown {
+            segmented_candidate: Some(winner.candidate_origin == "handle_segment"),
+            winner: Some(winner),
+            margin_signal: Some(1.0),
+            contributions: Some(DecisionContributions {
+                candidate_quality: 0.0,
+                winner_margin: 0.1,
+                role: 0.3,
+                reliability: 0.1,
+            }),
+            pre_veto_score: Some(0.5),
+            post_veto_score: 0.5,
+            hard_organization_marker: false,
+            generic_organization_marker: false,
+            ampersand: false,
+            candidate_too_short: false,
+            segmented_candidate_penalty: 0.0,
+            final_score: 0.5,
+        }
+    }
+
+    fn immediately_below(value: f64) -> f64 {
+        f64::from_bits(value.to_bits() - 1)
     }
 
     proptest! {
@@ -2551,6 +2817,161 @@ mod tests {
         assert_eq!(breakdown.winner, None);
         assert_eq!(breakdown.contributions, None);
         assert_eq!(breakdown.final_score.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn c4_preserves_c31_emissions_and_selected_winner() {
+        let mut c31 = c31_breakdown_for_c4(c4_winner(1));
+        c31.final_score = ALGORITHM_C2.threshold;
+        let decision = c4_decision_from_c31(c31.clone(), ALGORITHM_C2.threshold, ALGORITHM_C4);
+
+        assert_eq!(decision.c31, c31);
+        assert_eq!(decision.emission_source, C4EmissionSource::C31);
+        assert_eq!(c4_emitted_candidate(&decision), Some("Selected"));
+        assert!(!decision.sole_native.passed);
+        assert!(!decision.dominant_winner.passed);
+    }
+
+    #[test]
+    fn c4_sole_native_rule_has_exact_inclusive_boundaries() {
+        let mut winner = c4_winner(1);
+        winner.reliability = ALGORITHM_C4.sole_reliability_min;
+        let boundary = c31_breakdown_for_c4(winner);
+        let decision = c4_decision_from_c31(boundary.clone(), ALGORITHM_C2.threshold, ALGORITHM_C4);
+        assert_eq!(decision.emission_source, C4EmissionSource::SoleNative);
+        assert!(decision.sole_native.passed);
+        assert!(!decision.dominant_winner.passed);
+
+        for changed in [
+            WinnerFeatures {
+                winner_score: immediately_below(ALGORITHM_C4.sole_quality_min),
+                ..c4_winner(1)
+            },
+            WinnerFeatures {
+                reliability: immediately_below(ALGORITHM_C4.sole_reliability_min),
+                ..c4_winner(1)
+            },
+            WinnerFeatures {
+                role_signal: immediately_below(ALGORITHM_C4.sole_role_signal_min),
+                ..c4_winner(1)
+            },
+        ] {
+            let decision = c4_decision_from_c31(
+                c31_breakdown_for_c4(changed),
+                ALGORITHM_C2.threshold,
+                ALGORITHM_C4,
+            );
+            assert_eq!(decision.emission_source, C4EmissionSource::Abstain);
+            assert!(!decision.sole_native.passed);
+        }
+
+        let two_candidates = c4_decision_from_c31(
+            c31_breakdown_for_c4(c4_winner(2)),
+            ALGORITHM_C2.threshold,
+            ALGORITHM_C4,
+        );
+        assert!(!two_candidates.sole_native.candidate_count_pass);
+        assert!(two_candidates.dominant_winner.candidate_count_pass);
+    }
+
+    #[test]
+    fn c4_dominant_rule_has_exact_inclusive_boundaries() {
+        let mut winner = c4_winner(2);
+        winner.winner_score = ALGORITHM_C4.dominant_quality_min;
+        winner.reliability = ALGORITHM_C4.dominant_reliability_min;
+        winner.role_signal = ALGORITHM_C4.dominant_role_signal_min;
+        winner.winner_margin = ALGORITHM_C4.dominant_winner_margin_min;
+        let boundary = c4_decision_from_c31(
+            c31_breakdown_for_c4(winner.clone()),
+            ALGORITHM_C2.threshold,
+            ALGORITHM_C4,
+        );
+        assert_eq!(boundary.emission_source, C4EmissionSource::DominantWinner);
+        assert!(!boundary.sole_native.passed);
+        assert!(boundary.dominant_winner.passed);
+
+        for changed in [
+            WinnerFeatures {
+                winner_score: immediately_below(ALGORITHM_C4.dominant_quality_min),
+                ..winner.clone()
+            },
+            WinnerFeatures {
+                winner_margin: immediately_below(ALGORITHM_C4.dominant_winner_margin_min),
+                ..winner.clone()
+            },
+            WinnerFeatures {
+                reliability: immediately_below(ALGORITHM_C4.dominant_reliability_min),
+                ..winner.clone()
+            },
+            WinnerFeatures {
+                role_signal: immediately_below(ALGORITHM_C4.dominant_role_signal_min),
+                ..winner
+            },
+        ] {
+            let decision = c4_decision_from_c31(
+                c31_breakdown_for_c4(changed),
+                ALGORITHM_C2.threshold,
+                ALGORITHM_C4,
+            );
+            assert_eq!(decision.emission_source, C4EmissionSource::Abstain);
+            assert!(!decision.dominant_winner.passed);
+        }
+
+        let sole = c4_decision_from_c31(
+            c31_breakdown_for_c4(c4_winner(1)),
+            ALGORITHM_C2.threshold,
+            ALGORITHM_C4,
+        );
+        assert!(!sole.dominant_winner.candidate_count_pass);
+    }
+
+    #[test]
+    fn c4_relational_paths_preserve_vetoes_and_native_provenance() {
+        for mutate in [
+            |breakdown: &mut C31DecisionBreakdown| breakdown.hard_organization_marker = true,
+            |breakdown: &mut C31DecisionBreakdown| breakdown.generic_organization_marker = true,
+            |breakdown: &mut C31DecisionBreakdown| breakdown.ampersand = true,
+            |breakdown: &mut C31DecisionBreakdown| breakdown.candidate_too_short = true,
+        ] {
+            let mut c31 = c31_breakdown_for_c4(c4_winner(2));
+            mutate(&mut c31);
+            let decision = c4_decision_from_c31(c31, ALGORITHM_C2.threshold, ALGORITHM_C4);
+            assert_eq!(decision.emission_source, C4EmissionSource::Abstain);
+            assert!(!decision.dominant_winner.vetoes_pass);
+        }
+
+        let mut segmented = c4_winner(2);
+        segmented.candidate_origin = "handle_segment";
+        segmented.segmentation_mechanism = Some("digit");
+        let decision = c4_decision_from_c31(
+            c31_breakdown_for_c4(segmented),
+            ALGORITHM_C2.threshold,
+            ALGORITHM_C4,
+        );
+        assert_eq!(decision.emission_source, C4EmissionSource::Abstain);
+        assert!(!decision.dominant_winner.native_candidate);
+    }
+
+    #[test]
+    fn c4_rejects_weak_sole_candidate_and_invalid_configuration() {
+        let weak = WinnerFeatures {
+            winner_score: 0.74,
+            reliability: 0.39,
+            role_signal: 0.79,
+            ..c4_winner(1)
+        };
+        let decision = c4_decision_from_c31(
+            c31_breakdown_for_c4(weak),
+            ALGORITHM_C2.threshold,
+            ALGORITHM_C4,
+        );
+        assert_eq!(decision.emission_source, C4EmissionSource::Abstain);
+        assert_eq!(c4_emitted_candidate(&decision), None);
+        assert!(c4_config_is_valid(ALGORITHM_C4));
+        assert!(!c4_config_is_valid(C4EmissionConfig {
+            dominant_winner_margin_min: f64::NAN,
+            ..ALGORITHM_C4
+        }));
     }
 
     #[test]

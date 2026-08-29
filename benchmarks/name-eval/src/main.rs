@@ -49,7 +49,7 @@ use name_eval::holdout::{
     evaluate_sealed_with_buckets, load_frozen, sealed_confidence_buckets_csv, sealed_summary_csv,
 };
 use proxy_diagnostic::run_proxy_diagnostic;
-use relational_diagnostic::run_relational_diagnostic;
+use relational_diagnostic::{run_c4_development_freeze, run_relational_diagnostic};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -173,6 +173,7 @@ struct Arguments {
     compare_sealed_c2_c3_sha256: Option<String>,
     compare_sealed_c2_c3_c31_sha256: Option<String>,
     diagnose_relational_emission: bool,
+    freeze_c4_relational_emission: bool,
     spent_holdouts: Vec<PathBuf>,
     spent_manifests: Vec<PathBuf>,
     spent_sha256s: Vec<String>,
@@ -198,6 +199,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut compare_sealed_c2_c3_sha256 = None;
     let mut compare_sealed_c2_c3_c31_sha256 = None;
     let mut diagnose_relational_emission = false;
+    let mut freeze_c4_relational_emission = false;
     let mut spent_holdouts = Vec::new();
     let mut spent_manifests = Vec::new();
     let mut spent_sha256s = Vec::new();
@@ -271,6 +273,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             compare_sealed_c2_c3_c31_sha256 = Some(value.to_ascii_lowercase());
         } else if text == "--diagnose-relational-emission" {
             diagnose_relational_emission = true;
+        } else if text == "--freeze-c4-relational-emission" {
+            freeze_c4_relational_emission = true;
         } else if let Some(value) = text.strip_prefix("--spent-holdout=") {
             spent_holdouts.push(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("--spent-manifest=") {
@@ -299,12 +303,13 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         + usize::from(compare_sealed_c1_c2_sha256.is_some())
         + usize::from(compare_sealed_c2_c3_sha256.is_some())
         + usize::from(compare_sealed_c2_c3_c31_sha256.is_some())
-        + usize::from(diagnose_relational_emission);
+        + usize::from(diagnose_relational_emission)
+        + usize::from(freeze_c4_relational_emission);
     if explicit_modes > 1 {
-        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, sealed C1/C2 comparison, sealed C2/C3 comparison, and sealed C2/C3/C3.1 comparison modes are mutually exclusive".into());
+        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, sealed C1/C2 comparison, sealed C2/C3 comparison, and sealed C2/C3/C3.1 comparison modes are mutually exclusive".into());
     }
     validate_relational_arguments(
-        diagnose_relational_emission,
+        diagnose_relational_emission || freeze_c4_relational_emission,
         &spent_holdouts,
         &spent_manifests,
         &spent_sha256s,
@@ -317,10 +322,16 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         || compare_sealed_c1_c2_sha256.is_some()
         || compare_sealed_c2_c3_sha256.is_some()
         || compare_sealed_c2_c3_c31_sha256.is_some();
-    let (artifact, clean_csv, output) = if diagnose_relational_emission {
+    let (artifact, clean_csv, output) =
+        if diagnose_relational_emission || freeze_c4_relational_emission {
         if positional.len() != 2 || sealed.is_some() || development_only || reference_threshold_set
         {
-            return Err("--diagnose-relational-emission requires three spent holdout triplets, forbids sealed/tuning flags, and takes artifact plus output paths".into());
+            let mode = if freeze_c4_relational_emission {
+                "--freeze-c4-relational-emission"
+            } else {
+                "--diagnose-relational-emission"
+            };
+            return Err(format!("{mode} requires three spent holdout triplets, forbids sealed/tuning flags, and takes artifact plus output paths").into());
         }
         (positional.remove(0), None, positional.remove(0))
     } else if sealed_only || diagnostic_only {
@@ -375,6 +386,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         compare_sealed_c2_c3_sha256,
         compare_sealed_c2_c3_c31_sha256,
         diagnose_relational_emission,
+        freeze_c4_relational_emission,
         spent_holdouts,
         spent_manifests,
         spent_sha256s,
@@ -391,10 +403,10 @@ fn validate_relational_arguments(
         if holdouts.is_empty() && manifests.is_empty() && digests.is_empty() {
             return Ok(());
         }
-        return Err("spent holdout triplets require --diagnose-relational-emission".into());
+        return Err("spent holdout triplets require --diagnose-relational-emission or --freeze-c4-relational-emission".into());
     }
     if holdouts.len() != 3 || manifests.len() != 3 || digests.len() != 3 {
-        return Err("--diagnose-relational-emission requires exactly three aligned --spent-holdout, --spent-manifest, and --spent-sha256 options".into());
+        return Err("the relational mode requires exactly three aligned --spent-holdout, --spent-manifest, and --spent-sha256 options".into());
     }
     if holdouts.iter().collect::<BTreeSet<_>>().len() != 3
         || manifests.iter().collect::<BTreeSet<_>>().len() != 3
@@ -406,7 +418,7 @@ fn validate_relational_arguments(
 }
 
 fn usage() -> &'static str {
-    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
+    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
 }
 
 #[allow(clippy::too_many_lines)]
@@ -433,6 +445,10 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
         validate_spent_holdout_digest(acknowledged, &holdout.manifest.holdout_sha256)?;
     }
     let corpus = bonjour::benchmark::open_artifact(&arguments.artifact)?;
+    if arguments.freeze_c4_relational_emission {
+        let holdouts = load_relational_holdouts(arguments)?;
+        return run_c4_development_freeze(output, &corpus, holdouts, &fixtures);
+    }
     if arguments.diagnose_relational_emission {
         let holdouts = load_relational_holdouts(arguments)?;
         return run_relational_diagnostic(output, &corpus, holdouts, &fixtures);
@@ -2750,6 +2766,16 @@ mod argument_tests {
         arguments
     }
 
+    fn c4_freeze_arguments() -> Vec<String> {
+        let mut arguments = relational_arguments();
+        let mode = arguments
+            .iter_mut()
+            .find(|argument| argument.as_str() == "--diagnose-relational-emission")
+            .unwrap();
+        *mode = "--freeze-c4-relational-emission".to_string();
+        arguments
+    }
+
     #[test]
     fn relational_mode_requires_three_unique_spent_triplets() {
         let arguments = parse_owned(relational_arguments()).unwrap();
@@ -2778,6 +2804,30 @@ mod argument_tests {
             format!("--diagnose-spent-holdout-sha256={DIGEST}"),
         ] {
             let mut arguments = relational_arguments();
+            arguments.push(extra.clone());
+            assert!(parse_owned(arguments).is_err(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn c4_freeze_mode_requires_the_same_spent_triplets_and_rejects_other_modes() {
+        let arguments = parse_owned(c4_freeze_arguments()).unwrap();
+        assert!(arguments.freeze_c4_relational_emission);
+        assert!(!arguments.diagnose_relational_emission);
+        assert_eq!(arguments.clean_csv, None);
+        assert_eq!(arguments.spent_holdouts.len(), 3);
+
+        let mut incomplete = c4_freeze_arguments();
+        incomplete.pop();
+        assert!(parse_owned(incomplete).is_err());
+
+        for extra in [
+            "--reference-threshold=0.80".to_string(),
+            "--development-only".to_string(),
+            "--sealed=sealed.csv".to_string(),
+            "--diagnose-relational-emission".to_string(),
+        ] {
+            let mut arguments = c4_freeze_arguments();
             arguments.push(extra.clone());
             assert!(parse_owned(arguments).is_err(), "{extra}");
         }
