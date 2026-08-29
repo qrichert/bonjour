@@ -2,15 +2,19 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::Write as FmtWrite;
+use std::fs;
 use std::path::Path;
 
 use name_eval::holdout::{FrozenHoldout, HoldoutCase};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::artifact::EvidenceSource;
 use crate::classifier::{
-    ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C31, C31DecisionBreakdown, CandidateDiagnostic,
-    WinnerFeatures, c31_decision_breakdown, diagnose_role_inference,
+    ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4, ALGORITHM_C31, C31DecisionBreakdown,
+    C4DecisionBreakdown, C4EmissionConfig, C4EmissionSource, C4RuleBreakdown, CandidateDiagnostic,
+    WinnerFeatures, c2_inference_from_diagnostic, c31_decision_breakdown, c4_decision_breakdown,
+    c4_decision_from_c31, c4_emitted_candidate, diagnose_role_inference,
 };
 use crate::dataset::{Case, Split, generate_cases};
 use crate::metrics::greeting_matches;
@@ -172,8 +176,11 @@ struct DiagnosticCase {
     viable_candidates: usize,
     winner: Option<WinnerFeatures>,
     margin_signal: Option<f64>,
+    c2_emitted: Option<String>,
+    c3_emitted: Option<String>,
     c31_score: f64,
     c31_emitted: Option<String>,
+    c4_decision: C4DecisionBreakdown,
     vetoes_pass: bool,
     country_audit: Option<CountryAuditCase>,
 }
@@ -298,6 +305,93 @@ struct SelectedPoint {
     evaluation: RuleEvaluation,
 }
 
+#[derive(Clone, Copy)]
+enum C4Branch {
+    SoleNative,
+    DominantWinner,
+    Combined,
+}
+
+impl C4Branch {
+    const ALL: [Self; 3] = [Self::SoleNative, Self::DominantWinner, Self::Combined];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SoleNative => "sole_native",
+            Self::DominantWinner => "dominant_winner",
+            Self::Combined => "combined_unique",
+        }
+    }
+
+    fn includes(self, source: C4EmissionSource) -> bool {
+        match self {
+            Self::SoleNative => source == C4EmissionSource::SoleNative,
+            Self::DominantWinner => source == C4EmissionSource::DominantWinner,
+            Self::Combined => matches!(
+                source,
+                C4EmissionSource::SoleNative | C4EmissionSource::DominantWinner
+            ),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct QualitativeC4Diagnostic {
+    input: &'static str,
+    selected_candidate: Option<String>,
+    decision_score: f64,
+    emission_source: &'static str,
+    candidate_count: usize,
+    candidate_quality: Option<f64>,
+    winner_margin: Option<f64>,
+    margin_signal: Option<f64>,
+    role_llr: Option<f64>,
+    role_signal: Option<f64>,
+    reliability: Option<f64>,
+    alphabetic_length: Option<usize>,
+    segmented_candidate: Option<bool>,
+    segmentation_mechanism: Option<&'static str>,
+    segmented_candidate_penalty: f64,
+    vetoes: QualitativeVetoes,
+    conditions: QualitativeConditions,
+}
+
+#[derive(Serialize)]
+struct QualitativeVetoes {
+    strong_organization_marker: bool,
+    generic_organization_marker: bool,
+    ampersand: bool,
+    candidate_too_short: bool,
+}
+
+#[derive(Serialize)]
+struct QualitativeConditions {
+    sole_native: QualitativeRuleBreakdown,
+    dominant_winner: QualitativeRuleBreakdown,
+}
+
+#[derive(Serialize)]
+struct QualitativeRuleBreakdown {
+    c3_1_abstained: bool,
+    native_candidate: bool,
+    candidate_count: usize,
+    candidate_count_pass: bool,
+    candidate_quality: Option<f64>,
+    candidate_quality_min: f64,
+    candidate_quality_pass: bool,
+    winner_margin: Option<f64>,
+    winner_margin_min: Option<f64>,
+    winner_margin_pass: bool,
+    reliability: Option<f64>,
+    reliability_min: f64,
+    reliability_pass: bool,
+    role_signal: Option<f64>,
+    role_signal_min: f64,
+    role_signal_pass: bool,
+    vetoes_pass: bool,
+    passed: bool,
+}
+
 pub fn run_relational_diagnostic(
     output: &Path,
     corpus: &impl EvidenceSource,
@@ -319,6 +413,25 @@ pub fn run_relational_diagnostic(
     write_selected_points(output, &selected)?;
     write_qualitative_review_sample(output, &cases)?;
     build_report(&cases, &evaluations, &selected)
+}
+
+pub fn run_c4_development_freeze(
+    output: &Path,
+    corpus: &impl EvidenceSource,
+    holdouts: Vec<FrozenHoldout>,
+    fixtures: &Path,
+) -> Result<String> {
+    validate_holdout_set(&holdouts)?;
+    let mut cases = build_spent_cases(corpus, &holdouts);
+    cases.extend(build_validation_cases(corpus, fixtures)?);
+    assert_frozen_checkpoints(&cases)?;
+    assert_c4_development_checkpoints(&cases)?;
+    write_c4_development_summary(output, &cases)?;
+    let qualitative = qualitative_c4_diagnostics(corpus);
+    let mut json = serde_json::to_vec_pretty(&qualitative)?;
+    json.push(b'\n');
+    fs::write(output.join("c4_qualitative_diagnostics.json"), json)?;
+    build_c4_development_report(&cases, &qualitative)
 }
 
 fn validate_holdout_set(holdouts: &[FrozenHoldout]) -> Result<()> {
@@ -411,6 +524,17 @@ fn diagnostic_case(
     country_hint: Option<&str>,
     locale_hint: Option<&str>,
 ) -> DiagnosticCase {
+    let c2_diagnostic = diagnose_role_inference(
+        corpus,
+        ALGORITHM_C1,
+        display_name,
+        country_hint,
+        locale_hint,
+    );
+    let c2 = c2_inference_from_diagnostic(&c2_diagnostic, ALGORITHM_C2);
+    let c2_emitted = c2
+        .greeting_at(ALGORITHM_C2.threshold)
+        .map(str::to_string);
     let diagnostic = diagnose_role_inference(
         corpus,
         ALGORITHM_C3,
@@ -419,14 +543,24 @@ fn diagnostic_case(
         locale_hint,
     );
     let topology = Topology::from_candidates(&diagnostic.candidates);
-    let breakdown = c31_decision_breakdown(&diagnostic, ALGORITHM_C2, ALGORITHM_C31);
+    let c3 = c2_inference_from_diagnostic(&diagnostic, ALGORITHM_C2);
+    let c3_emitted = c3
+        .greeting_at(ALGORITHM_C2.threshold)
+        .map(str::to_string);
+    let c4_decision = c4_decision_breakdown(
+        &diagnostic,
+        ALGORITHM_C2,
+        ALGORITHM_C31,
+        ALGORITHM_C4,
+    );
+    let breakdown = &c4_decision.c31;
     let winner = breakdown.winner.clone();
     let c31_emitted = winner.as_ref().and_then(|winner| {
         (breakdown.final_score >= ALGORITHM_C2.threshold).then(|| winner.greeting_candidate.clone())
     });
-    let vetoes_pass = vetoes_pass(&breakdown);
+    let vetoes_pass = vetoes_pass(breakdown);
     let country_audit = (country_hint.is_some() || locale_hint.is_some())
-        .then(|| country_audit_case(corpus, display_name, &diagnostic.candidates, &breakdown));
+        .then(|| country_audit_case(corpus, display_name, &diagnostic.candidates, breakdown));
     DiagnosticCase {
         population,
         holdout_digest: holdout_digest.map(str::to_string),
@@ -439,8 +573,11 @@ fn diagnostic_case(
         viable_candidates: diagnostic.candidates.len(),
         winner,
         margin_signal: breakdown.margin_signal,
+        c2_emitted,
+        c3_emitted,
         c31_score: breakdown.final_score,
         c31_emitted,
+        c4_decision,
         vetoes_pass,
         country_audit,
     }
@@ -493,60 +630,117 @@ fn vetoes_pass(breakdown: &C31DecisionBreakdown) -> bool {
 }
 
 fn assert_frozen_checkpoints(cases: &[DiagnosticCase]) -> Result<()> {
-    for (population, expected) in [
-        (
-            Population::V1,
-            EmissionMetrics {
-                emitted: 226,
-                correct: 226,
-                wrong: 0,
-                null_emissions: 0,
-            },
-        ),
-        (
-            Population::V3,
-            EmissionMetrics {
-                emitted: 219,
-                correct: 214,
-                wrong: 5,
-                null_emissions: 2,
-            },
-        ),
-        (
-            Population::V4,
-            EmissionMetrics {
-                emitted: 227,
-                correct: 224,
-                wrong: 3,
-                null_emissions: 0,
-            },
-        ),
-        (
-            Population::Validation,
-            EmissionMetrics {
-                emitted: 14_686,
-                correct: 14_686,
-                wrong: 0,
-                null_emissions: 0,
-            },
-        ),
-    ] {
-        let actual = emission_metrics(cases.iter().filter(|case| case.population == population));
-        if actual != expected {
-            return Err(format!(
-                "frozen C3.1 {} checkpoint changed: expected {expected:?}, got {actual:?}",
-                population.as_str()
-            )
-            .into());
+    for (population, expected_by_algorithm) in frozen_checkpoint_table() {
+        for (algorithm, expected) in expected_by_algorithm {
+            let actual = emission_metrics(
+                cases.iter().filter(|case| case.population == population),
+                algorithm,
+            );
+            if actual != expected {
+                return Err(format!(
+                    "frozen {} {} checkpoint changed: expected {expected:?}, got {actual:?}",
+                    algorithm.as_str(),
+                    population.as_str()
+                )
+                .into());
+            }
         }
     }
     Ok(())
 }
 
-fn emission_metrics<'a>(cases: impl Iterator<Item = &'a DiagnosticCase>) -> EmissionMetrics {
+#[derive(Clone, Copy)]
+enum FrozenAlgorithm {
+    C2,
+    C3,
+    C31,
+}
+
+impl FrozenAlgorithm {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::C2 => "C2",
+            Self::C3 => "C3",
+            Self::C31 => "C3.1",
+        }
+    }
+
+    fn emitted(self, case: &DiagnosticCase) -> Option<&str> {
+        match self {
+            Self::C2 => case.c2_emitted.as_deref(),
+            Self::C3 => case.c3_emitted.as_deref(),
+            Self::C31 => case.c31_emitted.as_deref(),
+        }
+    }
+}
+
+fn frozen_checkpoint_table() -> [(Population, [(FrozenAlgorithm, EmissionMetrics); 3]); 4] {
+    [
+        (
+            Population::V1,
+            [
+                (FrozenAlgorithm::C2, emission_metrics_value(207, 207, 0, 0)),
+                (FrozenAlgorithm::C3, emission_metrics_value(234, 234, 0, 0)),
+                (FrozenAlgorithm::C31, emission_metrics_value(226, 226, 0, 0)),
+            ],
+        ),
+        (
+            Population::V3,
+            [
+                (FrozenAlgorithm::C2, emission_metrics_value(205, 200, 5, 2)),
+                (FrozenAlgorithm::C3, emission_metrics_value(223, 217, 6, 3)),
+                (FrozenAlgorithm::C31, emission_metrics_value(219, 214, 5, 2)),
+            ],
+        ),
+        (
+            Population::V4,
+            [
+                (FrozenAlgorithm::C2, emission_metrics_value(213, 210, 3, 0)),
+                (FrozenAlgorithm::C3, emission_metrics_value(237, 233, 4, 0)),
+                (FrozenAlgorithm::C31, emission_metrics_value(227, 224, 3, 0)),
+            ],
+        ),
+        (
+            Population::Validation,
+            [
+                (
+                    FrozenAlgorithm::C2,
+                    emission_metrics_value(14_686, 14_686, 0, 0),
+                ),
+                (
+                    FrozenAlgorithm::C3,
+                    emission_metrics_value(14_686, 14_686, 0, 0),
+                ),
+                (
+                    FrozenAlgorithm::C31,
+                    emission_metrics_value(14_686, 14_686, 0, 0),
+                ),
+            ],
+        ),
+    ]
+}
+
+const fn emission_metrics_value(
+    emitted: usize,
+    correct: usize,
+    wrong: usize,
+    null_emissions: usize,
+) -> EmissionMetrics {
+    EmissionMetrics {
+        emitted,
+        correct,
+        wrong,
+        null_emissions,
+    }
+}
+
+fn emission_metrics<'a>(
+    cases: impl Iterator<Item = &'a DiagnosticCase>,
+    algorithm: FrozenAlgorithm,
+) -> EmissionMetrics {
     let mut metrics = EmissionMetrics::default();
     for case in cases {
-        let Some(emitted) = case.c31_emitted.as_deref() else {
+        let Some(emitted) = algorithm.emitted(case) else {
             continue;
         };
         metrics.emitted += 1;
@@ -560,6 +754,391 @@ fn emission_metrics<'a>(cases: impl Iterator<Item = &'a DiagnosticCase>) -> Emis
         }
     }
     metrics
+}
+
+fn assert_c4_development_checkpoints(cases: &[DiagnosticCase]) -> Result<()> {
+    let expected_config = C4EmissionConfig {
+        sole_quality_min: 0.75,
+        sole_reliability_min: 0.40,
+        sole_role_signal_min: 0.80,
+        dominant_quality_min: 0.40,
+        dominant_reliability_min: 0.75,
+        dominant_role_signal_min: 0.40,
+        dominant_winner_margin_min: 0.50,
+    };
+    if ALGORITHM_C4 != expected_config {
+        return Err(format!(
+            "frozen C4 configuration changed: expected {expected_config:?}, got {ALGORITHM_C4:?}"
+        )
+        .into());
+    }
+
+    for case in cases {
+        let decision = &case.c4_decision;
+        if decision.sole_native.passed && decision.dominant_winner.passed {
+            return Err(format!(
+                "C4 relational branches overlap for {} {}",
+                case.population.as_str(),
+                case.id
+            )
+            .into());
+        }
+        let emitted = c4_emitted_candidate(decision);
+        let selected = decision
+            .c31
+            .winner
+            .as_ref()
+            .map(|winner| winner.greeting_candidate.as_str());
+        match decision.emission_source {
+            C4EmissionSource::C31 => {
+                if case.c31_emitted.as_deref() != emitted || emitted != selected {
+                    return Err(format!(
+                        "C4 changed a C3.1 emission for {} {}",
+                        case.population.as_str(),
+                        case.id
+                    )
+                    .into());
+                }
+            }
+            C4EmissionSource::SoleNative | C4EmissionSource::DominantWinner => {
+                if case.c31_emitted.is_some() || emitted != selected {
+                    return Err(format!(
+                        "C4 relational emission changed the selected winner for {} {}",
+                        case.population.as_str(),
+                        case.id
+                    )
+                    .into());
+                }
+            }
+            C4EmissionSource::Abstain => {
+                if emitted.is_some() {
+                    return Err(format!(
+                        "C4 abstention emitted a winner for {} {}",
+                        case.population.as_str(),
+                        case.id
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+
+    let stricter_dominant = C4EmissionConfig {
+        dominant_quality_min: 0.70,
+        ..ALGORITHM_C4
+    };
+    let floor_ids = c4_relational_ids(cases, ALGORITHM_C4, C4EmissionSource::DominantWinner);
+    let stricter_ids =
+        c4_relational_ids(cases, stricter_dominant, C4EmissionSource::DominantWinner);
+    if floor_ids != stricter_ids {
+        return Err(format!(
+            "dominant candidate-quality floors 0.40 and 0.70 selected different rows: {} versus {}",
+            floor_ids.len(),
+            stricter_ids.len()
+        )
+        .into());
+    }
+
+    for (population, branch, expected) in [
+        (
+            Population::CombinedSpent,
+            C4Branch::SoleNative,
+            RuleDelta {
+                correct: 17,
+                wrong: 0,
+                null_emissions: 0,
+            },
+        ),
+        (
+            Population::Validation,
+            C4Branch::SoleNative,
+            RuleDelta::default(),
+        ),
+        (
+            Population::CombinedSpent,
+            C4Branch::DominantWinner,
+            RuleDelta {
+                correct: 124,
+                wrong: 0,
+                null_emissions: 0,
+            },
+        ),
+        (
+            Population::Validation,
+            C4Branch::DominantWinner,
+            RuleDelta {
+                correct: 1_609,
+                wrong: 0,
+                null_emissions: 0,
+            },
+        ),
+        (
+            Population::CombinedSpent,
+            C4Branch::Combined,
+            RuleDelta {
+                correct: 141,
+                wrong: 0,
+                null_emissions: 0,
+            },
+        ),
+        (
+            Population::Validation,
+            C4Branch::Combined,
+            RuleDelta {
+                correct: 1_609,
+                wrong: 0,
+                null_emissions: 0,
+            },
+        ),
+    ] {
+        let actual = c4_increment_metrics(cases, population, branch);
+        if actual != expected {
+            return Err(format!(
+                "frozen C4 {} {} increment changed: expected {expected:?}, got {actual:?}",
+                branch.as_str(),
+                population.as_str()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn c4_relational_ids(
+    cases: &[DiagnosticCase],
+    config: C4EmissionConfig,
+    source: C4EmissionSource,
+) -> BTreeSet<(Population, String)> {
+    cases
+        .iter()
+        .filter_map(|case| {
+            let decision = c4_decision_from_c31(
+                case.c4_decision.c31.clone(),
+                ALGORITHM_C2.threshold,
+                config,
+            );
+            (decision.emission_source == source).then(|| (case.population, case.id.clone()))
+        })
+        .collect()
+}
+
+fn c4_increment_metrics(
+    cases: &[DiagnosticCase],
+    population: Population,
+    branch: C4Branch,
+) -> RuleDelta {
+    let mut delta = RuleDelta::default();
+    for case in cases_for_population(cases, population) {
+        if branch.includes(case.c4_decision.emission_source) {
+            observe_rule_delta(&mut delta, case);
+        }
+    }
+    delta
+}
+
+fn write_c4_development_summary(output: &Path, cases: &[DiagnosticCase]) -> Result<()> {
+    let mut writer = csv::Writer::from_path(output.join("c4_development_summary.csv"))?;
+    writer.write_record([
+        "population",
+        "branch",
+        "additional_correct",
+        "additional_wrong",
+        "additional_null_emissions",
+    ])?;
+    for population in Population::OUTPUTS {
+        for branch in C4Branch::ALL {
+            let delta = c4_increment_metrics(cases, population, branch);
+            writer.write_record([
+                population.as_str().to_string(),
+                branch.as_str().to_string(),
+                delta.correct.to_string(),
+                delta.wrong.to_string(),
+                delta.null_emissions.to_string(),
+            ])?;
+        }
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn qualitative_c4_diagnostics(
+    corpus: &impl EvidenceSource,
+) -> Vec<QualitativeC4Diagnostic> {
+    [
+        // Redacted: Name that selects its given name but fails both relational paths.
+        "Olivier REDACTED",
+        // Redacted: Name that selects its given name but fails both relational paths.
+        "Baris REDACTED",
+    ]
+        .into_iter()
+        .map(|input| qualitative_c4_diagnostic(corpus, input))
+        .collect()
+}
+
+fn qualitative_c4_diagnostic(
+    corpus: &impl EvidenceSource,
+    input: &'static str,
+) -> QualitativeC4Diagnostic {
+    let diagnostic = diagnose_role_inference(corpus, ALGORITHM_C3, input, None, None);
+    let decision = c4_decision_breakdown(
+        &diagnostic,
+        ALGORITHM_C2,
+        ALGORITHM_C31,
+        ALGORITHM_C4,
+    );
+    let winner = decision.c31.winner.as_ref();
+    QualitativeC4Diagnostic {
+        input,
+        selected_candidate: winner.map(|winner| winner.greeting_candidate.clone()),
+        decision_score: decision.c31.final_score,
+        emission_source: decision.emission_source.as_str(),
+        candidate_count: winner.map_or(0, |winner| winner.candidate_count),
+        candidate_quality: winner.map(|winner| winner.winner_score),
+        winner_margin: winner.map(|winner| winner.winner_margin),
+        margin_signal: decision.c31.margin_signal,
+        role_llr: winner.map(|winner| winner.role_llr),
+        role_signal: winner.map(|winner| winner.role_signal),
+        reliability: winner.map(|winner| winner.reliability),
+        alphabetic_length: winner.map(|winner| winner.alphabetic_length),
+        segmented_candidate: decision.c31.segmented_candidate,
+        segmentation_mechanism: winner.and_then(|winner| winner.segmentation_mechanism),
+        segmented_candidate_penalty: decision.c31.segmented_candidate_penalty,
+        vetoes: QualitativeVetoes {
+            strong_organization_marker: decision.c31.hard_organization_marker,
+            generic_organization_marker: decision.c31.generic_organization_marker,
+            ampersand: decision.c31.ampersand,
+            candidate_too_short: decision.c31.candidate_too_short,
+        },
+        conditions: QualitativeConditions {
+            sole_native: qualitative_rule_breakdown(decision.sole_native),
+            dominant_winner: qualitative_rule_breakdown(decision.dominant_winner),
+        },
+    }
+}
+
+fn qualitative_rule_breakdown(rule: C4RuleBreakdown) -> QualitativeRuleBreakdown {
+    QualitativeRuleBreakdown {
+        c3_1_abstained: rule.c31_abstained,
+        native_candidate: rule.native_candidate,
+        candidate_count: rule.candidate_count,
+        candidate_count_pass: rule.candidate_count_pass,
+        candidate_quality: rule.candidate_quality,
+        candidate_quality_min: rule.candidate_quality_min,
+        candidate_quality_pass: rule.candidate_quality_pass,
+        winner_margin: rule.winner_margin,
+        winner_margin_min: rule.winner_margin_min,
+        winner_margin_pass: rule.winner_margin_pass,
+        reliability: rule.reliability,
+        reliability_min: rule.reliability_min,
+        reliability_pass: rule.reliability_pass,
+        role_signal: rule.role_signal,
+        role_signal_min: rule.role_signal_min,
+        role_signal_pass: rule.role_signal_pass,
+        vetoes_pass: rule.vetoes_pass,
+        passed: rule.passed,
+    }
+}
+
+fn build_c4_development_report(
+    cases: &[DiagnosticCase],
+    qualitative: &[QualitativeC4Diagnostic],
+) -> Result<String> {
+    let mut report = String::new();
+    writeln!(report, "# C4 relational-emission development freeze\n")?;
+    writeln!(
+        report,
+        "C4 is an additive emission policy over frozen C3.1. It does not change candidate generation, ranking, the selected winner, the C3.1 decision score or threshold, the segmented-candidate penalty, or any veto. This run used only spent REAL_PROXY_V1/V3/V4 plus synthetic VALIDATION; it did not load TEST or V5.\n"
+    )?;
+    writeln!(report, "## Frozen relational rules\n")?;
+    writeln!(
+        report,
+        "- Sole native: `candidate_count == 1`, quality `>= 0.75`, reliability `>= 0.40`, role signal `>= 0.80`, native provenance, and all C3.1 vetoes passing.\n- Dominant winner: `candidate_count >= 2`, raw margin `>= 0.50`, quality `>= 0.40`, reliability `>= 0.75`, role signal `>= 0.40`, native provenance, and all C3.1 vetoes passing.\n"
+    )?;
+    writeln!(
+        report,
+        "The dominant quality floor is the searched-grid guardrail. Re-evaluation at `0.70` selected exactly the same rows, so candidate quality did not establish independent conditional discrimination for that branch.\n"
+    )?;
+    writeln!(report, "## Frozen baseline checkpoints\n")?;
+    writeln!(
+        report,
+        "| Population | Algorithm | Emitted | Correct | Wrong | NULL FP |\n| --- | --- | ---: | ---: | ---: | ---: |"
+    )?;
+    for (population, expected_by_algorithm) in frozen_checkpoint_table() {
+        for (algorithm, expected) in expected_by_algorithm {
+            writeln!(
+                report,
+                "| {} | {} | {} | {} | {} | {} |",
+                population.as_str(),
+                algorithm.as_str(),
+                expected.emitted,
+                expected.correct,
+                expected.wrong,
+                expected.null_emissions
+            )?;
+        }
+    }
+    writeln!(report, "\n## C4 additions over C3.1\n")?;
+    writeln!(
+        report,
+        "| Population | Branch | Correct | Wrong | NULL FP |\n| --- | --- | ---: | ---: | ---: |"
+    )?;
+    for population in Population::OUTPUTS {
+        for branch in C4Branch::ALL {
+            let delta = c4_increment_metrics(cases, population, branch);
+            writeln!(
+                report,
+                "| {} | {} | {} | {} | {} |",
+                population.as_str(),
+                branch.as_str(),
+                delta.correct,
+                delta.wrong,
+                delta.null_emissions
+            )?;
+        }
+    }
+    let spent_baseline = emission_metrics(
+        cases_for_population(cases, Population::CombinedSpent),
+        FrozenAlgorithm::C31,
+    );
+    let spent_delta = c4_increment_metrics(cases, Population::CombinedSpent, C4Branch::Combined);
+    let validation_baseline = emission_metrics(
+        cases_for_population(cases, Population::Validation),
+        FrozenAlgorithm::C31,
+    );
+    let validation_delta = c4_increment_metrics(cases, Population::Validation, C4Branch::Combined);
+    writeln!(
+        report,
+        "\nThe combined spent C4 checkpoint is {} emitted / {} correct / {} wrong / {} NULL FP. The VALIDATION checkpoint is {} emitted / {} correct / {} wrong / {} NULL FP. The sole and dominant additions are disjoint by candidate-count construction and were also checked case by case.\n",
+        spent_baseline.emitted + spent_delta.correct + spent_delta.wrong,
+        spent_baseline.correct + spent_delta.correct,
+        spent_baseline.wrong + spent_delta.wrong,
+        spent_baseline.null_emissions + spent_delta.null_emissions,
+        validation_baseline.emitted + validation_delta.correct + validation_delta.wrong,
+        validation_baseline.correct + validation_delta.correct,
+        validation_baseline.wrong + validation_delta.wrong,
+        validation_baseline.null_emissions + validation_delta.null_emissions,
+    )?;
+    writeln!(report, "## Non-selecting qualitative examples\n")?;
+    for example in qualitative {
+        writeln!(
+            report,
+            "- `{}` selected `{}` with C3.1 score `{:.9}`; frozen C4 source: `{}`.",
+            example.input,
+            example.selected_candidate.as_deref().unwrap_or("NULL"),
+            example.decision_score,
+            example.emission_source
+        )?;
+    }
+    writeln!(
+        report,
+        "\nThese examples were evaluated only after the thresholds and reproduction assertions were fixed. They did not select or modify any rule. Full condition traces are in `c4_qualitative_diagnostics.json`.\n"
+    )?;
+    writeln!(report, "## Status and limits\n")?;
+    writeln!(
+        report,
+        "C4 is frozen only as a development candidate. C3.1 remains the leading independently validated classifier until C4 receives one-shot evaluation on untouched REAL_PROXY_V5. Zero observed development errors over machine-generated or machine-consensus labels are not a worldwide precision claim."
+    )?;
+    Ok(report)
 }
 
 fn write_topology_outcomes(output: &Path, cases: &[DiagnosticCase]) -> Result<()> {
@@ -1241,7 +1820,10 @@ fn build_report(
     )?;
     writeln!(report, "| --- | ---: | ---: | ---: | ---: |")?;
     for population in Population::OUTPUTS {
-        let metrics = emission_metrics(cases_for_population(cases, population));
+        let metrics = emission_metrics(
+            cases_for_population(cases, population),
+            FrozenAlgorithm::C31,
+        );
         writeln!(
             report,
             "| {} | {} | {} | {} | {} |",
@@ -1535,6 +2117,31 @@ mod tests {
         }
     }
 
+    fn c4_decision_from_test(
+        origin: &'static str,
+        candidate_count: usize,
+    ) -> C4DecisionBreakdown {
+        let winner = winner(origin, candidate_count);
+        c4_decision_from_c31(
+            C31DecisionBreakdown {
+                segmented_candidate: Some(origin == "handle_segment"),
+                winner: Some(winner),
+                margin_signal: Some(0.8),
+                contributions: None,
+                pre_veto_score: Some(0.5),
+                post_veto_score: 0.5,
+                hard_organization_marker: false,
+                generic_organization_marker: false,
+                ampersand: false,
+                candidate_too_short: false,
+                segmented_candidate_penalty: 0.0,
+                final_score: 0.5,
+            },
+            ALGORITHM_C2.threshold,
+            ALGORITHM_C4,
+        )
+    }
+
     fn diagnostic_case_for_test(origin: &'static str, candidate_count: usize) -> DiagnosticCase {
         DiagnosticCase {
             population: Population::V1,
@@ -1552,8 +2159,11 @@ mod tests {
             viable_candidates: candidate_count,
             winner: Some(winner(origin, candidate_count)),
             margin_signal: Some(0.8),
+            c2_emitted: None,
+            c3_emitted: None,
             c31_score: 0.5,
             c31_emitted: None,
+            c4_decision: c4_decision_from_test(origin, candidate_count),
             vetoes_pass: true,
             country_audit: None,
         }

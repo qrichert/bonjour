@@ -976,6 +976,91 @@ or machine-consensus proxy labels, not worldwide precision estimates.
 The proposed operating point still requires untouched REAL_PROXY_V5
 validation before any C4 promotion.
 
+### C4 relational-emission development freeze
+
+C4 implements the two selected relational paths as explicit additions
+over frozen C3.1. It does not change candidate generation, ranking, the
+selected winner, the C3.1 decision score or threshold, the segmented
+candidate penalty, or any existing veto. The checksum-gated freeze run
+used only spent V1/V3/V4 and synthetic VALIDATION:
+
+```console
+benchmarks/name-eval/target/release/name-eval \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-c4-development-freeze \
+  --freeze-c4-relational-emission \
+  --spent-holdout=_wip/real-proxy-v1/sealed.csv \
+  --spent-manifest=_wip/real-proxy-v1/sealed.manifest.csv \
+  --spent-sha256=de95213f27fc1849032ee6788c8f16d7d515c1a991ae8b2e8414b7b155814c4e \
+  --spent-holdout=_wip/real-proxy-v3/sealed.csv \
+  --spent-manifest=_wip/real-proxy-v3/sealed.manifest.csv \
+  --spent-sha256=d70e4d4b2ed7e49bed09dc1e8d2ba60ade8a752e3b86c772e964bd64883ee6fe \
+  --spent-holdout=_wip/real-proxy-v4/sealed.csv \
+  --spent-manifest=_wip/real-proxy-v4/sealed.manifest.csv \
+  --spent-sha256=d95c589bec836faaeecaeda85b146989d2936914bff0209934f289ccb9446c7f
+```
+
+The frozen rules are:
+
+```text
+sole native:
+    candidate_count == 1
+    candidate_quality >= 0.75
+    reliability >= 0.40
+    role_signal >= 0.80
+
+dominant native winner:
+    candidate_count >= 2
+    raw winner_margin >= 0.50
+    candidate_quality >= 0.40
+    reliability >= 0.75
+    role_signal >= 0.40
+
+both:
+    native / non-segmented winner
+    all frozen C3.1 vetoes pass
+```
+
+The dominant `0.40` quality floor is the lower bound of the completed
+search grid. Re-evaluating the branch at `0.70` selected exactly the
+same rows, so candidate quality did not establish independent
+conditional discrimination for this rule.
+
+| Population        | Branch          | Correct added | Wrong added | NULL FP added |
+| ----------------- | --------------- | ------------: | ----------: | ------------: |
+| REAL_PROXY_V1_DEV | sole native     |             9 |           0 |             0 |
+| REAL_PROXY_V1_DEV | dominant winner |            36 |           0 |             0 |
+| REAL_PROXY_V3_DEV | sole native     |             4 |           0 |             0 |
+| REAL_PROXY_V3_DEV | dominant winner |            42 |           0 |             0 |
+| REAL_PROXY_V4_DEV | sole native     |             4 |           0 |             0 |
+| REAL_PROXY_V4_DEV | dominant winner |            46 |           0 |             0 |
+| COMBINED_SPENT    | sole native     |            17 |           0 |             0 |
+| COMBINED_SPENT    | dominant winner |           124 |           0 |             0 |
+| COMBINED_SPENT    | combined unique |           141 |           0 |             0 |
+| VALIDATION        | sole native     |             0 |           0 |             0 |
+| VALIDATION        | dominant winner |         1,609 |           0 |             0 |
+| VALIDATION        | combined unique |         1,609 |           0 |             0 |
+
+The combined spent checkpoint is 813 emitted / 805 correct / 8 wrong / 2
+expected-NULL emissions. VALIDATION is 16,295 emitted / 16,295 correct /
+0 wrong / 0 expected-NULL emissions. Candidate-count conditions make the
+two paths mutually exclusive, and the freeze run also checks this case
+by case.
+
+After the thresholds and reproduction assertions were fixed, the two
+non-selecting qualitative examples both remained abstentions:
+<!-- Redacted: Names that selected their given names but failed both relational paths. -->
+
+`Olivier REDACTED` selected `Olivier` at the unchanged C3.1 score, and
+`Baris REDACTED` selected `Baris`, but neither relational path passed.
+The generated `c4_qualitative_diagnostics.json` records the emission
+source, winner features, provenance, vetoes, and each branch condition.
+
+C4 is frozen only as a development candidate. C3.1 remains the leading
+independently validated classifier and the application runtime remains
+unchanged. C4 requires a one-shot untouched REAL_PROXY_V5 comparison
+before any promotion.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.
