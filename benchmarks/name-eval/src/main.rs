@@ -33,8 +33,9 @@ use c2_calibration::run_c2_calibration;
 use c3_development::run_c3_development;
 use c31_development::run_c31_development;
 use classifier::{
-    ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C31,
-    AlgorithmConfig, RawInference, c2_inference_from_diagnostic, c31_inference_from_diagnostic,
+    ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4,
+    ALGORITHM_C31, AlgorithmConfig, C4EmissionSource, RawInference, c2_inference_from_diagnostic,
+    c4_decision_breakdown, c4_emitted_candidate, c31_inference_from_diagnostic,
     candidate_diagnostics, diagnose_role_inference, infer_prethreshold,
 };
 use corpus_audit::{LexicalAudit, audit_clean_v1};
@@ -45,8 +46,9 @@ use dataset::{
 };
 use metrics::{CaseOutcome, Metrics, greeting_matches, outcome};
 use name_eval::holdout::{
-    ConfidenceBucketSpec, FrozenHoldout, SealedDecision, SealedEvaluation, evaluate_sealed,
-    evaluate_sealed_with_buckets, load_frozen, sealed_confidence_buckets_csv, sealed_summary_csv,
+    ConfidenceBucketSpec, FrozenHoldout, SealedDecision, SealedEvaluation, SealedMetrics,
+    evaluate_explicit_emissions, evaluate_sealed, evaluate_sealed_with_buckets, load_frozen,
+    sealed_confidence_buckets_csv, sealed_summary_csv,
 };
 use proxy_diagnostic::run_proxy_diagnostic;
 use relational_diagnostic::{run_c4_development_freeze, run_relational_diagnostic};
@@ -58,6 +60,7 @@ const C0_FROZEN_THRESHOLD: f64 = 0.80;
 const C1_SELECTED_THRESHOLD: f64 = 0.93;
 const C2_NAME: &str = "C2-proxy-calibrated-emission-v1";
 const C31_NAME: &str = "C3.1-handle-provenance-gate-v1";
+const C4_NAME: &str = "C4-relational-emission-v1";
 const THRESHOLD_SWEEP: [f64; 12] = [
     0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.99, 1.00,
 ];
@@ -105,6 +108,28 @@ struct C2C3C31SealedRun {
     c2: SealedEvaluation,
     c3: SealedEvaluation,
     c31: SealedEvaluation,
+}
+
+struct C31C4SealedRun {
+    holdout: FrozenHoldout,
+    c31: SealedMetrics,
+    c4: SealedMetrics,
+    c4_only: C4OnlyBreakdown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct C4OnlyAggregate {
+    emitted: usize,
+    correct: usize,
+    wrong: usize,
+    expected_null_false_emissions: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct C4OnlyBreakdown {
+    sole_native: C4OnlyAggregate,
+    dominant_winner: C4OnlyAggregate,
+    combined: C4OnlyAggregate,
 }
 
 fn main() {
@@ -172,6 +197,7 @@ struct Arguments {
     compare_sealed_c1_c2_sha256: Option<String>,
     compare_sealed_c2_c3_sha256: Option<String>,
     compare_sealed_c2_c3_c31_sha256: Option<String>,
+    compare_sealed_c31_c4_sha256: Option<String>,
     diagnose_relational_emission: bool,
     freeze_c4_relational_emission: bool,
     spent_holdouts: Vec<PathBuf>,
@@ -198,6 +224,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut compare_sealed_c1_c2_sha256 = None;
     let mut compare_sealed_c2_c3_sha256 = None;
     let mut compare_sealed_c2_c3_c31_sha256 = None;
+    let mut compare_sealed_c31_c4_sha256 = None;
     let mut diagnose_relational_emission = false;
     let mut freeze_c4_relational_emission = false;
     let mut spent_holdouts = Vec::new();
@@ -271,6 +298,14 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
                 );
             }
             compare_sealed_c2_c3_c31_sha256 = Some(value.to_ascii_lowercase());
+        } else if let Some(value) = text.strip_prefix("--compare-sealed-c31-c4-sha256=") {
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(
+                    "sealed comparison SHA-256 must contain exactly 64 hexadecimal characters"
+                        .into(),
+                );
+            }
+            compare_sealed_c31_c4_sha256 = Some(value.to_ascii_lowercase());
         } else if text == "--diagnose-relational-emission" {
             diagnose_relational_emission = true;
         } else if text == "--freeze-c4-relational-emission" {
@@ -303,10 +338,11 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         + usize::from(compare_sealed_c1_c2_sha256.is_some())
         + usize::from(compare_sealed_c2_c3_sha256.is_some())
         + usize::from(compare_sealed_c2_c3_c31_sha256.is_some())
+        + usize::from(compare_sealed_c31_c4_sha256.is_some())
         + usize::from(diagnose_relational_emission)
         + usize::from(freeze_c4_relational_emission);
     if explicit_modes > 1 {
-        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, sealed C1/C2 comparison, sealed C2/C3 comparison, and sealed C2/C3/C3.1 comparison modes are mutually exclusive".into());
+        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, sealed C1/C2 comparison, sealed C2/C3 comparison, sealed C2/C3/C3.1 comparison, and sealed C3.1/C4 comparison modes are mutually exclusive".into());
     }
     validate_relational_arguments(
         diagnose_relational_emission || freeze_c4_relational_emission,
@@ -321,9 +357,11 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         || development_mode
         || compare_sealed_c1_c2_sha256.is_some()
         || compare_sealed_c2_c3_sha256.is_some()
-        || compare_sealed_c2_c3_c31_sha256.is_some();
-    let (artifact, clean_csv, output) =
-        if diagnose_relational_emission || freeze_c4_relational_emission {
+        || compare_sealed_c2_c3_c31_sha256.is_some()
+        || compare_sealed_c31_c4_sha256.is_some();
+    let (artifact, clean_csv, output) = if diagnose_relational_emission
+        || freeze_c4_relational_emission
+    {
         if positional.len() != 2 || sealed.is_some() || development_only || reference_threshold_set
         {
             let mode = if freeze_c4_relational_emission {
@@ -341,6 +379,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         if sealed.is_none() || development_only || reference_threshold_set {
             let mode = if sealed_only {
                 "--sealed-only"
+            } else if compare_sealed_c31_c4_sha256.is_some() {
+                "--compare-sealed-c31-c4-sha256"
             } else if compare_sealed_c2_c3_c31_sha256.is_some() {
                 "--compare-sealed-c2-c3-c31-sha256"
             } else if compare_sealed_c2_c3_sha256.is_some() {
@@ -385,6 +425,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         compare_sealed_c1_c2_sha256,
         compare_sealed_c2_c3_sha256,
         compare_sealed_c2_c3_c31_sha256,
+        compare_sealed_c31_c4_sha256,
         diagnose_relational_emission,
         freeze_c4_relational_emission,
         spent_holdouts,
@@ -418,7 +459,7 @@ fn validate_relational_arguments(
 }
 
 fn usage() -> &'static str {
-    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
+    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c31-c4-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
 }
 
 #[allow(clippy::too_many_lines)]
@@ -439,7 +480,8 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
             .or(arguments.develop_c31_spent_holdout_sha256.as_deref())
             .or(arguments.compare_sealed_c1_c2_sha256.as_deref())
             .or(arguments.compare_sealed_c2_c3_sha256.as_deref())
-            .or(arguments.compare_sealed_c2_c3_c31_sha256.as_deref()),
+            .or(arguments.compare_sealed_c2_c3_c31_sha256.as_deref())
+            .or(arguments.compare_sealed_c31_c4_sha256.as_deref()),
         frozen_holdout.as_ref(),
     ) {
         validate_spent_holdout_digest(acknowledged, &holdout.manifest.holdout_sha256)?;
@@ -452,6 +494,24 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
     if arguments.diagnose_relational_emission {
         let holdouts = load_relational_holdouts(arguments)?;
         return run_relational_diagnostic(output, &corpus, holdouts, &fixtures);
+    }
+    if let Some(acknowledged_sha256) = &arguments.compare_sealed_c31_c4_sha256 {
+        let holdout =
+            frozen_holdout.ok_or("--compare-sealed-c31-c4-sha256 requires a frozen holdout")?;
+        validate_spent_holdout_digest(acknowledged_sha256, &holdout.manifest.holdout_sha256)?;
+        let comparison = evaluate_frozen_holdout_c31_c4(&corpus, holdout)?;
+        let summary = c31_c4_sealed_summary_csv(&comparison)?;
+        let repeated_summary = c31_c4_sealed_summary_csv(&comparison)?;
+        if summary != repeated_summary {
+            return Err("C3.1/C4 aggregate summary serialization is not deterministic".into());
+        }
+        let report = build_c31_c4_sealed_report(&comparison);
+        let repeated_report = build_c31_c4_sealed_report(&comparison);
+        if report != repeated_report {
+            return Err("C3.1/C4 aggregate report serialization is not deterministic".into());
+        }
+        fs::write(output.join("sealed_comparison_summary.csv"), summary)?;
+        return Ok(report);
     }
     if let Some(acknowledged_sha256) = &arguments.compare_sealed_c2_c3_c31_sha256 {
         let holdout =
@@ -854,6 +914,126 @@ fn evaluate_frozen_holdout_c2_c3_c31(
     })
 }
 
+fn evaluate_frozen_holdout_c31_c4(
+    corpus: &C32Artifact,
+    holdout: FrozenHoldout,
+) -> Result<C31C4SealedRun> {
+    let mut c31_emissions = Vec::with_capacity(holdout.cases.len());
+    let mut c4_emissions = Vec::with_capacity(holdout.cases.len());
+    let mut sole_emissions = Vec::with_capacity(holdout.cases.len());
+    let mut dominant_emissions = Vec::with_capacity(holdout.cases.len());
+    let mut combined_c4_only_emissions = Vec::with_capacity(holdout.cases.len());
+
+    for case in &holdout.cases {
+        if !case.is_evaluable() {
+            c31_emissions.push(None);
+            c4_emissions.push(None);
+            sole_emissions.push(None);
+            dominant_emissions.push(None);
+            combined_c4_only_emissions.push(None);
+            continue;
+        }
+        let diagnostic = diagnose_role_inference(
+            corpus,
+            ALGORITHM_C3,
+            &case.display_name,
+            nonempty(&case.country_hint),
+            nonempty(&case.locale_hint),
+        );
+        let c31 = c31_inference_from_diagnostic(&diagnostic, ALGORITHM_C2, ALGORITHM_C31);
+        let c31_emission = c31
+            .greeting_at(ALGORITHM_C2.threshold)
+            .map(ToOwned::to_owned);
+        let c4_decision =
+            c4_decision_breakdown(&diagnostic, ALGORITHM_C2, ALGORITHM_C31, ALGORITHM_C4);
+        let c4_emission = c4_emitted_candidate(&c4_decision).map(ToOwned::to_owned);
+        validate_c4_additive_emission(
+            c31_emission.as_deref(),
+            c4_emission.as_deref(),
+            c4_decision.emission_source,
+        )?;
+
+        let c4_only = c31_emission
+            .is_none()
+            .then_some(c4_emission.clone())
+            .flatten();
+        let (sole, dominant) = match c4_decision.emission_source {
+            C4EmissionSource::SoleNative => (c4_only.clone(), None),
+            C4EmissionSource::DominantWinner => (None, c4_only.clone()),
+            C4EmissionSource::C31 | C4EmissionSource::Abstain => (None, None),
+        };
+        c31_emissions.push(c31_emission);
+        c4_emissions.push(c4_emission);
+        sole_emissions.push(sole);
+        dominant_emissions.push(dominant);
+        combined_c4_only_emissions.push(c4_only);
+    }
+
+    let c31 = evaluate_explicit_emissions(&holdout, &c31_emissions)?;
+    let c4 = evaluate_explicit_emissions(&holdout, &c4_emissions)?;
+    let c4_only = C4OnlyBreakdown {
+        sole_native: c4_only_aggregate(evaluate_explicit_emissions(&holdout, &sole_emissions)?),
+        dominant_winner: c4_only_aggregate(evaluate_explicit_emissions(
+            &holdout,
+            &dominant_emissions,
+        )?),
+        combined: c4_only_aggregate(evaluate_explicit_emissions(
+            &holdout,
+            &combined_c4_only_emissions,
+        )?),
+    };
+    if add_c4_only(c4_only.sole_native, c4_only.dominant_winner) != c4_only.combined {
+        return Err("C4-only branch aggregates do not sum to the combined delta".into());
+    }
+    if c4.emitted_greetings != c31.emitted_greetings + c4_only.combined.emitted
+        || c4.correct_greetings != c31.correct_greetings + c4_only.combined.correct
+        || c4.wrong_greetings != c31.wrong_greetings + c4_only.combined.wrong
+        || c4.false_emissions_on_expected_abstentions
+            != c31.false_emissions_on_expected_abstentions
+                + c4_only.combined.expected_null_false_emissions
+    {
+        return Err("C4 aggregate is not the exact additive C3.1 delta".into());
+    }
+    Ok(C31C4SealedRun {
+        holdout,
+        c31,
+        c4,
+        c4_only,
+    })
+}
+
+fn validate_c4_additive_emission(
+    c31: Option<&str>,
+    c4: Option<&str>,
+    source: C4EmissionSource,
+) -> Result<()> {
+    match (c31, c4, source) {
+        (Some(c31), Some(c4), C4EmissionSource::C31) if c31 == c4 => Ok(()),
+        (None, Some(_), C4EmissionSource::SoleNative | C4EmissionSource::DominantWinner) => Ok(()),
+        (None, None, C4EmissionSource::Abstain) => Ok(()),
+        _ => Err("C4 violated its frozen additive-emission invariant".into()),
+    }
+}
+
+fn c4_only_aggregate(metrics: SealedMetrics) -> C4OnlyAggregate {
+    C4OnlyAggregate {
+        emitted: metrics.emitted_greetings,
+        correct: metrics.correct_greetings,
+        wrong: metrics.wrong_greetings,
+        expected_null_false_emissions: metrics.false_emissions_on_expected_abstentions,
+    }
+}
+
+fn add_c4_only(left: C4OnlyAggregate, right: C4OnlyAggregate) -> C4OnlyAggregate {
+    C4OnlyAggregate {
+        emitted: left.emitted + right.emitted,
+        correct: left.correct + right.correct,
+        wrong: left.wrong + right.wrong,
+        expected_null_false_emissions: left.expected_null_false_emissions
+            + right.expected_null_false_emissions,
+    }
+}
+
 fn sealed_decision(inference: RawInference) -> SealedDecision {
     SealedDecision {
         greeting_candidate: inference.greeting_candidate,
@@ -924,6 +1104,65 @@ fn c2_c3_sealed_summary_csv(run: &C2C3SealedRun) -> Result<Vec<u8>> {
 
 fn c2_c3_c31_sealed_summary_csv(run: &C2C3C31SealedRun) -> Result<Vec<u8>> {
     sealed_comparison_summary_csv(c2_c3_c31_evaluations(run))
+}
+
+fn c31_c4_sealed_summary_csv(run: &C31C4SealedRun) -> Result<Vec<u8>> {
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(Vec::new());
+    writer.write_record([
+        "row_kind",
+        "name",
+        "emitted",
+        "correct",
+        "wrong",
+        "false_emissions_on_expected_abstentions",
+        "precision",
+        "recall",
+        "abstention_rate",
+        "incremental_person_coverage",
+    ])?;
+    for (name, metrics) in [(C31_NAME, run.c31), (C4_NAME, run.c4)] {
+        writer.write_record([
+            "classifier".to_string(),
+            name.to_string(),
+            metrics.emitted_greetings.to_string(),
+            metrics.correct_greetings.to_string(),
+            metrics.wrong_greetings.to_string(),
+            metrics.false_emissions_on_expected_abstentions.to_string(),
+            format_optional(metrics.greeting_precision()),
+            format_optional(metrics.greeting_recall()),
+            format_optional(metrics.abstention_rate()),
+            String::new(),
+        ])?;
+    }
+    for (name, aggregate) in c4_only_rows(run) {
+        writer.write_record([
+            "c4_only_delta".to_string(),
+            name.to_string(),
+            aggregate.emitted.to_string(),
+            aggregate.correct.to_string(),
+            aggregate.wrong.to_string(),
+            aggregate.expected_null_false_emissions.to_string(),
+            format_optional(count_ratio(aggregate.correct, aggregate.emitted)),
+            String::new(),
+            String::new(),
+            format_optional(count_ratio(
+                aggregate.correct,
+                run.holdout.manifest.expected_greetings,
+            )),
+        ])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn c4_only_rows(run: &C31C4SealedRun) -> [(&'static str, C4OnlyAggregate); 3] {
+    [
+        ("sole_native", run.c4_only.sole_native),
+        ("dominant_winner", run.c4_only.dominant_winner),
+        ("combined_c4_only", run.c4_only.combined),
+    ]
 }
 
 fn sealed_comparison_summary_csv<const N: usize>(
@@ -2365,6 +2604,95 @@ fn build_c2_c3_c31_sealed_report(run: &C2C3C31SealedRun) -> String {
     report
 }
 
+fn build_c31_c4_sealed_report(run: &C31C4SealedRun) -> String {
+    let manifest = &run.holdout.manifest;
+    let mut report = String::new();
+    writeln!(report, "# Sealed C3.1/C4 REAL_PROXY_V5 comparison\n").unwrap();
+    writeln!(
+        report,
+        "The frozen holdout was checksum-verified as `{}` before inference. Provenance: {}. This was the sole classifier invocation on V5. It produced aggregate counts only: no case IDs, display names, labels, predictions, failures, traces, changed-case rows, or confidence buckets were written.\n",
+        manifest.holdout_sha256,
+        markdown(&manifest.provenance),
+    )
+    .unwrap();
+    writeln!(
+        report,
+        "V5 contains {} source rows: {} evaluable and {} skipped, with {} expected greetings and {} expected abstentions. Machine-consensus proxy labels are not worldwide population ground truth.\n",
+        manifest.total_cases,
+        manifest.evaluable_cases,
+        manifest.skipped_cases,
+        manifest.expected_greetings,
+        manifest.expected_abstentions,
+    )
+    .unwrap();
+    writeln!(
+        report,
+        "| Classifier | Emitted | Correct | Wrong | Expected-NULL false emissions | Precision | Recall | Abstention |\n|---|---:|---:|---:|---:|---:|---:|---:|"
+    )
+    .unwrap();
+    for (name, metrics) in [(C31_NAME, run.c31), (C4_NAME, run.c4)] {
+        writeln!(
+            report,
+            "| {name} | {} | {} | {} | {} | {} | {} | {} |",
+            metrics.emitted_greetings,
+            metrics.correct_greetings,
+            metrics.wrong_greetings,
+            metrics.false_emissions_on_expected_abstentions,
+            percent(metrics.greeting_precision()),
+            percent(metrics.greeting_recall()),
+            percent(metrics.abstention_rate()),
+        )
+        .unwrap();
+    }
+    writeln!(report, "\n## Additive C4-only delta\n").unwrap();
+    writeln!(
+        report,
+        "| Branch | Additional emissions | Correct | Wrong | Expected-NULL false emissions | Incremental person-case coverage |\n|---|---:|---:|---:|---:|---:|"
+    )
+    .unwrap();
+    for (name, aggregate) in c4_only_rows(run) {
+        writeln!(
+            report,
+            "| {name} | {} | {} | {} | {} | {} |",
+            aggregate.emitted,
+            aggregate.correct,
+            aggregate.wrong,
+            aggregate.expected_null_false_emissions,
+            percent(count_ratio(aggregate.correct, manifest.expected_greetings)),
+        )
+        .unwrap();
+    }
+    writeln!(report, "\nExpected-NULL false emissions are a subset of wrong emissions, not an additional error count. The two relational branch rows are mutually exclusive and sum exactly to `combined_c4_only`.\n").unwrap();
+    writeln!(report, "## Frozen configuration\n").unwrap();
+    writeln!(report, "C3.1 uses `{C31_NAME}` at the frozen C2 threshold `{:.17}` with handle-segment penalty `{:.3}`. C4 is strictly additive and retains the already selected C3.1 winner.\n", ALGORITHM_C2.threshold, ALGORITHM_C31.handle_segment_penalty).unwrap();
+    writeln!(report, "- `sole_native`: native candidate, candidate count `== 1`, quality `>= {:.2}`, reliability `>= {:.2}`, role signal `>= {:.2}`, and all C3.1 vetoes pass.", ALGORITHM_C4.sole_quality_min, ALGORITHM_C4.sole_reliability_min, ALGORITHM_C4.sole_role_signal_min).unwrap();
+    writeln!(report, "- `dominant_winner`: native candidate, candidate count `>= 2`, raw winner margin `>= {:.2}`, quality `>= {:.2}`, reliability `>= {:.2}`, role signal `>= {:.2}`, and all C3.1 vetoes pass.\n", ALGORITHM_C4.dominant_winner_margin_min, ALGORITHM_C4.dominant_quality_min, ALGORITHM_C4.dominant_reliability_min, ALGORITHM_C4.dominant_role_signal_min).unwrap();
+    let (classification, explanation) = c4_validation_classification(run.c4_only.combined);
+    writeln!(report, "## Conservative result classification\n").unwrap();
+    writeln!(report, "**{classification}.** {explanation}\n").unwrap();
+    writeln!(report, "This classification is a one-shot machine-consensus proxy result. It does not establish worldwide precision or safety equivalence from small error counts, and it does not promote C4 in application code. V5 remains sealed until a separate task explicitly declares it spent.\n").unwrap();
+    report
+}
+
+fn c4_validation_classification(delta: C4OnlyAggregate) -> (&'static str, &'static str) {
+    if delta.correct >= 10 && delta.wrong == 0 && delta.expected_null_false_emissions == 0 {
+        (
+            "A — C4 validated",
+            "C4 recovered a meaningful unseen set of correct greetings with no observed additional wrong or expected-NULL emissions. A separate explicit promotion change is still required.",
+        )
+    } else if delta.correct > 0 && delta.wrong < delta.correct {
+        (
+            "B — C4 mixed",
+            "C4 recovered unseen correct greetings, but the gain was either too small or accompanied by additional observed errors, so C3.1 remains the production candidate.",
+        )
+    } else {
+        (
+            "C — C4 rejected",
+            "C4 failed to provide a useful unseen gain relative to its additional observed errors, so C3.1 remains the production candidate.",
+        )
+    }
+}
+
 fn write_sealed_report(report: &mut String, sealed_run: Option<&SealedRun>) {
     writeln!(report, "## Sealed real-world holdout\n").unwrap();
     let Some(sealed_run) = sealed_run else {
@@ -2704,6 +3032,10 @@ fn write_configuration_report(report: &mut String, algorithms: &[AlgorithmRun]) 
 
 fn format_optional(value: Option<f64>) -> String {
     value.map_or_else(String::new, |value| format!("{value:.6}"))
+}
+
+fn count_ratio(numerator: usize, denominator: usize) -> Option<f64> {
+    (denominator != 0).then(|| numerator as f64 / denominator as f64)
 }
 
 fn percent(value: Option<f64>) -> String {
@@ -3179,6 +3511,57 @@ mod argument_tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn sealed_c31_c4_comparison_requires_digest_and_rejects_tuning_modes() {
+        let arguments = parse(&[
+            "artifact",
+            "output",
+            &format!("--compare-sealed-c31-c4-sha256={DIGEST}"),
+            "--sealed=sealed.csv",
+            "--sealed-manifest=manifest.csv",
+        ])
+        .unwrap();
+        assert_eq!(
+            arguments.compare_sealed_c31_c4_sha256.as_deref(),
+            Some(DIGEST)
+        );
+        assert_eq!(arguments.clean_csv, None);
+
+        for extra in [
+            "--sealed-only",
+            "--development-only",
+            "--reference-threshold=0.80",
+            &format!("--diagnose-spent-holdout-sha256={DIGEST}"),
+            &format!("--develop-c31-from-spent-holdout-sha256={DIGEST}"),
+            &format!("--compare-sealed-c1-c2-sha256={DIGEST}"),
+            &format!("--compare-sealed-c2-c3-sha256={DIGEST}"),
+            &format!("--compare-sealed-c2-c3-c31-sha256={DIGEST}"),
+        ] {
+            assert!(
+                parse(&[
+                    "artifact",
+                    "output",
+                    &format!("--compare-sealed-c31-c4-sha256={DIGEST}"),
+                    "--sealed=sealed.csv",
+                    "--sealed-manifest=manifest.csv",
+                    extra,
+                ])
+                .is_err(),
+                "{extra}"
+            );
+        }
+        assert!(
+            parse(&[
+                "artifact",
+                "output",
+                "--compare-sealed-c31-c4-sha256=short",
+                "--sealed=sealed.csv",
+                "--sealed-manifest=manifest.csv",
+            ])
+            .is_err()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3514,5 +3897,156 @@ mod sealed_report_tests {
             assert!(output.contains(ALGORITHM_C3.name));
             assert!(output.contains(C31_NAME));
         }
+    }
+
+    #[test]
+    fn c31_c4_outputs_are_deterministic_aggregate_only_and_branch_complete() {
+        let private_name = "Private V5 Display Name";
+        let comparison = C31C4SealedRun {
+            holdout: FrozenHoldout {
+                cases: vec![HoldoutCase {
+                    id: "case-private-v5".to_string(),
+                    display_name: private_name.to_string(),
+                    country_hint: String::new(),
+                    locale_hint: String::new(),
+                    label_status: LabelStatus::Greeting,
+                    expected_greeting: "Private".to_string(),
+                    span_start: Some(0),
+                    span_end: Some(7),
+                    case_kind: CaseKind::Person,
+                }],
+                manifest: HoldoutManifest {
+                    format_version: 1,
+                    holdout_sha256: "0123456789abcdef".to_string(),
+                    total_cases: 25,
+                    evaluable_cases: 23,
+                    skipped_cases: 2,
+                    expected_greetings: 20,
+                    expected_abstentions: 3,
+                    person_cases: 20,
+                    non_person_cases: 0,
+                    unknown_kind_cases: 3,
+                    provenance: "fresh blind V5 proxy agreement".to_string(),
+                },
+            },
+            c31: SealedMetrics {
+                total_labeled_cases: 25,
+                evaluable_cases: 23,
+                skipped_cases: 2,
+                emitted_greetings: 5,
+                correct_greetings: 5,
+                expected_greetings: 20,
+                expected_greetings_missed: 15,
+                expected_abstentions: 3,
+                abstentions: 18,
+                ..SealedMetrics::default()
+            },
+            c4: SealedMetrics {
+                total_labeled_cases: 25,
+                evaluable_cases: 23,
+                skipped_cases: 2,
+                emitted_greetings: 17,
+                correct_greetings: 17,
+                expected_greetings: 20,
+                expected_greetings_missed: 3,
+                expected_abstentions: 3,
+                abstentions: 6,
+                ..SealedMetrics::default()
+            },
+            c4_only: C4OnlyBreakdown {
+                sole_native: C4OnlyAggregate {
+                    emitted: 4,
+                    correct: 4,
+                    ..C4OnlyAggregate::default()
+                },
+                dominant_winner: C4OnlyAggregate {
+                    emitted: 8,
+                    correct: 8,
+                    ..C4OnlyAggregate::default()
+                },
+                combined: C4OnlyAggregate {
+                    emitted: 12,
+                    correct: 12,
+                    ..C4OnlyAggregate::default()
+                },
+            },
+        };
+
+        assert_eq!(
+            add_c4_only(
+                comparison.c4_only.sole_native,
+                comparison.c4_only.dominant_winner,
+            ),
+            comparison.c4_only.combined
+        );
+        let report = build_c31_c4_sealed_report(&comparison);
+        let repeated_report = build_c31_c4_sealed_report(&comparison);
+        let summary = c31_c4_sealed_summary_csv(&comparison).unwrap();
+        let repeated_summary = c31_c4_sealed_summary_csv(&comparison).unwrap();
+        assert_eq!(report, repeated_report);
+        assert_eq!(summary, repeated_summary);
+        let summary = String::from_utf8(summary).unwrap();
+        for output in [&report, &summary] {
+            assert!(!output.contains(private_name));
+            assert!(!output.contains("case-private-v5"));
+            assert!(output.contains(C31_NAME));
+            assert!(output.contains(C4_NAME));
+            assert!(output.contains("sole_native"));
+            assert!(output.contains("dominant_winner"));
+        }
+        for forbidden in ["display_name", "case_id", "expected_greeting", "prediction"] {
+            assert!(!summary.contains(forbidden));
+        }
+        assert!(report.contains("A — C4 validated"));
+    }
+
+    #[test]
+    fn c4_additive_invariant_and_validation_classifications_are_explicit() {
+        assert!(
+            validate_c4_additive_emission(Some("Anne"), Some("Anne"), C4EmissionSource::C31,)
+                .is_ok()
+        );
+        assert!(
+            validate_c4_additive_emission(None, Some("Anne"), C4EmissionSource::SoleNative,)
+                .is_ok()
+        );
+        assert!(
+            validate_c4_additive_emission(None, Some("Anne"), C4EmissionSource::DominantWinner,)
+                .is_ok()
+        );
+        assert!(
+            validate_c4_additive_emission(Some("Anne"), Some("Marie"), C4EmissionSource::C31)
+                .is_err()
+        );
+        assert!(validate_c4_additive_emission(None, None, C4EmissionSource::SoleNative).is_err());
+        assert_eq!(
+            c4_validation_classification(C4OnlyAggregate {
+                emitted: 10,
+                correct: 10,
+                ..C4OnlyAggregate::default()
+            })
+            .0,
+            "A — C4 validated"
+        );
+        assert_eq!(
+            c4_validation_classification(C4OnlyAggregate {
+                emitted: 10,
+                correct: 9,
+                wrong: 1,
+                ..C4OnlyAggregate::default()
+            })
+            .0,
+            "B — C4 mixed"
+        );
+        assert_eq!(
+            c4_validation_classification(C4OnlyAggregate {
+                emitted: 2,
+                correct: 1,
+                wrong: 1,
+                ..C4OnlyAggregate::default()
+            })
+            .0,
+            "C — C4 rejected"
+        );
     }
 }

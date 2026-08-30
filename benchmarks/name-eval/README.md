@@ -1061,6 +1061,76 @@ independently validated classifier and the application runtime remains
 unchanged. C4 requires a one-shot untouched REAL_PROXY_V5 comparison
 before any promotion.
 
+### REAL_PROXY_V5 frozen pre-inference checkpoint
+
+REAL_PROXY_V5 was sampled independently from the same checksum-pinned
+Meta Kaggle `Users.csv` source with seed `0x5245414C5F5635`. Sampling
+excluded every exact display-name value from V1, V2, V3, and V4. The
+33,084,108-row source retained its SHA-256
+`30b95ff7d079289fe76a0fada39ebbb174f15f6f85a2e09f7a208c6fdf57dd82`
+before and after sampling. The 2,000-row V5 source has SHA-256
+`e26c1e45c51ec87da4285110fd740a50b319149e4cfc5035862d3356d1a73c89`;
+explicit set checks found zero exact value overlap with every prior
+proxy source.
+
+Both raw annotations were produced without classifier output or corpus
+evidence and retained unchanged. Mechanical normalization accepted only
+exact original-text greeting spans, NULL, and SKIP. It mapped 399 unique
+cases with an unusable or non-exact value from at least one annotator to
+SKIP. Consensus yielded:
+
+| Source rows | Greeting agreements | NULL agreements | Annotator-skip cases | Other disagreements | Evaluable | Skipped |
+| ----------: | ------------------: | --------------: | -------------------: | ------------------: | --------: | ------: |
+|       2,000 |               1,193 |             247 |                  476 |                  84 |     1,440 |     560 |
+
+The deterministic holdout serialization was frozen before loading the
+artifact, with SHA-256
+`69070614fee68401b896d6c5bfb4c22c55cca9744237f66213a9dd04291db6c7`. It
+contains 1,193 expected greetings, 247 expected abstentions, and 560
+skipped cases. No C3.1 or C4 inference had occurred when this digest and
+the preceding counts were recorded.
+
+The reviewed release evaluator was then invoked exactly once:
+
+```console
+benchmarks/name-eval/target/release/name-eval \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  _wip/name-eval-real-proxy-v5 \
+  --compare-sealed-c31-c4-sha256=69070614fee68401b896d6c5bfb4c22c55cca9744237f66213a9dd04291db6c7 \
+  --sealed=_wip/real-proxy-v5/sealed.csv \
+  --sealed-manifest=_wip/real-proxy-v5/sealed.manifest.csv
+```
+
+It wrote only the aggregate report and summary CSV:
+
+| Classifier | Emitted | Correct | Wrong | NULL FP | Precision | Recall | Abstention |
+| ---------- | ------: | ------: | ----: | ------: | --------: | -----: | ---------: |
+| C3.1       |     191 |     189 |     2 |       1 |    98.95% | 15.84% |     86.74% |
+| C4         |     235 |     233 |     2 |       1 |    99.15% | 19.53% |     83.68% |
+
+The exact additive C4-only delta was:
+
+| Branch          | Additional emissions | Correct | Wrong | NULL FP | Incremental recall |
+| --------------- | -------------------: | ------: | ----: | ------: | -----------------: |
+| sole native     |                   11 |      11 |     0 |       0 |              0.92% |
+| dominant winner |                   33 |      33 |     0 |       0 |              2.77% |
+| combined        |                   44 |      44 |     0 |       0 |              3.69% |
+
+C4 therefore receives classification **A — validated** as a classifier
+candidate: both relational branches recovered unseen correct greetings,
+and the combined 44 additional emissions introduced no observed wrong or
+expected-NULL emission. This does not establish worldwide precision or
+safety equivalence from small counts. It also does not change the
+application runtime, which remains on C3.1 until a separate explicit
+promotion change.
+
+No V5 row-level prediction, failure, trace, changed case, or confidence
+bucket was generated or inspected. The aggregate report has SHA-256
+`af38ed1dfa815c21d9325c36c4acf66b9c7f45cde2447a09f05c3fb9fc5d166d`; the
+aggregate CSV has SHA-256
+`cbd6ae4c70ce040bc942dd33de8952d2a0ad2ff52bd3be143cf09a5f50613048`. V5
+remains sealed unless a later task explicitly declares it spent.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.

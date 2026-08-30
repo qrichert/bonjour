@@ -634,6 +634,56 @@ pub fn evaluate_sealed_with_buckets(
     })
 }
 
+pub fn evaluate_explicit_emissions(
+    holdout: &FrozenHoldout,
+    emissions: &[Option<String>],
+) -> Result<SealedMetrics> {
+    if emissions.len() != holdout.cases.len() {
+        return Err("sealed emission count does not match holdout case count".into());
+    }
+    let mut metrics = SealedMetrics {
+        total_labeled_cases: holdout.manifest.total_cases,
+        evaluable_cases: holdout.manifest.evaluable_cases,
+        skipped_cases: holdout.manifest.skipped_cases,
+        expected_greetings: holdout.manifest.expected_greetings,
+        expected_abstentions: holdout.manifest.expected_abstentions,
+        non_person_cases: holdout.manifest.non_person_cases,
+        ..SealedMetrics::default()
+    };
+
+    for (case, emission) in holdout.cases.iter().zip(emissions) {
+        if case.label_status == LabelStatus::Skip {
+            if emission.is_some() {
+                return Err("skipped sealed case unexpectedly has an emission".into());
+            }
+            continue;
+        }
+        let emitted = emission.as_deref();
+        let correct = greeting_matches(case.expected_greeting(), emitted);
+        if emitted.is_some() {
+            metrics.emitted_greetings += 1;
+            if correct {
+                metrics.correct_greetings += 1;
+            } else {
+                metrics.wrong_greetings += 1;
+            }
+        } else {
+            metrics.abstentions += 1;
+        }
+        if case.label_status == LabelStatus::Greeting && !correct {
+            metrics.expected_greetings_missed += 1;
+        }
+        if case.label_status == LabelStatus::Abstain && emitted.is_some() {
+            metrics.false_emissions_on_expected_abstentions += 1;
+        }
+        if case.case_kind == CaseKind::NonPerson && emitted.is_some() {
+            metrics.non_person_false_positives += 1;
+        }
+    }
+
+    Ok(metrics)
+}
+
 pub fn sealed_summary_csv(evaluation: &SealedEvaluation) -> Result<Vec<u8>> {
     let metrics = evaluation.metrics;
     let mut writer = canonical_writer();
@@ -1215,6 +1265,68 @@ mod tests {
         let mut cases = frozen_cases();
         cases[0].expected_greeting = "Elodie".to_string();
         assert!(serialize_cases(&cases).is_err());
+    }
+
+    #[test]
+    fn explicit_emissions_count_correct_abstained_and_skipped_cases() {
+        let cases = frozen_cases();
+        let sealed_bytes = serialize_cases(&cases).unwrap();
+        let holdout = FrozenHoldout {
+            manifest: manifest_for(&cases, &sealed_bytes, "fixture"),
+            cases,
+        };
+        let metrics =
+            evaluate_explicit_emissions(&holdout, &[Some("Élodie".to_string()), None, None])
+                .unwrap();
+
+        assert_eq!(metrics.total_labeled_cases, 3);
+        assert_eq!(metrics.evaluable_cases, 2);
+        assert_eq!(metrics.skipped_cases, 1);
+        assert_eq!(metrics.emitted_greetings, 1);
+        assert_eq!(metrics.correct_greetings, 1);
+        assert_eq!(metrics.wrong_greetings, 0);
+        assert_eq!(metrics.expected_greetings_missed, 0);
+        assert_eq!(metrics.false_emissions_on_expected_abstentions, 0);
+        assert_eq!(metrics.abstentions, 1);
+    }
+
+    #[test]
+    fn explicit_emissions_count_wrong_greetings_and_null_false_emissions() {
+        let cases = frozen_cases();
+        let sealed_bytes = serialize_cases(&cases).unwrap();
+        let holdout = FrozenHoldout {
+            manifest: manifest_for(&cases, &sealed_bytes, "fixture"),
+            cases,
+        };
+        let metrics = evaluate_explicit_emissions(
+            &holdout,
+            &[Some("Durand".to_string()), Some("Baris".to_string()), None],
+        )
+        .unwrap();
+
+        assert_eq!(metrics.emitted_greetings, 2);
+        assert_eq!(metrics.correct_greetings, 0);
+        assert_eq!(metrics.wrong_greetings, 2);
+        assert_eq!(metrics.expected_greetings_missed, 1);
+        assert_eq!(metrics.false_emissions_on_expected_abstentions, 1);
+        assert_eq!(metrics.non_person_false_positives, 1);
+        assert_eq!(metrics.abstentions, 0);
+    }
+
+    #[test]
+    fn explicit_emissions_reject_bad_lengths_and_skipped_emissions() {
+        let cases = frozen_cases();
+        let sealed_bytes = serialize_cases(&cases).unwrap();
+        let holdout = FrozenHoldout {
+            manifest: manifest_for(&cases, &sealed_bytes, "fixture"),
+            cases,
+        };
+
+        assert!(evaluate_explicit_emissions(&holdout, &[None]).is_err());
+        assert!(
+            evaluate_explicit_emissions(&holdout, &[None, None, Some("undecidable".to_string())],)
+                .is_err()
+        );
     }
 
     #[test]

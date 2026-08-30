@@ -11,10 +11,10 @@ use sha2::{Digest, Sha256};
 
 use crate::artifact::EvidenceSource;
 use crate::classifier::{
-    ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4, ALGORITHM_C31, C31DecisionBreakdown,
-    C4DecisionBreakdown, C4EmissionConfig, C4EmissionSource, C4RuleBreakdown, CandidateDiagnostic,
-    WinnerFeatures, c2_inference_from_diagnostic, c31_decision_breakdown, c4_decision_breakdown,
-    c4_decision_from_c31, c4_emitted_candidate, diagnose_role_inference,
+    ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4, ALGORITHM_C31, C4DecisionBreakdown,
+    C4EmissionConfig, C4EmissionSource, C4RuleBreakdown, C31DecisionBreakdown, CandidateDiagnostic,
+    WinnerFeatures, c2_inference_from_diagnostic, c4_decision_breakdown, c4_decision_from_c31,
+    c4_emitted_candidate, c31_decision_breakdown, diagnose_role_inference,
 };
 use crate::dataset::{Case, Split, generate_cases};
 use crate::metrics::greeting_matches;
@@ -532,9 +532,7 @@ fn diagnostic_case(
         locale_hint,
     );
     let c2 = c2_inference_from_diagnostic(&c2_diagnostic, ALGORITHM_C2);
-    let c2_emitted = c2
-        .greeting_at(ALGORITHM_C2.threshold)
-        .map(str::to_string);
+    let c2_emitted = c2.greeting_at(ALGORITHM_C2.threshold).map(str::to_string);
     let diagnostic = diagnose_role_inference(
         corpus,
         ALGORITHM_C3,
@@ -544,15 +542,8 @@ fn diagnostic_case(
     );
     let topology = Topology::from_candidates(&diagnostic.candidates);
     let c3 = c2_inference_from_diagnostic(&diagnostic, ALGORITHM_C2);
-    let c3_emitted = c3
-        .greeting_at(ALGORITHM_C2.threshold)
-        .map(str::to_string);
-    let c4_decision = c4_decision_breakdown(
-        &diagnostic,
-        ALGORITHM_C2,
-        ALGORITHM_C31,
-        ALGORITHM_C4,
-    );
+    let c3_emitted = c3.greeting_at(ALGORITHM_C2.threshold).map(str::to_string);
+    let c4_decision = c4_decision_breakdown(&diagnostic, ALGORITHM_C2, ALGORITHM_C31, ALGORITHM_C4);
     let breakdown = &c4_decision.c31;
     let winner = breakdown.winner.clone();
     let c31_emitted = winner.as_ref().and_then(|winner| {
@@ -912,11 +903,8 @@ fn c4_relational_ids(
     cases
         .iter()
         .filter_map(|case| {
-            let decision = c4_decision_from_c31(
-                case.c4_decision.c31.clone(),
-                ALGORITHM_C2.threshold,
-                config,
-            );
+            let decision =
+                c4_decision_from_c31(case.c4_decision.c31.clone(), ALGORITHM_C2.threshold, config);
             (decision.emission_source == source).then(|| (case.population, case.id.clone()))
         })
         .collect()
@@ -961,9 +949,7 @@ fn write_c4_development_summary(output: &Path, cases: &[DiagnosticCase]) -> Resu
     Ok(())
 }
 
-fn qualitative_c4_diagnostics(
-    corpus: &impl EvidenceSource,
-) -> Vec<QualitativeC4Diagnostic> {
+fn qualitative_c4_diagnostics(corpus: &impl EvidenceSource) -> Vec<QualitativeC4Diagnostic> {
     [
         // Redacted: Name that selects its given name but fails both relational paths.
         "Olivier REDACTED",
@@ -980,12 +966,7 @@ fn qualitative_c4_diagnostic(
     input: &'static str,
 ) -> QualitativeC4Diagnostic {
     let diagnostic = diagnose_role_inference(corpus, ALGORITHM_C3, input, None, None);
-    let decision = c4_decision_breakdown(
-        &diagnostic,
-        ALGORITHM_C2,
-        ALGORITHM_C31,
-        ALGORITHM_C4,
-    );
+    let decision = c4_decision_breakdown(&diagnostic, ALGORITHM_C2, ALGORITHM_C31, ALGORITHM_C4);
     let winner = decision.c31.winner.as_ref();
     QualitativeC4Diagnostic {
         input,
@@ -2117,10 +2098,7 @@ mod tests {
         }
     }
 
-    fn c4_decision_from_test(
-        origin: &'static str,
-        candidate_count: usize,
-    ) -> C4DecisionBreakdown {
+    fn c4_decision_from_test(origin: &'static str, candidate_count: usize) -> C4DecisionBreakdown {
         let winner = winner(origin, candidate_count);
         c4_decision_from_c31(
             C31DecisionBreakdown {

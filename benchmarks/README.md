@@ -378,6 +378,33 @@ clearer subset. No V4 row-level prediction or failure was written or
 inspected; V4 is now spent comparison evidence and cannot tune any of
 the three frozen algorithms.
 
+C4 then added two explicit relational emission paths over the unchanged
+C3.1 winner: a strict sole-native rule and a dominant multi-candidate
+winner rule. Their thresholds were frozen on spent V1/V3/V4 and
+VALIDATION before REAL_PROXY_V5 was sampled. V5 used seed
+`0x5245414C5F5635`, excluded every exact V1-V4 display-name value, and
+was frozen at SHA-256
+`69070614fee68401b896d6c5bfb4c22c55cca9744237f66213a9dd04291db6c7`
+before inference. Consensus retained 1,440 evaluable cases and
+skipped 560.
+
+The sole aggregate-only V5 comparison produced:
+
+| Classifier | Emitted | Correct | Wrong | NULL FP | Precision | Recall |
+| ---------- | ------: | ------: | ----: | ------: | --------: | -----: |
+| C3.1       |     191 |     189 |     2 |       1 |    98.95% | 15.84% |
+| C4         |     235 |     233 |     2 |       1 |    99.15% | 19.53% |
+
+C4's 44 additional emissions all matched the proxy labels, with no
+additional wrong or expected-NULL emission. Sole-native contributed 11
+and dominant-winner contributed 33. C4 is therefore validated as the
+leading classifier candidate on this one-shot proxy experiment. The
+small error counts do not establish worldwide precision or safety
+equivalence, and no V5 row-level result was generated or inspected.
+Production remains on C3.1 pending a separate explicit promotion change.
+Detailed provenance and aggregate hashes are recorded in
+[`name-eval/README.md`](name-eval/README.md).
+
 ## Current production model: C3.1
 
 Production inference now uses exactly the evaluator's frozen C3.1 code.
