@@ -1145,6 +1145,156 @@ semantics, so applying the C3.1 default threshold can legitimately
 differ from the C4 default result. C2, C3, C3.1, and C4 remain
 reproducible as frozen benchmark modes.
 
+### C5 calibration-frontier diagnosis
+
+After preserving the sealed V5 checkpoint above, the calibration study
+explicitly marked V5 as spent and combined it with spent V1-V4. It did
+not load TEST or V6 and did not change C4, candidate generation,
+ranking, vetoes, the corpus, the artifact, or production behavior.
+
+The development population is:
+
+| Population        | Evaluable | Expected greeting | Expected NULL | Label provenance                        |
+| ----------------- | --------: | ----------------: | ------------: | --------------------------------------- |
+| REAL_PROXY_V1_DEV |     1,957 |             1,616 |           341 | one classifier-blind machine annotation |
+| REAL_PROXY_V2_DEV |     1,496 |             1,217 |           279 | exact two-annotation machine consensus  |
+| REAL_PROXY_V3_DEV |     1,474 |             1,232 |           242 | exact two-annotation machine consensus  |
+| REAL_PROXY_V4_DEV |     1,441 |             1,220 |           221 | exact two-annotation machine consensus  |
+| REAL_PROXY_V5_DEV |     1,440 |             1,193 |           247 | exact two-annotation machine consensus  |
+| **Combined**      | **7,808** |         **6,478** |     **1,330** | generation-balanced fitting             |
+
+V1's different label provenance remains visible throughout the report.
+The proxy population contains no country or locale hints. Synthetic
+VALIDATION remains a separate sanity population and never contributes to
+fitting, proxy precision, or confidence intervals.
+
+The combined frozen baselines are:
+
+| Policy | Emitted | Correct | Wrong | NULL FP | Precision | Recall | False abstentions | Correct winner rejected |
+| ------ | ------: | ------: | ----: | ------: | --------: | -----: | ----------------: | ----------------------: |
+| C3.1   |   1,093 |   1,081 |    12 |       3 |    98.90% | 16.69% |             5,388 |                   4,217 |
+| C4     |   1,318 |   1,305 |    13 |       3 |    99.01% | 20.15% |             5,163 |                   3,993 |
+
+`Correct winner rejected` means that the row expects a greeting, the
+already-selected winner matches that greeting, every frozen veto passes,
+and the policy abstains. It therefore isolates calibration loss from
+candidate-generation and ranking loss.
+
+C4 rejects **3,993 / 6,478 expected greetings (61.64%)** for which the
+winner is already correct and veto-free. This is the principal result:
+C4 is a conservative reference point that discards substantial usable
+ranking signal. The rejected-correct-winner bucket breaks down as:
+
+| Feature           | Notable bucket | Count | Share of rejected correct winners |
+| ----------------- | -------------- | ----: | --------------------------------: |
+| Winner margin     | `0.50-1.00`    | 2,175 |                            54.47% |
+| Candidate quality | `0.60-0.80`    | 2,274 |                            56.95% |
+| Role signal       | `0.60-0.80`    | 1,825 |                            45.70% |
+| Reliability       | `0.40-0.60`    | 1,302 |                            32.61% |
+| Candidate count   | `1`            | 1,409 |                            35.29% |
+| Candidate count   | `2`            | 2,171 |                            54.37% |
+
+The generated report retains every fixed bin, combined and by proxy
+generation. These bins are descriptive; they did not select model
+thresholds.
+
+Three deterministic calibration families were compared with frozen C4:
+
+- the unchanged C3.1 scalar score at every distinct threshold;
+- frozen C4 plus one native-only monotonic relational branch;
+- a small generation-balanced, regularized, nonnegative logistic model,
+  both alone and additively over C4.
+
+Every policy may only emit the existing winner or abstain. All frozen
+vetoes remain mandatory. The primary frontier aggregates disjoint
+leave-one-generation-out predictions: each fold selects parameters on
+four generations and evaluates them on the fifth.
+
+| Training precision target | LOGO family   | OOF precision | Target met OOF | Recall | Correct | Wrong | NULL FP | False abstentions | Correct winner rejected | Wilson 95% interval |
+| ------------------------: | ------------- | ------------: | :------------: | -----: | ------: | ----: | ------: | ----------------: | ----------------------: | ------------------: |
+|                     99.9% | logistic      |        98.98% |       no       |  1.50% |      97 |     1 |       1 |             6,381 |                   5,201 |       94.44%-99.82% |
+|                     99.5% | logistic      |        99.67% |      yes       | 13.91% |     901 |     3 |       2 |             5,576 |                   4,397 |       99.03%-99.89% |
+|                     99.0% | controlled C4 |        98.84% |       no       | 33.02% |   2,139 |    25 |       7 |             4,321 |                   3,159 |       98.30%-99.22% |
+|                     98.0% | controlled C4 |        97.91% |       no       | 49.07% |   3,179 |    68 |      22 |             3,253 |                   2,119 |       97.35%-98.34% |
+|                     97.0% | controlled C4 |        96.93% |       no       | 53.04% |   3,436 |   109 |      31 |             2,964 |                   1,862 |       96.30%-97.44% |
+|                     95.0% | controlled C4 |        95.67% |      yes       | 59.69% |   3,867 |   175 |      44 |             2,480 |                   1,431 |       95.00%-96.26% |
+|                     90.0% | score only    |        89.97% |       no       | 75.90% |   4,917 |   548 |      93 |             1,106 |                     381 |       89.15%-90.74% |
+
+The `99.9%` row is unsupported: only 98 emissions occurred and its
+Wilson interval is too broad. A training target is not a guarantee that
+the independently aggregated held-out folds meet that target, which is
+why the `99%`, `98%`, `97%`, and `90%` misses are reported rather than
+rounded away.
+
+The score-only pooled descriptive frontier reached 9.46%, 16.18%,
+22.01%, 34.79%, 52.92%, and 75.83% recall at observed 99.5%, 99%, 98%,
+97%, 95%, and 90% precision. The controlled relational family reached
+34.01%, 49.20%, 53.16%, 59.69%, and 68.14% recall at pooled 99%, 98%,
+97%, 95%, and 90%. These pooled figures describe curve shape only; they
+are not held-out evidence.
+
+Cross-generation stability remains imperfect. The selected LOGO families
+produced these held-out-generation ranges:
+
+| Target | Precision range |  Recall range |
+| -----: | --------------: | ------------: |
+|  99.5% |  98.93%-100.00% | 11.51%-15.37% |
+|  99.0% |   98.63%-99.41% | 28.16%-36.32% |
+|  98.0% |   97.60%-98.69% | 46.23%-51.05% |
+|  97.0% |   96.14%-97.88% | 50.56%-55.22% |
+|  95.0% |   95.25%-96.61% | 55.26%-62.46% |
+|  90.0% |   87.53%-91.67% | 72.96%-78.12% |
+
+The full per-generation emitted, correct, wrong, NULL-FP, false-
+abstention, and correct-winner-rejected counts are reproduced by the
+generated report and CSVs.
+
+A cost view using `correct - cost * wrong` preferred controlled
+relational policies at wrong-emission costs 5x through 50x, with recall
+falling from 59.23% to 34.01% as the cost increased. At 100x, the
+preferred family was logistic at 13.99% recall. This is diagnostic only;
+it does not encode a product decision.
+
+The controlled relational model exposes substantially more usable
+ranking signal, but this study does not establish a policy that strictly
+dominates C4 near its existing precision. The 99% and 98% LOGO points
+missed their targets slightly. The logistic model was selected only at
+99.9% and 99.5%, where it reduced recall below C4. No balanced C5 point
+is therefore frozen.
+
+Two development candidates remain for explicit product discussion:
+
+- a very-conservative 99.5% pure-logistic point: 901 correct / 3 wrong,
+  99.67% OOF precision, and 13.91% OOF recall;
+- an aggressive 95% controlled-relational point: 3,867 correct / 175
+  wrong, 95.67% OOF precision, and 59.69% OOF recall.
+
+On separate synthetic VALIDATION, frozen C4 remained 16,295 correct / 0
+wrong. The conservative candidate produced 13,605 correct / 53 wrong;
+the aggressive candidate produced 27,161 correct / 1,390 wrong. The
+proxy rows contain no hints, so they cannot validate country-sensitive
+calibration. On hinted synthetic rows, country evidence changed median
+candidate quality by `+0.06298` while the median C3.1 score change was
+zero, confirming that useful country-aware quality evidence is mostly
+discarded by the current score form.
+
+Only after selection, the two non-selecting qualitative examples were
+checked.
+<!-- Redacted: Names that abstain at the conservative point and emit at the aggressive point. -->
+
+`Olivier REDACTED` and `Baris REDACTED` both remain abstentions at the
+conservative point and both emit their expected selected candidate at
+the aggressive point. They did not participate in fitting or policy
+selection.
+
+The diagnostic writes aggregate reports plus a development-only feature
+table that contains neither display names nor source IDs. Two
+independent runs produced byte-identical output. The final generated
+`report.md` has SHA-256
+`30cc22cb416bb8a7c3300412aa020c4a43d2ec779c42c6a151989a31fea4ec24`. No
+C5 policy was implemented or frozen. Any selected future C5 still
+requires untouched REAL_PROXY_V6 one-shot validation.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.

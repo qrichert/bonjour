@@ -407,6 +407,26 @@ application behavior without changing those rules. Detailed provenance
 and aggregate hashes are recorded in
 [`name-eval/README.md`](name-eval/README.md).
 
+V5 was subsequently marked spent for a development-only C5 calibration
+frontier study together with V1-V4. Across 7,808 proxy rows, frozen C4
+emitted 1,305 correct and 13 wrong greetings for 20.15% recall. More
+importantly, it abstained on 3,993 rows where the selected winner
+already matched the expected greeting and every frozen veto passed:
+61.64% of all expected greetings were therefore lost specifically at
+emission calibration rather than candidate generation or ranking.
+
+Generation-level leave-one-out analysis found a large but non-free
+frontier. A controlled relational relaxation reached 33.02% recall at
+98.84% out-of-fold precision and 59.69% recall at 95.67% precision. The
+former narrowly missed its 99% target; the latter met its 95% target. A
+monotonic logistic model met the 99.5% target at 99.67% precision but
+only 13.91% recall, below C4. Consequently no balanced C5 policy was
+frozen: C4 remains production behavior, and any later product-selected
+point requires untouched REAL_PROXY_V6 validation. The detailed
+frontier, Wilson intervals, false-abstention counts, per-generation
+stability, cost analysis, and deterministic report hash are recorded in
+[`name-eval/README.md`](name-eval/README.md).
+
 ## Current production model: C4
 
 Production inference now uses exactly the evaluator's frozen C4 code.
