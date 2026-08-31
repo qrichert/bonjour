@@ -80,9 +80,9 @@ with additional domain separation by split.
 
 ## Fixed artifact baseline
 
-C3.1 is the frozen production algorithm for bonjour 0.1.0. C2 and C3
-remain available here as historical comparison baselines; production
-does not expose algorithm selection or tuning controls.
+C4 is the frozen production algorithm for bonjour 0.1.0. C2, C3, and
+C3.1 remain available here as historical comparison baselines;
+production does not expose algorithm selection or tuning controls.
 
 Before the benchmark-local implementation was retired, same-process
 comparisons ran old and shared C3.1 over regression, DEV, and
@@ -1130,6 +1130,20 @@ bucket was generated or inspected. The aggregate report has SHA-256
 aggregate CSV has SHA-256
 `cbd6ae4c70ce040bc942dd33de8952d2a0ad2ff52bd3be143cf09a5f50613048`. V5
 remains sealed unless a later task explicitly declares it spent.
+
+### Production promotion
+
+After the preceding aggregate-only V5 result was frozen, a separate
+promotion changed the application default from C3.1 to the
+already-frozen C4 implementation. It did not inspect V5 rows, alter
+candidate generation or ranking, change the C3.1 score, modify either
+relational rule, or change the artifact.
+
+The public `greeting()` decision and plain CLI now use C4. Explicit
+`greeting_at(...)` and `--threshold` calls retain their C3.1 score-only
+semantics, so applying the C3.1 default threshold can legitimately
+differ from the C4 default result. C2, C3, C3.1, and C4 remain
+reproducible as frozen benchmark modes.
 
 ## Metric definitions
 

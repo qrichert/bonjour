@@ -21,7 +21,7 @@ Options:
   --country=<XX>        Two-letter country hint.
   --gender=<F|M>        Gender hint.
   --locale=<LOCALE>     Locale used as country fallback.
-  --threshold=<FLOAT>   Greeting threshold (default: 0.7897588240573696).
+  --threshold=<FLOAT>   Override C4 with a C3.1 score threshold (C3.1 default: 0.7897588240573696).
   --json                Print the unthresholded inference as JSON.
   -h, --help            Show this message and exit.
   -V, --version         Show the version and exit.

@@ -1,4 +1,4 @@
-//! Command-line interface for frozen C3.1 greeting-name inference.
+//! Command-line interface for frozen C4 greeting-name inference.
 
 use std::env;
 use std::path::PathBuf;
@@ -248,7 +248,7 @@ fn usage_line() -> String {
 #[cfg(not(tarpaulin_include))]
 fn help() {
     println!(
-        "{usage}\n\nArguments:\n  <display name>        Display name to inspect.\n\nOptions:\n  --data-dir=<PATH>     Exact bonjour-name-data-v1 directory.\n  --country=<XX>        Two-letter country hint.\n  --gender=<F|M>        Gender hint.\n  --locale=<LOCALE>     Locale used as country fallback.\n  --threshold=<FLOAT>   Greeting threshold (default: {default}).\n  --json                Print the unthresholded inference as JSON.\n  -h, --help            Show this message and exit.\n  -V, --version         Show the version and exit.",
+        "{usage}\n\nArguments:\n  <display name>        Display name to inspect.\n\nOptions:\n  --data-dir=<PATH>     Exact bonjour-name-data-v1 directory.\n  --country=<XX>        Two-letter country hint.\n  --gender=<F|M>        Gender hint.\n  --locale=<LOCALE>     Locale used as country fallback.\n  --threshold=<FLOAT>   Override C4 with a C3.1 score threshold (C3.1 default: {default}).\n  --json                Print the unthresholded inference as JSON.\n  -h, --help            Show this message and exit.\n  -V, --version         Show the version and exit.",
         usage = usage_line(),
         default = bonjour::DEFAULT_GREETING_THRESHOLD,
     );
@@ -282,7 +282,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&emission).unwrap(),
-            r#"{"input":"Quentin Richert","selected_candidate":"Quentin","decision_score":0.9,"decision":{"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false}},"candidates":[{"candidate":"Quentin","ranking_score":0.8,"signals":{"corpus_score":0.8}}],"gender_hint":"male","gender_confidence":0.95}"#
+            r#"{"input":"Quentin Richert","selected_candidate":"Quentin","decision_score":0.9,"decision":{"emission_source":"c3_1","candidate_count":1,"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false},"sole_native":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":true,"candidate_quality_min":0.75,"candidate_quality_pass":true,"winner_margin_min":null,"winner_margin_pass":true,"reliability_min":0.4,"reliability_pass":true,"role_signal_min":0.8,"role_signal_pass":true,"vetoes_pass":true,"passed":false},"dominant_winner":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":false,"candidate_quality_min":0.4,"candidate_quality_pass":true,"winner_margin_min":0.5,"winner_margin_pass":true,"reliability_min":0.75,"reliability_pass":false,"role_signal_min":0.4,"role_signal_pass":true,"vetoes_pass":true,"passed":false}},"candidates":[{"candidate":"Quentin","ranking_score":0.8,"signals":{"corpus_score":0.8}}],"gender_hint":"male","gender_confidence":0.95}"#
         );
 
         let abstention = Output {
@@ -296,7 +296,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string_pretty(&abstention).unwrap(),
-            "{\n  \"input\": \"Baris Kebab\",\n  \"selected_candidate\": null,\n  \"decision_score\": 0.0,\n  \"decision\": {\n    \"candidate_quality\": null,\n    \"winner_margin\": null,\n    \"margin_signal\": null,\n    \"role_llr\": null,\n    \"role_signal\": null,\n    \"reliability\": null,\n    \"alphabetic_length\": null,\n    \"minimum_alphabetic_length\": 3,\n    \"contributions\": null,\n    \"pre_veto_score\": null,\n    \"post_veto_score\": 0.0,\n    \"segmented_candidate\": null,\n    \"segmentation_mechanism\": null,\n    \"segmented_candidate_penalty\": 0.0,\n    \"vetoes\": {\n      \"strong_organization_marker\": false,\n      \"generic_organization_marker\": false,\n      \"ampersand\": false,\n      \"candidate_too_short\": false\n    }\n  },\n  \"candidates\": [],\n  \"gender_hint\": null,\n  \"gender_confidence\": 0.0\n}"
+            "{\n  \"input\": \"Baris Kebab\",\n  \"selected_candidate\": null,\n  \"decision_score\": 0.0,\n  \"decision\": {\n    \"emission_source\": \"abstain\",\n    \"candidate_count\": 0,\n    \"candidate_quality\": null,\n    \"winner_margin\": null,\n    \"margin_signal\": null,\n    \"role_llr\": null,\n    \"role_signal\": null,\n    \"reliability\": null,\n    \"alphabetic_length\": null,\n    \"minimum_alphabetic_length\": 3,\n    \"contributions\": null,\n    \"pre_veto_score\": null,\n    \"post_veto_score\": 0.0,\n    \"segmented_candidate\": null,\n    \"segmentation_mechanism\": null,\n    \"segmented_candidate_penalty\": 0.0,\n    \"vetoes\": {\n      \"strong_organization_marker\": false,\n      \"generic_organization_marker\": false,\n      \"ampersand\": false,\n      \"candidate_too_short\": false\n    },\n    \"sole_native\": {\n      \"c3_1_abstained\": true,\n      \"native_candidate\": false,\n      \"candidate_count_pass\": false,\n      \"candidate_quality_min\": 0.75,\n      \"candidate_quality_pass\": false,\n      \"winner_margin_min\": null,\n      \"winner_margin_pass\": true,\n      \"reliability_min\": 0.4,\n      \"reliability_pass\": false,\n      \"role_signal_min\": 0.8,\n      \"role_signal_pass\": false,\n      \"vetoes_pass\": true,\n      \"passed\": false\n    },\n    \"dominant_winner\": {\n      \"c3_1_abstained\": true,\n      \"native_candidate\": false,\n      \"candidate_count_pass\": false,\n      \"candidate_quality_min\": 0.4,\n      \"candidate_quality_pass\": false,\n      \"winner_margin_min\": 0.5,\n      \"winner_margin_pass\": false,\n      \"reliability_min\": 0.75,\n      \"reliability_pass\": false,\n      \"role_signal_min\": 0.4,\n      \"role_signal_pass\": false,\n      \"vetoes_pass\": true,\n      \"passed\": false\n    }\n  },\n  \"candidates\": [],\n  \"gender_hint\": null,\n  \"gender_confidence\": 0.0\n}"
         );
 
         let absent_gender = Output {
@@ -316,12 +316,14 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&absent_gender).unwrap(),
-            r#"{"input":"Example Person","selected_candidate":"Example","decision_score":0.8,"decision":{"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false}},"candidates":[{"candidate":"Example","ranking_score":0.7,"signals":{"corpus_score":0.7}}],"gender_hint":null,"gender_confidence":0.6}"#
+            r#"{"input":"Example Person","selected_candidate":"Example","decision_score":0.8,"decision":{"emission_source":"c3_1","candidate_count":1,"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false},"sole_native":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":true,"candidate_quality_min":0.75,"candidate_quality_pass":true,"winner_margin_min":null,"winner_margin_pass":true,"reliability_min":0.4,"reliability_pass":true,"role_signal_min":0.8,"role_signal_pass":true,"vetoes_pass":true,"passed":false},"dominant_winner":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":false,"candidate_quality_min":0.4,"candidate_quality_pass":true,"winner_margin_min":0.5,"winner_margin_pass":true,"reliability_min":0.75,"reliability_pass":false,"role_signal_min":0.4,"role_signal_pass":true,"vetoes_pass":true,"passed":false}},"candidates":[{"candidate":"Example","ranking_score":0.7,"signals":{"corpus_score":0.7}}],"gender_hint":null,"gender_confidence":0.6}"#
         );
     }
 
     fn example_decision() -> DecisionTrace {
         DecisionTrace {
+            emission_source: bonjour::EmissionSource::C31,
+            candidate_count: 1,
             candidate_quality: Some(0.8),
             winner_margin: Some(1.0),
             margin_signal: Some(1.0),
@@ -347,11 +349,43 @@ mod tests {
                 ampersand: false,
                 candidate_too_short: false,
             },
+            sole_native: bonjour::RelationalRuleTrace {
+                c3_1_abstained: false,
+                native_candidate: true,
+                candidate_count_pass: true,
+                candidate_quality_min: 0.75,
+                candidate_quality_pass: true,
+                winner_margin_min: None,
+                winner_margin_pass: true,
+                reliability_min: 0.4,
+                reliability_pass: true,
+                role_signal_min: 0.8,
+                role_signal_pass: true,
+                vetoes_pass: true,
+                passed: false,
+            },
+            dominant_winner: bonjour::RelationalRuleTrace {
+                c3_1_abstained: false,
+                native_candidate: true,
+                candidate_count_pass: false,
+                candidate_quality_min: 0.4,
+                candidate_quality_pass: true,
+                winner_margin_min: Some(0.5),
+                winner_margin_pass: true,
+                reliability_min: 0.75,
+                reliability_pass: false,
+                role_signal_min: 0.4,
+                role_signal_pass: true,
+                vetoes_pass: true,
+                passed: false,
+            },
         }
     }
 
     fn empty_decision() -> DecisionTrace {
         DecisionTrace {
+            emission_source: bonjour::EmissionSource::Abstain,
+            candidate_count: 0,
             candidate_quality: None,
             winner_margin: None,
             margin_signal: None,
@@ -372,6 +406,38 @@ mod tests {
                 ampersand: false,
                 candidate_too_short: false,
             },
+            sole_native: empty_rule(None),
+            dominant_winner: empty_rule(Some(0.5)),
+        }
+    }
+
+    fn empty_rule(winner_margin_min: Option<f64>) -> bonjour::RelationalRuleTrace {
+        bonjour::RelationalRuleTrace {
+            c3_1_abstained: true,
+            native_candidate: false,
+            candidate_count_pass: false,
+            candidate_quality_min: if winner_margin_min.is_some() {
+                0.4
+            } else {
+                0.75
+            },
+            candidate_quality_pass: false,
+            winner_margin_min,
+            winner_margin_pass: winner_margin_min.is_none(),
+            reliability_min: if winner_margin_min.is_some() {
+                0.75
+            } else {
+                0.4
+            },
+            reliability_pass: false,
+            role_signal_min: if winner_margin_min.is_some() {
+                0.4
+            } else {
+                0.8
+            },
+            role_signal_pass: false,
+            vetoes_pass: true,
+            passed: false,
         }
     }
 

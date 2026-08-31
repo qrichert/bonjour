@@ -1,5 +1,7 @@
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::error::Error;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use bonjour::Classifier;
@@ -16,6 +18,45 @@ const INPUTS: [(&str, Option<&str>, Option<&str>); 8] = [
     ("Association Jean Moulin", Some("FR"), None),
     ("unknown display", None, Some("en-US")),
 ];
+
+struct CountingAllocator;
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+static ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
+static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        record_allocation(pointer, layout.size());
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        record_allocation(pointer, layout.size());
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
+        record_allocation(pointer, new_size);
+        pointer
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AllocationMetrics {
+    lookups: usize,
+    calls: u64,
+    bytes: u64,
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -77,14 +118,12 @@ fn benchmark_inference(label: &str, classifier: &Classifier, iterations: usize) 
             let inference = classifier.infer(input, country, locale);
             checksum = fold_bytes(checksum, input.as_bytes());
             checksum = fold_bytes(checksum, inference.greeting().unwrap_or("").as_bytes());
-            checksum = fold_bytes(
-                checksum,
-                &inference.decision_score.to_bits().to_le_bytes(),
-            );
+            checksum = fold_bytes(checksum, &inference.decision_score.to_bits().to_le_bytes());
         }
     }
     let elapsed = started.elapsed();
     let lookups = iterations * INPUTS.len();
+    let allocations = measure_allocations(classifier, iterations.min(10_000));
     println!("{label}_lookups={lookups}");
     println!(
         "{label}_nanoseconds_per_lookup={:.3}",
@@ -95,6 +134,41 @@ fn benchmark_inference(label: &str, classifier: &Classifier, iterations: usize) 
         lookups as f64 / elapsed.as_secs_f64()
     );
     println!("{label}_emission_checksum={checksum:016x}");
+    println!("{label}_allocation_sample_lookups={}", allocations.lookups);
+    println!("{label}_allocation_calls={}", allocations.calls);
+    println!(
+        "{label}_allocation_calls_per_lookup={:.3}",
+        allocations.calls as f64 / allocations.lookups as f64
+    );
+    println!("{label}_allocated_bytes={}", allocations.bytes);
+    println!(
+        "{label}_allocated_bytes_per_lookup={:.3}",
+        allocations.bytes as f64 / allocations.lookups as f64
+    );
+}
+
+fn measure_allocations(classifier: &Classifier, iterations: usize) -> AllocationMetrics {
+    ALLOCATION_CALLS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    COUNT_ALLOCATIONS.store(true, Ordering::Release);
+    for _ in 0..iterations {
+        for (input, country, locale) in INPUTS {
+            std::hint::black_box(classifier.infer(input, country, locale));
+        }
+    }
+    COUNT_ALLOCATIONS.store(false, Ordering::Release);
+    AllocationMetrics {
+        lookups: iterations * INPUTS.len(),
+        calls: ALLOCATION_CALLS.load(Ordering::Relaxed),
+        bytes: ALLOCATED_BYTES.load(Ordering::Relaxed),
+    }
+}
+
+fn record_allocation(pointer: *mut u8, size: usize) {
+    if !pointer.is_null() && COUNT_ALLOCATIONS.load(Ordering::Acquire) {
+        ALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(u64::try_from(size).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
 }
 
 fn fold_bytes(mut state: u64, bytes: &[u8]) -> u64 {

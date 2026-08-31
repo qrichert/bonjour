@@ -14,8 +14,8 @@ external names-dataset country CSVs
   -> name-indexes / name-corpus-audit      representation and tail experiments
   -> name-clean-v1                         selected sanitation and 5/2 policy
   -> name-surname-v2                       selected global surname role evidence
-  -> name-eval                             independent A/B/C/C1/C2/C3/C3.1 evaluation
-  -> root crate                            frozen C3.1 production implementation
+  -> name-eval                             independent A/B/C/C1/C2/C3/C3.1/C4 evaluation
+  -> root crate                            frozen C4 production implementation
   -> name-runtime                          load/startup/inference benchmark
 ```
 
@@ -107,7 +107,8 @@ overlap a retained first-name key.
 ## Role-scoring foundation: Algorithms C0 and C1
 
 Algorithms C0 and C1 remain evaluation baselines and form the ranking
-foundation inherited by production C3.1. Their input is conceptually:
+foundation inherited by production C4 through its frozen C3.1 base.
+Their input is conceptually:
 
 ```text
 infer(display_name, country_hint, locale_hint)
@@ -189,8 +190,8 @@ inputs are deliberately not combined: without direct phrase evidence,
 `Mary Jane` cannot safely be distinguished from given + surname.
 
 C1's historical synthetic operating threshold is frozen at `0.93`,
-selected on VALIDATION. Production C3.1 uses the later proxy-calibrated
-decision policy.
+selected on VALIDATION. Production C4 uses the later proxy-calibrated
+C3.1 decision policy as its base.
 
 ## Current evaluation result
 
@@ -400,14 +401,15 @@ additional wrong or expected-NULL emission. Sole-native contributed 11
 and dominant-winner contributed 33. C4 is therefore validated as the
 leading classifier candidate on this one-shot proxy experiment. The
 small error counts do not establish worldwide precision or safety
-equivalence, and no V5 row-level result was generated or inspected.
-Production remains on C3.1 pending a separate explicit promotion change.
-Detailed provenance and aggregate hashes are recorded in
+equivalence, and no V5 row-level result was generated or inspected. The
+subsequent explicit production promotion made frozen C4 the default
+application behavior without changing those rules. Detailed provenance
+and aggregate hashes are recorded in
 [`name-eval/README.md`](name-eval/README.md).
 
-## Current production model: C3.1
+## Current production model: C4
 
-Production inference now uses exactly the evaluator's frozen C3.1 code.
+Production inference now uses exactly the evaluator's frozen C4 code.
 The display name is NFC/punctuation/whitespace-canonicalized for lookup
 while its original UTF-8 text is retained for output. Candidate lookup
 tries canonical, title-case, lowercase, and accent-folded variants,
@@ -441,15 +443,35 @@ decision_score = 0.10 * margin_signal
 Generic organization evidence, an ampersand, or a candidate shorter than
 three alphabetic characters vetoes this score. Strong legal markers
 hard-abstain earlier. C3.1 subtracts `0.025` only when the winning
-candidate came from handle segmentation. The final threshold is
-`0.78975882405736963`; neither value is runtime-configurable in 0.1.0.
+candidate came from handle segmentation and emits at
+`0.78975882405736963`.
 
-If the final score crosses the threshold, the API returns the
-corresponding contiguous span of the original input—not the canonical
-lookup string. Gender is returned only alongside an emitted greeting and
-only when its majority share meets the frozen `0.80` threshold.
-Otherwise the classifier returns `None`, and the caller safely retains
-the complete display name.
+C4 keeps every C3.1 emission and adds two native-candidate paths:
+
+```text
+sole native:
+    candidate_count == 1
+    candidate_quality >= 0.75
+    reliability >= 0.40
+    role_signal >= 0.80
+
+dominant native winner:
+    candidate_count >= 2
+    winner_margin >= 0.50
+    candidate_quality >= 0.40
+    reliability >= 0.75
+    role_signal >= 0.40
+```
+
+Both paths retain every frozen C3.1 veto and emit the already-selected
+winner. `greeting()` uses C4; `greeting_at(...)` deliberately applies
+only an explicit C3.1 score threshold, so passing the C3.1 default can
+differ from `greeting()`. The returned greeting is the corresponding
+contiguous span of the original input—not the canonical lookup string.
+Gender is returned only alongside a default C4 emission and only when
+its majority share meets the frozen `0.80` threshold. Otherwise the
+classifier returns `None`, and the caller safely retains the complete
+display name.
 
 ## Current storage choice
 

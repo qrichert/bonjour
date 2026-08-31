@@ -65,6 +65,8 @@ $ bonjour --json "Quentin Richert"
   "selected_candidate": "Quentin",
   "decision_score": 0.8258187425766436,
   "decision": {
+    "emission_source": "c3_1",
+    "candidate_count": 2,
     "candidate_quality": 0.9341785978125992,
     "winner_margin": 0.7342375610072307,
     "margin_signal": 1.0,
@@ -89,6 +91,36 @@ $ bonjour --json "Quentin Richert"
       "generic_organization_marker": false,
       "ampersand": false,
       "candidate_too_short": false
+    },
+    "sole_native": {
+      "c3_1_abstained": false,
+      "native_candidate": true,
+      "candidate_count_pass": false,
+      "candidate_quality_min": 0.75,
+      "candidate_quality_pass": true,
+      "winner_margin_min": null,
+      "winner_margin_pass": true,
+      "reliability_min": 0.4,
+      "reliability_pass": true,
+      "role_signal_min": 0.8,
+      "role_signal_pass": true,
+      "vetoes_pass": true,
+      "passed": false
+    },
+    "dominant_winner": {
+      "c3_1_abstained": false,
+      "native_candidate": true,
+      "candidate_count_pass": true,
+      "candidate_quality_min": 0.4,
+      "candidate_quality_pass": true,
+      "winner_margin_min": 0.5,
+      "winner_margin_pass": true,
+      "reliability_min": 0.75,
+      "reliability_pass": false,
+      "role_signal_min": 0.4,
+      "role_signal_pass": true,
+      "vetoes_pass": true,
+      "passed": false
     }
   },
   "candidates": [
@@ -119,14 +151,18 @@ $ bonjour --json "Quentin Richert"
 }
 ```
 
-`decision_score` is the final score used by the greeting threshold. Each
-`ranking_score` orders competing candidates. They are different model
-quantities, and neither is a calibrated probability.
+`decision_score` is the frozen C3.1 score used by explicit
+score-threshold overrides. The default C4 decision is recorded by
+`emission_source`; it can also emit through the `sole_native` or
+`dominant_winner` relational path. Each `ranking_score` orders competing
+candidates. These are different model quantities, and none is a
+calibrated probability.
 
-The `decision` object shows how the winning candidate reaches that final
+The `decision` object shows how the winning candidate reaches the C3.1
 score: the winner margin, role evidence, and reliability feed the
 weighted `contributions`; vetoes can then reduce the score to zero, and
-segmented handle candidates can receive a provenance penalty. Candidate
+segmented handle candidates can receive a provenance penalty. It also
+shows every condition in C4's two additive relational paths. Candidate
 length has no numeric bonus: `alphabetic_length` is only checked against
 `minimum_alphabetic_length` as a safety veto.
 
@@ -171,6 +207,10 @@ detections and improve the associated gender hint.
 ## Usage
 
 Expected output may be something like this:
+
+For readability, the following examples omit the C4-only
+`emission_source`, `candidate_count`, `sole_native`, and
+`dominant_winner` fields shown in the complete diagnostic above.
 
 ```console
 $ bonjour --json "Quentin Richert"
@@ -385,8 +425,8 @@ $ bonjour --json "Les Motards d'Alsace"
 }
 ```
 
-The plain greeting applies the configured threshold and therefore keeps
-using the complete display name here.
+The plain greeting applies frozen C4 and therefore keeps using the
+complete display name here.
 
 ## Country and gender hints
 
@@ -622,8 +662,10 @@ not force a greeting.
 usage: bonjour [--data-dir=PATH] [--country=XX] [--gender=F|M] [--locale=LOCALE] [--threshold=FLOAT | --json] <display name>
 ```
 
-Plain greetings use a default threshold of `0.7897588240573696`. You can
-choose a different operating point for your use case:
+Plain greetings use frozen C4. `--threshold` deliberately overrides C4
+with the frozen C3.1 score-only policy; its default score threshold is
+`0.7897588240573696`. You can choose a different C3.1 operating point
+for your use case:
 
 ```console
 $ bonjour --threshold=0.83 "Quentin Richert"
@@ -631,8 +673,11 @@ Bonjour Quentin Richert !
 ```
 
 Lowering the threshold increases recall at the cost of potentially
-unsafe greetings. `--json` reports the pre-threshold candidate and
-decision score, so it is mutually exclusive with `--threshold`.
+unsafe greetings. Because C4 also has categorical relational emission
+paths, explicitly passing C3.1's default threshold can differ from the
+plain C4 result. `--json` reports the selected candidate, C3.1 decision
+score, C4 emission source, and rule traces, so it is mutually exclusive
+with `--threshold`.
 
 ## Installation
 
@@ -736,12 +781,14 @@ assert_eq!(simone.gender_hint, Some(bonjour::GenderHint::Male));
 ```
 
 With the `standalone` feature, use `Classifier::standalone()` instead.
-`inference.greeting_name` is the pre-threshold candidate; `greeting()`
-applies the default, while `greeting_at(...)` applies your setting.
-Every candidate is a non-empty contiguous span of the original input,
-preserving its spelling, casing, accents, punctuation, normalization
-form, and internal whitespace. `Classifier` is immutable, reusable, and
-`Send + Sync`.
+`inference.greeting_name` is the selected pre-threshold candidate;
+`greeting()` applies frozen C4, while `greeting_at(...)` is an explicit
+C3.1 score-only override. Therefore
+`greeting_at(DEFAULT_GREETING_THRESHOLD) != greeting()` can legitimately
+occur. Every candidate is a non-empty contiguous span of the original
+input, preserving its spelling, casing, accents, punctuation,
+normalization form, and internal whitespace. `Classifier` is immutable,
+reusable, and `Send + Sync`.
 
 ## Name data
 
@@ -759,15 +806,21 @@ records or ground truth. Benchmark methodology and frozen classifier
 history live in
 [`benchmarks/name-eval`](benchmarks/name-eval/README.md).
 
+Production uses frozen C4. On untouched REAL_PROXY_V5, C4 added 44
+correct proxy-label matches over C3.1 without adding an observed wrong
+or expected-NULL emission. This machine-consensus proxy result is not a
+claim of worldwide population precision; ambiguous annotator
+disagreements were excluded.
+
 ## TODO
 
 - Evaluate gender inference independently of greeting selection. When
   greeting selection abstains but every plausible name candidate agrees
   on sufficiently strong gender evidence, a future model could still
   emit a gender hint. It must use candidate consensus rather than
-  exposing the rejected greeting winner's gender. Current C3.1 behavior
+  exposing the rejected greeting winner's gender. Current C4 behavior
   intentionally returns `gender_hint: null` and `gender_confidence: 0.0`
-  whenever `greeting_name` is null.
+  whenever the default greeting decision abstains.
 
 ## License
 

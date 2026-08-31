@@ -535,7 +535,7 @@ pub const ALGORITHM_C31: C31EmissionConfig = C31EmissionConfig {
 
 /// Frozen from the completed relational diagnostic over spent
 /// `REAL_PROXY_V1`, `REAL_PROXY_V3`, `REAL_PROXY_V4`, and synthetic
-/// VALIDATION. This remains a development candidate pending untouched V5.
+/// VALIDATION, then independently validated on untouched `REAL_PROXY_V5`.
 pub const ALGORITHM_C4: C4EmissionConfig = C4EmissionConfig {
     sole_quality_min: 0.75,
     sole_reliability_min: 0.40,
@@ -2838,7 +2838,7 @@ mod tests {
         let mut winner = c4_winner(1);
         winner.reliability = ALGORITHM_C4.sole_reliability_min;
         let boundary = c31_breakdown_for_c4(winner);
-        let decision = c4_decision_from_c31(boundary.clone(), ALGORITHM_C2.threshold, ALGORITHM_C4);
+        let decision = c4_decision_from_c31(boundary, ALGORITHM_C2.threshold, ALGORITHM_C4);
         assert_eq!(decision.emission_source, C4EmissionSource::SoleNative);
         assert!(decision.sole_native.passed);
         assert!(!decision.dominant_winner.passed);

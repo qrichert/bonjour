@@ -62,3 +62,32 @@ Its standalone benchmark binary was 37,676,936 bytes. Sampling `/proc`
 during a separate identical run observed 75,272 KiB peak resident
 memory. These are single-machine engineering measurements, not portable
 performance guarantees.
+
+## C4 production promotion result
+
+Measured before and after the C4 production promotion on 2026-08-31 with
+Rust 1.93.0, target `x86_64-apple-darwin`, release profile, manifest
+SHA-256
+`6e5864efc224bf31aaa849c2acce780f7790fe76a42e56af2361ab1c7efcaf2a`, and
+50,000 iterations over the same eight inputs:
+
+| Measurement                  | Runtime C3.1 | Runtime C4 | Standalone C3.1 | Standalone C4 |
+| ---------------------------- | -----------: | ---------: | --------------: | ------------: |
+| Load time                    |      0.206 s |    0.158 s |         0.164 s |       0.152 s |
+| Lookups/second               |       37,657 |     36,654 |          40,082 |        38,411 |
+| Nanoseconds/lookup           |       26,555 |     27,282 |          24,949 |        26,034 |
+| Emission checksum            |   `8cc2e086` | `8cc2e086` |      `8cc2e086` |    `8cc2e086` |
+| Allocation calls/lookup (C4) |            — |        129 |               — |           129 |
+| Allocated bytes/lookup (C4)  |            — |  6,750.375 |               — |     6,750.375 |
+
+The full emission checksum was `8cc2e086fc208425` in all four runs. The
+single-run C4 throughput was 2.7% lower in runtime-loaded mode and 4.2%
+lower in standalone mode; this does not distinguish the small relational
+checks from ordinary measurement noise. The promoted inference path does
+allocate: a separate 80,000-lookup counting pass observed 129 allocation
+calls and 6,750.375 allocated bytes per lookup in both modes. Allocation
+counting was disabled during the timed pass.
+
+The artifact remained unchanged at 36,632,687 bytes. The standalone C4
+benchmark binary was 37,665,008 bytes. This task records the existing
+allocation behavior and does not optimize it.
