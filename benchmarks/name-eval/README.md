@@ -1295,6 +1295,105 @@ independent runs produced byte-identical output. The final generated
 C5 policy was implemented or frozen. Any selected future C5 still
 requires untouched REAL_PROXY_V6 one-shot validation.
 
+### Ordering and position evidence diagnosis
+
+The next benchmark-only experiment kept C2, C3, C3.1, C4, candidate
+generation, the corpus, and the artifact frozen. It reused only spent
+REAL_PROXY_V1-V5 and separate synthetic VALIDATION to test whether token
+position can shift the existing calibration frontier. It did not create
+or inspect V6 or TEST and did not change production behavior.
+
+The experiment adds these interpretable features to each existing
+candidate span:
+
+- initial/final token position and token-span proportion;
+- position before or after the strongest competing candidate;
+- a strict comma-inversion shape;
+- agreement or conflict with a tiny CLDR-derived name-order prior.
+
+The locale prior is derived from Unicode CLDR 48 person-name ordering
+and likely-subtag data. The experimental region tables total 408 bytes;
+unknown or malformed hints are neutral. All 7,808 proxy rows lack
+country and locale hints, so their frontier can evaluate only generic
+position and the single observed comma-inversion case. Locale-aware
+ordering remains a synthetic sanity check, not real-proxy evidence.
+
+Direct proxy correlation is strong but distribution-specific:
+
+| Winner population          |  Rows | Initial |  Final |
+| -------------------------- | ----: | ------: | -----: |
+| Correct selected winner    | 5,313 |  96.97% | 19.89% |
+| Wrong selected winner      |   727 |  29.85% | 68.36% |
+| Expected-NULL winner       |   452 |  81.19% | 79.20% |
+| Correct winner C4 rejected | 3,993 |  96.52% | 22.51% |
+
+Two bounded ranking families were searched. The flat control adds a
+small position adjustment; the confirmatory form multiplies that same
+adjustment by frozen candidate quality, so weak candidates receive less
+help. Total adjustment is clamped to `±0.06`. The full-development grid
+selected the flat `+0.03` generic first-position adjustment and no
+locale or comma adjustment. It raised the frozen ranking ceiling from
+82.02% to 82.88% without changing the 5,742-case candidate-generation
+ceiling. Leave-one-generation-out ranking selections remain recorded
+separately.
+
+Calibration then compared the existing C5 features with:
+
+- additive position/order features;
+- eight predeclared confirmatory interactions, including quality ×
+  position, quality × margin, quality × reliability, and margin ×
+  reliability;
+- the same interaction model after the bounded ranking adjustment.
+
+Every coefficient is nonnegative and L2-regularized. Position never
+creates a candidate or bypasses a veto. The generation-held-out proxy
+frontier is:
+
+| Training target | Best ordering variant | OOF precision | Recall | Δ recall vs old frontier | Correct winner rejected |
+| --------------: | --------------------- | ------------: | -----: | -----------------------: | ----------------------: |
+|           99.9% | additive ordering     |        99.86% | 10.85% |                 +9.35 pp |                   4,595 |
+|           99.5% | reranked interaction  |        99.34% | 37.03% |                +23.12 pp |                   2,955 |
+|           99.0% | interaction ordering  |        98.94% | 53.54% |                +20.52 pp |                   1,830 |
+|           98.0% | reranked interaction  |        97.96% | 65.27% |                +16.19 pp |                   1,126 |
+|           97.0% | reranked interaction  |        96.83% | 71.26% |                +18.22 pp |                     738 |
+|           95.0% | reranked interaction  |        94.85% | 77.09% |                +17.40 pp |                     360 |
+|           90.0% | reranked interaction  |        89.92% | 81.24% |                 +5.34 pp |                      91 |
+
+The target is selected on four generations, then reported on the omitted
+generation. None of the aggregated held-out rows reaches its nominal
+target exactly, so the targets must not be mistaken for achieved proxy
+precision. Per-generation results and Wilson intervals remain explicit
+in the generated CSVs.
+
+The proxy gain does not transfer safely to synthetic structure. At the
+99.5% selection target, the matching old frontier policy obtains 99.61%
+precision on VALIDATION, while the ordering-enabled policy obtains
+95.78%. Category metrics show severe errors on family-name-first and
+surname-given cases. Generic first-position evidence is therefore
+classified as **marginal** despite the large proxy gain: retain the
+experiment for a future culture-aware interaction study, but do not
+promote it or freeze C5.
+
+After selection, qualitative smoke tests showed that:
+<!-- Redacted: Names that first emit at the documented candidate points. -->
+
+- `Olivier REDACTED` and `Baris REDACTED` emit at the 99% candidate
+  point;
+- `Alexandre REDACTED` emits at 99.5%;
+- `Ngoc Lam REDACTED` first emits at 98%.
+
+These examples did not participate in fitting or threshold selection.
+
+Run the diagnostic with `--diagnose-ordering-evidence` and the same five
+acknowledged spent-holdout triplets used by the C5 frontier command. It
+writes aggregate feature correlations, the complete ranking grid,
+leave-one-generation-out policies, matched frontier and synthetic
+comparisons, model coefficients, hint/comma accounting, qualitative
+smoke tests, complexity accounting, and `report.md`. No C5 policy was
+implemented or frozen. Two independent release-mode runs produced
+byte-identical output. The final generated `report.md` has SHA-256
+`b0c895a7836c455071ab20d0a2a1ce28f8e93f67fe09a6bf1adc8e400c3c2425`.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.

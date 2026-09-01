@@ -15,6 +15,10 @@ use crate::classifier::{
 use crate::dataset::{Case, Split, generate_cases};
 use crate::metrics::greeting_matches;
 
+mod ordering;
+
+pub(crate) use ordering::run_ordering_diagnostic;
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub const V1_SHA256: &str = "de95213f27fc1849032ee6788c8f16d7d515c1a991ae8b2e8414b7b155814c4e";

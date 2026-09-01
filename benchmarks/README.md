@@ -427,6 +427,27 @@ frontier, Wilson intervals, false-abstention counts, per-generation
 stability, cost analysis, and deterministic report hash are recorded in
 [`name-eval/README.md`](name-eval/README.md).
 
+An isolated ordering/position experiment then tested the same spent
+V1-V5 rows without changing C4 or production. Initial position strongly
+correlates with correct proxy winners, and small regularized interaction
+models moved the held-out proxy frontier substantially: the best 99.5%
+training-target point reached 37.03% recall at 99.34% observed OOF
+precision, versus 13.91% recall for the previous frontier. A bounded
+generic ranking adjustment also raised the correct-winner ceiling from
+82.02% to 82.88%.
+
+That gain did not generalize safely to synthetic ordering structures. At
+the same 99.5% selection target, VALIDATION precision fell from 99.61%
+for the matching old policy to 95.78% with ordering, with clear
+family-name-first and surname-given regressions. The proxy population
+has no country/locale hints and therefore cannot validate the tiny
+CLDR-derived culture-aware prior. Ordering is retained only as a
+marginal benchmark experiment; generic first-position evidence is not
+promoted and no C5 policy is frozen. Detailed feature definitions,
+per-generation results, synthetic categories, and reproducibility
+instructions are recorded in
+[`name-eval/README.md`](name-eval/README.md).
+
 ## Current production model: C4
 
 Production inference now uses exactly the evaluator's frozen C4 code.
