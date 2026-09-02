@@ -25,7 +25,8 @@ struct Arguments {
 #[derive(Serialize)]
 struct Output<'a> {
     input: &'a str,
-    selected_candidate: Option<&'a str>,
+    best_candidate: Option<&'a str>,
+    greeting_name: Option<&'a str>,
     decision_score: f64,
     decision: DecisionTrace,
     candidates: Vec<CandidateScore<'a>>,
@@ -63,7 +64,8 @@ fn run(arguments: impl Iterator<Item = String>) -> Result<(), (u8, String)> {
         );
         let output = Output {
             input: &display_name,
-            selected_candidate: detailed.inference.greeting_name,
+            best_candidate: detailed.inference.greeting_name,
+            greeting_name: detailed.inference.greeting(),
             decision_score: detailed.inference.decision_score,
             decision: detailed.decision,
             candidates: detailed.candidates,
@@ -267,7 +269,8 @@ mod tests {
     fn json_contract_covers_emission_abstention_and_absent_gender() {
         let emission = Output {
             input: "Quentin Richert",
-            selected_candidate: Some("Quentin"),
+            best_candidate: Some("Quentin"),
+            greeting_name: Some("Quentin"),
             decision_score: 0.9,
             decision: example_decision(),
             candidates: vec![CandidateScore {
@@ -282,12 +285,37 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&emission).unwrap(),
-            r#"{"input":"Quentin Richert","selected_candidate":"Quentin","decision_score":0.9,"decision":{"emission_source":"c3_1","candidate_count":1,"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false},"sole_native":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":true,"candidate_quality_min":0.75,"candidate_quality_pass":true,"winner_margin_min":null,"winner_margin_pass":true,"reliability_min":0.4,"reliability_pass":true,"role_signal_min":0.8,"role_signal_pass":true,"vetoes_pass":true,"passed":false},"dominant_winner":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":false,"candidate_quality_min":0.4,"candidate_quality_pass":true,"winner_margin_min":0.5,"winner_margin_pass":true,"reliability_min":0.75,"reliability_pass":false,"role_signal_min":0.4,"role_signal_pass":true,"vetoes_pass":true,"passed":false}},"candidates":[{"candidate":"Quentin","ranking_score":0.8,"signals":{"corpus_score":0.8}}],"gender_hint":"male","gender_confidence":0.95}"#
+            r#"{"input":"Quentin Richert","best_candidate":"Quentin","greeting_name":"Quentin","decision_score":0.9,"decision":{"emission_source":"c3_1","candidate_count":1,"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false},"sole_native":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":true,"candidate_quality_min":0.75,"candidate_quality_pass":true,"winner_margin_min":null,"winner_margin_pass":true,"reliability_min":0.4,"reliability_pass":true,"role_signal_min":0.8,"role_signal_pass":true,"vetoes_pass":true,"passed":false},"dominant_winner":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":false,"candidate_quality_min":0.4,"candidate_quality_pass":true,"winner_margin_min":0.5,"winner_margin_pass":true,"reliability_min":0.75,"reliability_pass":false,"role_signal_min":0.4,"role_signal_pass":true,"vetoes_pass":true,"passed":false}},"candidates":[{"candidate":"Quentin","ranking_score":0.8,"signals":{"corpus_score":0.8}}],"gender_hint":"male","gender_confidence":0.95}"#
         );
+
+        let soft_abstention = Output {
+            input: "Candidate Example",
+            best_candidate: Some("Candidate"),
+            greeting_name: None,
+            decision_score: 0.5,
+            decision: DecisionTrace {
+                emission_source: bonjour::EmissionSource::Abstain,
+                ..example_decision()
+            },
+            candidates: vec![CandidateScore {
+                candidate: "Candidate",
+                ranking_score: Some(0.8),
+                signals: CandidateSignals {
+                    corpus_score: Some(0.8),
+                },
+            }],
+            gender_hint: None,
+            gender_confidence: 0.0,
+        };
+        let soft_abstention = serde_json::to_value(&soft_abstention).unwrap();
+        assert_eq!(soft_abstention["best_candidate"], "Candidate");
+        assert_eq!(soft_abstention["greeting_name"], serde_json::Value::Null);
+        assert!(soft_abstention.get("selected_candidate").is_none());
 
         let abstention = Output {
             input: "Baris Kebab",
-            selected_candidate: None,
+            best_candidate: None,
+            greeting_name: None,
             decision_score: 0.0,
             decision: empty_decision(),
             candidates: Vec::new(),
@@ -296,12 +324,13 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string_pretty(&abstention).unwrap(),
-            "{\n  \"input\": \"Baris Kebab\",\n  \"selected_candidate\": null,\n  \"decision_score\": 0.0,\n  \"decision\": {\n    \"emission_source\": \"abstain\",\n    \"candidate_count\": 0,\n    \"candidate_quality\": null,\n    \"winner_margin\": null,\n    \"margin_signal\": null,\n    \"role_llr\": null,\n    \"role_signal\": null,\n    \"reliability\": null,\n    \"alphabetic_length\": null,\n    \"minimum_alphabetic_length\": 3,\n    \"contributions\": null,\n    \"pre_veto_score\": null,\n    \"post_veto_score\": 0.0,\n    \"segmented_candidate\": null,\n    \"segmentation_mechanism\": null,\n    \"segmented_candidate_penalty\": 0.0,\n    \"vetoes\": {\n      \"strong_organization_marker\": false,\n      \"generic_organization_marker\": false,\n      \"ampersand\": false,\n      \"candidate_too_short\": false\n    },\n    \"sole_native\": {\n      \"c3_1_abstained\": true,\n      \"native_candidate\": false,\n      \"candidate_count_pass\": false,\n      \"candidate_quality_min\": 0.75,\n      \"candidate_quality_pass\": false,\n      \"winner_margin_min\": null,\n      \"winner_margin_pass\": true,\n      \"reliability_min\": 0.4,\n      \"reliability_pass\": false,\n      \"role_signal_min\": 0.8,\n      \"role_signal_pass\": false,\n      \"vetoes_pass\": true,\n      \"passed\": false\n    },\n    \"dominant_winner\": {\n      \"c3_1_abstained\": true,\n      \"native_candidate\": false,\n      \"candidate_count_pass\": false,\n      \"candidate_quality_min\": 0.4,\n      \"candidate_quality_pass\": false,\n      \"winner_margin_min\": 0.5,\n      \"winner_margin_pass\": false,\n      \"reliability_min\": 0.75,\n      \"reliability_pass\": false,\n      \"role_signal_min\": 0.4,\n      \"role_signal_pass\": false,\n      \"vetoes_pass\": true,\n      \"passed\": false\n    }\n  },\n  \"candidates\": [],\n  \"gender_hint\": null,\n  \"gender_confidence\": 0.0\n}"
+            "{\n  \"input\": \"Baris Kebab\",\n  \"best_candidate\": null,\n  \"greeting_name\": null,\n  \"decision_score\": 0.0,\n  \"decision\": {\n    \"emission_source\": \"abstain\",\n    \"candidate_count\": 0,\n    \"candidate_quality\": null,\n    \"winner_margin\": null,\n    \"margin_signal\": null,\n    \"role_llr\": null,\n    \"role_signal\": null,\n    \"reliability\": null,\n    \"alphabetic_length\": null,\n    \"minimum_alphabetic_length\": 3,\n    \"contributions\": null,\n    \"pre_veto_score\": null,\n    \"post_veto_score\": 0.0,\n    \"segmented_candidate\": null,\n    \"segmentation_mechanism\": null,\n    \"segmented_candidate_penalty\": 0.0,\n    \"vetoes\": {\n      \"strong_organization_marker\": false,\n      \"generic_organization_marker\": false,\n      \"ampersand\": false,\n      \"candidate_too_short\": false\n    },\n    \"sole_native\": {\n      \"c3_1_abstained\": true,\n      \"native_candidate\": false,\n      \"candidate_count_pass\": false,\n      \"candidate_quality_min\": 0.75,\n      \"candidate_quality_pass\": false,\n      \"winner_margin_min\": null,\n      \"winner_margin_pass\": true,\n      \"reliability_min\": 0.4,\n      \"reliability_pass\": false,\n      \"role_signal_min\": 0.8,\n      \"role_signal_pass\": false,\n      \"vetoes_pass\": true,\n      \"passed\": false\n    },\n    \"dominant_winner\": {\n      \"c3_1_abstained\": true,\n      \"native_candidate\": false,\n      \"candidate_count_pass\": false,\n      \"candidate_quality_min\": 0.4,\n      \"candidate_quality_pass\": false,\n      \"winner_margin_min\": 0.5,\n      \"winner_margin_pass\": false,\n      \"reliability_min\": 0.75,\n      \"reliability_pass\": false,\n      \"role_signal_min\": 0.4,\n      \"role_signal_pass\": false,\n      \"vetoes_pass\": true,\n      \"passed\": false\n    }\n  },\n  \"candidates\": [],\n  \"gender_hint\": null,\n  \"gender_confidence\": 0.0\n}"
         );
 
         let absent_gender = Output {
             input: "Example Person",
-            selected_candidate: Some("Example"),
+            best_candidate: Some("Example"),
+            greeting_name: Some("Example"),
             decision_score: 0.8,
             decision: example_decision(),
             candidates: vec![CandidateScore {
@@ -316,7 +345,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&absent_gender).unwrap(),
-            r#"{"input":"Example Person","selected_candidate":"Example","decision_score":0.8,"decision":{"emission_source":"c3_1","candidate_count":1,"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false},"sole_native":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":true,"candidate_quality_min":0.75,"candidate_quality_pass":true,"winner_margin_min":null,"winner_margin_pass":true,"reliability_min":0.4,"reliability_pass":true,"role_signal_min":0.8,"role_signal_pass":true,"vetoes_pass":true,"passed":false},"dominant_winner":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":false,"candidate_quality_min":0.4,"candidate_quality_pass":true,"winner_margin_min":0.5,"winner_margin_pass":true,"reliability_min":0.75,"reliability_pass":false,"role_signal_min":0.4,"role_signal_pass":true,"vetoes_pass":true,"passed":false}},"candidates":[{"candidate":"Example","ranking_score":0.7,"signals":{"corpus_score":0.7}}],"gender_hint":null,"gender_confidence":0.6}"#
+            r#"{"input":"Example Person","best_candidate":"Example","greeting_name":"Example","decision_score":0.8,"decision":{"emission_source":"c3_1","candidate_count":1,"candidate_quality":0.8,"winner_margin":1.0,"margin_signal":1.0,"role_llr":2.0,"role_signal":0.8,"reliability":0.7,"alphabetic_length":7,"minimum_alphabetic_length":3,"contributions":{"candidate_quality":0.0,"winner_margin":0.1,"role":0.56,"reliability":0.14},"pre_veto_score":0.8,"post_veto_score":0.8,"segmented_candidate":false,"segmentation_mechanism":null,"segmented_candidate_penalty":0.0,"vetoes":{"strong_organization_marker":false,"generic_organization_marker":false,"ampersand":false,"candidate_too_short":false},"sole_native":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":true,"candidate_quality_min":0.75,"candidate_quality_pass":true,"winner_margin_min":null,"winner_margin_pass":true,"reliability_min":0.4,"reliability_pass":true,"role_signal_min":0.8,"role_signal_pass":true,"vetoes_pass":true,"passed":false},"dominant_winner":{"c3_1_abstained":false,"native_candidate":true,"candidate_count_pass":false,"candidate_quality_min":0.4,"candidate_quality_pass":true,"winner_margin_min":0.5,"winner_margin_pass":true,"reliability_min":0.75,"reliability_pass":false,"role_signal_min":0.4,"role_signal_pass":true,"vetoes_pass":true,"passed":false}},"candidates":[{"candidate":"Example","ranking_score":0.7,"signals":{"corpus_score":0.7}}],"gender_hint":null,"gender_confidence":0.6}"#
         );
     }
 

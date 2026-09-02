@@ -62,7 +62,8 @@ point of this project.
 $ bonjour --json "Quentin Richert"
 {
   "input": "Quentin Richert",
-  "selected_candidate": "Quentin",
+  "best_candidate": "Quentin",
+  "greeting_name": "Quentin",
   "decision_score": 0.8258187425766436,
   "decision": {
     "emission_source": "c3_1",
@@ -151,12 +152,14 @@ $ bonjour --json "Quentin Richert"
 }
 ```
 
-`decision_score` is the frozen C3.1 score used by explicit
-score-threshold overrides. The default C4 decision is recorded by
-`emission_source`; it can also emit through the `sole_native` or
-`dominant_winner` relational path. Each `ranking_score` orders competing
-candidates. These are different model quantities, and none is a
-calibrated probability.
+`best_candidate` is the highest-ranked candidate before C4 decides
+whether it is safe to greet. `greeting_name` is the candidate emitted by
+C4, or `null` when C4 abstains. `decision_score` is the frozen C3.1
+score used by explicit score-threshold overrides. The default C4
+decision is recorded by `emission_source`; it can also emit through the
+`sole_native` or `dominant_winner` relational path. Each `ranking_score`
+orders competing candidates. These are different model quantities, and
+none is a calibrated probability.
 
 The `decision` object shows how the winning candidate reaches the C3.1
 score: the winner margin, role evidence, and reliability feed the
@@ -216,7 +219,8 @@ For readability, the following examples omit the C4-only
 $ bonjour --json "Quentin Richert"
 {
   "input": "Quentin Richert",
-  "selected_candidate": "Quentin",
+  "best_candidate": "Quentin",
+  "greeting_name": "Quentin",
   "decision_score": 0.8258187425766436,
   "decision": {
     "candidate_quality": 0.9341785978125992,
@@ -281,7 +285,8 @@ scores in company names, for instance:
 $ bonjour --json "Quentin Richert SAS"
 {
   "input": "Quentin Richert SAS",
-  "selected_candidate": null,
+  "best_candidate": null,
+  "greeting_name": null,
   "decision_score": 0.0,
   "decision": {
     "candidate_quality": null,
@@ -354,7 +359,8 @@ candidate in JSON:
 $ bonjour --json "Les Motards d'Alsace"
 {
   "input": "Les Motards d'Alsace",
-  "selected_candidate": "Les",
+  "best_candidate": "Les",
+  "greeting_name": null,
   "decision_score": 0.5695974113878561,
   "decision": {
     "candidate_quality": 0.7024874196505136,
@@ -439,7 +445,8 @@ country.
 $ bonjour --json --country=IT "Simone Veil"
 {
   "input": "Simone Veil",
-  "selected_candidate": "Simone",
+  "best_candidate": "Simone",
+  "greeting_name": "Simone",
   "decision_score": 0.8100985093918445,
   "decision": {
     "candidate_quality": 0.9827567736643067,
@@ -498,7 +505,8 @@ $ bonjour --json --country=IT "Simone Veil"
 $ bonjour --json --country=FR "Simone Veil"
 {
   "input": "Simone Veil",
-  "selected_candidate": "Simone",
+  "best_candidate": "Simone",
+  "greeting_name": "Simone",
   "decision_score": 0.8100985093918445,
   "decision": {
     "candidate_quality": 0.9608364679342599,
@@ -562,7 +570,8 @@ is left `null` rather than guessed:
 $ bonjour --json Simone
 {
   "input": "Simone",
-  "selected_candidate": "Simone",
+  "best_candidate": "Simone",
+  "greeting_name": "Simone",
   "decision_score": 0.8100985093918445,
   "decision": {
     "candidate_quality": 0.8365742000974182,
@@ -611,7 +620,8 @@ The gender hint accepts `F` or `M`:
 $ bonjour --json --gender=M Simone
 {
   "input": "Simone",
-  "selected_candidate": "Simone",
+  "best_candidate": "Simone",
+  "greeting_name": "Simone",
   "decision_score": 0.8100985093918445,
   "decision": {
     "candidate_quality": 0.8365742000974182,
