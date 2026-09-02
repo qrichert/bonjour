@@ -470,6 +470,32 @@ set. It remains benchmark-only; C4 production behavior is unchanged and
 V6 remains untouched. Detailed results and the reproducibility digest
 are recorded in [`name-eval/README.md`](name-eval/README.md).
 
+## Morphological evidence experiment
+
+A final isolated structural experiment trained a deterministic hashed
+Unicode-scalar character n-gram model from exact aggregate given and
+overlapping-surname counts. Conservative role labels excluded ambiguous
+keys, and accent/case groups remained in disjoint TRAIN, VALIDATION, and
+TEST partitions. The selected 128K-bucket 2-5-gram model achieved 0.9347
+ROC AUC on its corpus-derived TEST set and serialized to about 528 KiB.
+
+That standalone signal did not improve greeting inference. Bounded
+morphology reranking lost two correct proxy winners. Morphology-aware
+leave-one-generation-out calibration matched the established frontier
+only at 99.5%; it reduced recall by 13.54 points at the 99% target and
+14.90 points at 98%. Int16 quantization was effectively exact, so model
+representation was not the limiting factor.
+
+Morphology is therefore classified as **harmful / no value** for the
+future C5 feature set in this tested form. The aggregate role-spelling
+signal is real but redundant with direct corpus role evidence and
+unstable for emission calibration. The model remains benchmark-only; C4
+production behavior is unchanged, C5 is not frozen, and V6 remains
+untouched. Full label construction, international breakdowns,
+quantization, proxy distributions, per-generation results, redacted
+qualitative observations, and reproducibility hashes are recorded in
+[`name-eval/README.md`](name-eval/README.md).
+
 ## Current production model: C4
 
 Production inference now uses exactly the evaluator's frozen C4 code.

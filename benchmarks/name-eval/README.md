@@ -1496,6 +1496,138 @@ Two independent release-mode runs produced byte-identical output. The
 final generated `report.md` has SHA-256
 `63e4e4aae3b5031ce100df65ab916e72ade15b9c49a3951f7156ca9ad807ad09`.
 
+## Morphological role-evidence diagnostic
+
+The morphology experiment remained separate from generic position and
+capitalization. It did not change candidate generation, frozen ranking,
+C4, the artifact, or production. It used exact aggregate counts from
+`name-totals.csv`, pinned at SHA-256
+`e43e8661261b2762d3d4f2581ebb803af94abb7505409873f46041be1470ff62`.
+
+Training labels were deliberately conservative. A lexically eligible,
+single-token retained key was given-like only when its exact given count
+was at least 100 and its normalized role LLR was at least +2.0. It was
+surname-like only when its exact overlapping-surname count was at least
+100 and role LLR was at most -2.0. Ambiguous keys were excluded. Case-
+folded, accent-folded groups stayed in one deterministic split; 41
+conflicting groups were discarded rather than assigned a label.
+
+| Split      | Given-like | Surname-like |   Total |
+| ---------- | ---------: | -----------: | ------: |
+| TRAIN      |     33,578 |       79,989 | 113,567 |
+| VALIDATION |      4,274 |       10,062 |  14,336 |
+| TEST       |      4,101 |        9,971 |  14,072 |
+
+The deterministic grid covered Unicode-scalar character 2-3, 2-4, and
+2-5-grams with boundary markers and 16K, 32K, 64K, or 128K signed-hash
+buckets. A second locked grid varied FTRL alpha and L2 only after the
+representation was selected on corpus-derived VALIDATION. The selected
+model used 2-5-grams, 128K buckets, alpha 0.10, L2 0.1, and five epochs.
+
+| Corpus-derived split | Accuracy | Balanced accuracy | ROC AUC |
+| -------------------- | -------: | ----------------: | ------: |
+| TRAIN                |   93.73% |            94.01% |  0.9855 |
+| VALIDATION           |   86.28% |            85.19% |  0.9333 |
+| TEST                 |   86.28% |            85.33% |  0.9347 |
+
+The standalone TEST ROC AUC was 0.9266 for Latin, 0.9875 for Cyrillic,
+and 0.9411 for Arabic. Greek had only 11 one-class TEST rows, while
+other scripts had small or heterogeneous samples; those figures are
+insufficient for broader international claims. Missing or unsupported
+script evidence degrades to neutral. The attempted morphology-
+reliability feature nevertheless saturated at 1.0 for nearly every proxy
+winner and therefore provided no useful proxy discrimination.
+
+The selected TRAIN vocabulary contained 365,922 unique 64-bit n-gram
+hashes across 123,002 occupied buckets. This is a 66.39% feature-bucket
+collision rate, with no observed primary 64-bit hash collision under an
+independent secondary hash. The complete serialized f32 diagnostic model
+is 540,829 bytes.
+
+| Weights | Runtime payload | TEST ROC AUC | Signal p99 error |
+| ------- | --------------: | -----------: | ---------------: |
+| f32     |       540,676 B |       0.9347 |         0.000000 |
+| int16   |       278,536 B |       0.9347 |         0.000080 |
+| int8    |       147,464 B |       0.9348 |         0.020151 |
+
+Quantization was not the limiting factor. Morphology itself separated
+the aggregate proxy populations, but not well enough to improve the
+existing classifier. Median morphology signals were +0.5603 for correct
+selected winners, +0.1342 for wrong winners, -0.3322 for expected-NULL
+winners, and +0.4710 for correct veto-free winners rejected by C4.
+
+A bounded morphology ranking adjustment was selected independently in
+each leave-one-generation-out fold. V2 and V5 selected zero weight; V1,
+V3, and V4 selected 0.02. Across all held-out rows it reduced correct
+winners from 5,313 to 5,311 and increased wrong winners from 727 to 729,
+without changing the 5,742-case candidate-generation ceiling.
+
+The generation-held-out calibration frontier compared the established
+frontier with a morphology main effect and four predeclared interactions
+with quality, role, reliability, and margin:
+
+| Target | Existing precision | Existing recall | Morph precision | Morph recall |     Delta |
+| -----: | -----------------: | --------------: | --------------: | -----------: | --------: |
+|  99.5% |             99.67% |          13.91% |          99.67% |       13.91% |  +0.00 pp |
+|  99.0% |             98.84% |          33.02% |          98.75% |       19.48% | -13.54 pp |
+|  98.0% |             97.91% |          49.07% |          97.75% |       34.18% | -14.90 pp |
+|  97.0% |             96.93% |          53.04% |          96.85% |       41.34% | -11.70 pp |
+|  95.0% |             95.67% |          59.69% |          94.91% |       54.68% |  -5.02 pp |
+|  90.0% |             89.97% |          75.90% |          89.85% |       75.81% |  -0.09 pp |
+
+Interactions helped only relative to the weaker morphology main-effect
+model: at the 99% target they raised recall from 17.24% to 19.48%, and
+at 98% from 26.29% to 34.18%. Both remained far behind the established
+frontier. The saturated reliability feature added no practical
+uncertainty information. Exact generation-held-out coefficients and
+model-form comparisons are preserved in the generated aggregate CSVs.
+
+At 99%, the morphology interaction model ranged from 97.36% held-out
+precision on V3 to 100% on V5, with recall from 15.26% to 23.94% across
+generations. At 98%, held-out precision ranged from 96.15% to 99.49%.
+The result is neither an outward frontier shift nor stable evidence of a
+strict operating point. On separate synthetic VALIDATION, the full-
+development morphology interaction selected at the 99% proxy target made
+465 wrong emissions and reached only 95.92% precision.
+
+The four motivating real-name examples were exercised locally only after
+model and policy selection. Their repository-visible identities are
+`REDACTED`:
+
+- `REDACTED` case 1 selected the intended first span, but morphology
+  scored it -0.5257; it emitted only at the existing 95%/90% points;
+- `REDACTED` case 2 selected the intended first span, but morphology
+  scored it -0.6862; it emitted only at the existing 90% point;
+- `REDACTED` case 3 selected the intended first span; all three
+  candidate signals were negative and it emitted only at 90%;
+- `REDACTED` case 4 selected the intended first span with +0.9450
+  morphology versus +0.5467 for its competitor; it emitted at the
+  morphology 97% point and the existing 95%/90% points.
+
+These examples did not train or select anything, and the temporary raw
+inputs and test harness were removed after the local run.
+
+Morphology is therefore classified as **harmful / no value** for the
+future C5 feature set in this tested form. A role-spelling signal
+exists, but it is substantially redundant with the artifact's direct
+role evidence and degrades both held-out ranking and calibration. No
+model is promoted, C4 stays production behavior, C5 is not frozen, and
+V6 remains untouched.
+
+Run the diagnostic with `--diagnose-morphology-evidence`, the pinned
+`--morphology-name-totals=FILE`, and the same five acknowledged spent-
+holdout triplets used by the C5 frontier command. It writes aggregate
+label, grid, standalone, script, collision, quantization, proxy,
+ranking, calibration, and synthetic reports plus the benchmark-only
+model. Machine-dependent timing is isolated from deterministic output;
+the observed release-mode cost was approximately 4.49 microseconds per
+pre-normalized token on this machine. Two independent from-scratch runs
+produced byte-identical deterministic output. The generated model has
+SHA-256
+`fed8c2e19a778931c7a090900991cbf29c76b0751bf36df3dcfbc60c75e01541`, and
+the final generated `report.md` has SHA-256
+`43d4f33a0b6ee43be914b83df9542b1cf853652e328b611bedf377630d403594`.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.

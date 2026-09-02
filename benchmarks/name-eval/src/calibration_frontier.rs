@@ -16,9 +16,11 @@ use crate::dataset::{Case, Split, generate_cases};
 use crate::metrics::greeting_matches;
 
 mod capitalization;
+mod morphology;
 mod ordering;
 
 pub(crate) use capitalization::run_capitalization_diagnostic;
+pub(crate) use morphology::run_morphology_diagnostic;
 pub(crate) use ordering::run_ordering_diagnostic;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
