@@ -1394,6 +1394,108 @@ implemented or frozen. Two independent release-mode runs produced
 byte-identical output. The final generated `report.md` has SHA-256
 `b0c895a7836c455071ab20d0a2a1ce28f8e93f67fe09a6bf1adc8e400c3c2425`.
 
+## Capitalization evidence diagnostic
+
+Capitalization was evaluated independently of the marginal ordering
+experiment. C4, candidate generation and ranking, the artifact, and all
+hard vetoes remained frozen. The diagnostic used the same 7,808 spent
+V1-V5 proxy rows: 6,478 expected greetings and 1,330 expected NULLs.
+Synthetic VALIDATION remained a separate regression population.
+
+Each candidate and its strongest contextual competitor are classified
+with Unicode properties as `all_upper`, `all_lower`, `title_like`,
+`mixed_internal`, `uncased`, or `other`. Combining marks and accepted
+name separators are neutral. Uncased scripts and spans mixing cased and
+uncased scripts receive no casing support rather than a penalty.
+
+| Availability                             | Count |   Rate |
+| ---------------------------------------- | ----: | -----: |
+| Any usable cased display token           | 7,742 | 99.15% |
+| Usable selected candidate                | 6,482 | 83.02% |
+| Usable selected candidate and competitor | 5,572 | 71.36% |
+| Nonzero candidate/competitor contrast    |   493 |  6.31% |
+| Alphabetic input entirely uncased        |    53 |  0.68% |
+
+Contrast is uncommon and does not separate outcomes cleanly. A
+title-like winner against an uppercase competitor occurs in 3.65% of
+correct winners, 2.75% of wrong winners, 3.32% of expected-NULL winners,
+and 3.98% of correct veto-free winners rejected by C4. Any nonzero
+contrast occurs in 7.40%, 7.98%, 9.07%, and 8.26% respectively.
+
+The ranking grid tested only bounded, evidence-modulated adjustments up
+to `±0.04`; it never applied a flat case-class bonus. Leave-one-
+generation-out selection retained a quality-gated ranker, while the
+full-development grid selected `gate=quality;weight=0.04`. It changed
+the frozen ranking result by only one case:
+
+| Ranking        | Correct winner | Wrong winner | NULL winner | Ceiling |
+| -------------- | -------------: | -----------: | ----------: | ------: |
+| Frozen         |          5,313 |          727 |         453 |  82.02% |
+| Capitalization |          5,314 |          726 |         453 |  82.03% |
+
+Calibration compared additive casing features, four explicit
+interactions with existing evidence, and the interaction model after the
+bounded reranking. Every fitted coefficient is nonnegative and
+L2-regularized. The generation-held-out frontier, compared with the best
+previously established policy at each target, is:
+
+| Target | Old precision | Old recall | Casing precision | Casing recall |     Delta |
+| -----: | ------------: | ---------: | ---------------: | ------------: | --------: |
+|  99.5% |        99.67% |     13.91% |           99.33% |        16.01% |  +2.10 pp |
+|  99.0% |        98.84% |     33.02% |           99.07% |        19.79% | -13.23 pp |
+|  98.0% |        97.91% |     49.07% |           97.68% |        31.80% | -17.27 pp |
+|  97.0% |        96.93% |     53.04% |           96.88% |        39.77% | -13.28 pp |
+|  95.0% |        95.67% |     59.69% |           94.84% |        57.58% |  -2.11 pp |
+|  90.0% |        89.97% |     75.90% |           89.93% |        76.83% |  +0.93 pp |
+
+The 99.5% casing point does not achieve its nominal target. At 99%, 98%,
+97%, and 95%, casing does not improve the established frontier.
+Interaction terms do improve a like-for-like logistic model, but that
+comparison is insufficient because the established frontier also
+contains controlled C4 relaxations.
+
+Per-generation leave-one-generation-out results remain explicit in
+`capitalization_logo_results.csv`. They are unstable at the strict end:
+for example, the interaction model selected at the 99.5% training target
+ranges from 98.61% observed precision on V1 to 100% on V5. These proxy
+results are not worldwide population estimates.
+
+The capitalization-only structural suite derives 119,132 evaluable rows
+from synthetic VALIDATION without fitting on them. It exposes the
+decisive regressions:
+
+| Target | Policy | Transformation                   | Correct | Wrong | Recall |
+| -----: | ------ | -------------------------------- | ------: | ----: | -----: |
+|  99.5% | old    | all uppercase                    |  12,676 |    47 | 42.56% |
+|  99.5% | casing | all uppercase                    |       0 |     0 |  0.00% |
+|  99.5% | casing | expected title / remainder upper |  18,823 |    12 | 63.20% |
+|  99.5% | casing | expected upper / remainder title |       0 |   314 |  0.00% |
+|  99.0% | old    | all lowercase                    |  18,585 |   173 | 62.40% |
+|  99.0% | casing | all lowercase                    |       0 |     0 |  0.00% |
+|  99.0% | casing | expected title / remainder upper |  20,575 |    30 | 69.08% |
+|  99.0% | casing | expected upper / remainder title |       0 |   495 |  0.00% |
+
+Capitalization is therefore classified as **harmful / no value** for the
+future C5 feature set at this stage. It adds no runtime data, and all
+extraction and model allocations remain benchmark-only. C4 stays
+unchanged; no C5 policy is implemented or frozen, and V6 remains
+untouched.
+
+The original qualitative examples were exercised locally after model
+selection, then their identifying remainders were replaced with literal
+`REDACTED` before the commit boundary. The local run confirmed that an
+uppercase remainder can raise contrastive support, but those examples
+did not affect fitting, selection, or the negative recommendation.
+
+Run the diagnostic with `--diagnose-capitalization-evidence` and the
+same five acknowledged spent-holdout triplets used by the C5 frontier
+command. It writes the feature table, direct correlations, complete
+ranking grid, model coefficients, generation-held-out results,
+structural regressions, redacted qualitative output, and `report.md`.
+Two independent release-mode runs produced byte-identical output. The
+final generated `report.md` has SHA-256
+`63e4e4aae3b5031ce100df65ab916e72ade15b9c49a3951f7156ca9ad807ad09`.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.

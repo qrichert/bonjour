@@ -448,6 +448,28 @@ per-generation results, synthetic categories, and reproducibility
 instructions are recorded in
 [`name-eval/README.md`](name-eval/README.md).
 
+## Capitalization evidence experiment
+
+The next isolated experiment tested Unicode-aware casing as contrastive
+context, including regularized interactions with candidate quality, role
+evidence, winner margin, and reliability. It used the same 7,808 spent
+V1-V5 proxy rows and kept generic ordering out of the model.
+
+Casing was broadly present but rarely contrastive: only 493 rows (6.31%)
+had nonzero candidate/competitor casing contrast. A bounded casing
+ranker moved the frozen ranking ceiling from 82.02% to only 82.03%.
+Calibration did not improve the established frontier at the 99%, 98%,
+97%, or 95% targets.
+
+More importantly, the synthetic structural suite found severe
+distribution-sensitive behavior. Uniform uppercase and lowercase
+variants could collapse to zero recall, while reversing which span was
+uppercase produced hundreds of wrong emissions. Capitalization is
+therefore classified as **harmful / no value** for the future C5 feature
+set. It remains benchmark-only; C4 production behavior is unchanged and
+V6 remains untouched. Detailed results and the reproducibility digest
+are recorded in [`name-eval/README.md`](name-eval/README.md).
+
 ## Current production model: C4
 
 Production inference now uses exactly the evaluator's frozen C4 code.

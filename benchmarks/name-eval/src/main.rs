@@ -33,7 +33,9 @@ use artifact::C32Artifact;
 use c2_calibration::run_c2_calibration;
 use c3_development::run_c3_development;
 use c31_development::run_c31_development;
-use calibration_frontier::{run_calibration_frontier, run_ordering_diagnostic};
+use calibration_frontier::{
+    run_calibration_frontier, run_capitalization_diagnostic, run_ordering_diagnostic,
+};
 use classifier::{
     ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4,
     ALGORITHM_C31, AlgorithmConfig, C4EmissionSource, RawInference, c2_inference_from_diagnostic,
@@ -204,6 +206,7 @@ struct Arguments {
     freeze_c4_relational_emission: bool,
     diagnose_c5_calibration_frontier: bool,
     diagnose_ordering_evidence: bool,
+    diagnose_capitalization_evidence: bool,
     spent_holdouts: Vec<PathBuf>,
     spent_manifests: Vec<PathBuf>,
     spent_sha256s: Vec<String>,
@@ -233,6 +236,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut freeze_c4_relational_emission = false;
     let mut diagnose_c5_calibration_frontier = false;
     let mut diagnose_ordering_evidence = false;
+    let mut diagnose_capitalization_evidence = false;
     let mut spent_holdouts = Vec::new();
     let mut spent_manifests = Vec::new();
     let mut spent_sha256s = Vec::new();
@@ -320,6 +324,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             diagnose_c5_calibration_frontier = true;
         } else if text == "--diagnose-ordering-evidence" {
             diagnose_ordering_evidence = true;
+        } else if text == "--diagnose-capitalization-evidence" {
+            diagnose_capitalization_evidence = true;
         } else if let Some(value) = text.strip_prefix("--spent-holdout=") {
             spent_holdouts.push(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("--spent-manifest=") {
@@ -352,13 +358,16 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         + usize::from(diagnose_relational_emission)
         + usize::from(freeze_c4_relational_emission)
         + usize::from(diagnose_c5_calibration_frontier)
-        + usize::from(diagnose_ordering_evidence);
+        + usize::from(diagnose_ordering_evidence)
+        + usize::from(diagnose_capitalization_evidence);
     if explicit_modes > 1 {
-        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, C5-calibration-frontier, ordering-diagnostic, sealed C1/C2 comparison, sealed C2/C3 comparison, sealed C2/C3/C3.1 comparison, and sealed C3.1/C4 comparison modes are mutually exclusive".into());
+        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, C5-calibration-frontier, ordering-diagnostic, capitalization-diagnostic, sealed C1/C2 comparison, sealed C2/C3 comparison, sealed C2/C3/C3.1 comparison, and sealed C3.1/C4 comparison modes are mutually exclusive".into());
     }
     validate_spent_arguments(
         diagnose_relational_emission || freeze_c4_relational_emission,
-        diagnose_c5_calibration_frontier || diagnose_ordering_evidence,
+        diagnose_c5_calibration_frontier
+            || diagnose_ordering_evidence
+            || diagnose_capitalization_evidence,
         &spent_holdouts,
         &spent_manifests,
         &spent_sha256s,
@@ -376,10 +385,13 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         || freeze_c4_relational_emission
         || diagnose_c5_calibration_frontier
         || diagnose_ordering_evidence
+        || diagnose_capitalization_evidence
     {
         if positional.len() != 2 || sealed.is_some() || development_only || reference_threshold_set
         {
-            let mode = if diagnose_ordering_evidence {
+            let mode = if diagnose_capitalization_evidence {
+                "--diagnose-capitalization-evidence"
+            } else if diagnose_ordering_evidence {
                 "--diagnose-ordering-evidence"
             } else if diagnose_c5_calibration_frontier {
                 "--diagnose-c5-calibration-frontier"
@@ -388,7 +400,10 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             } else {
                 "--diagnose-relational-emission"
             };
-            let triplets = if diagnose_c5_calibration_frontier || diagnose_ordering_evidence {
+            let triplets = if diagnose_c5_calibration_frontier
+                || diagnose_ordering_evidence
+                || diagnose_capitalization_evidence
+            {
                 5
             } else {
                 3
@@ -454,6 +469,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         freeze_c4_relational_emission,
         diagnose_c5_calibration_frontier,
         diagnose_ordering_evidence,
+        diagnose_capitalization_evidence,
         spent_holdouts,
         spent_manifests,
         spent_sha256s,
@@ -507,7 +523,7 @@ fn validate_spent_arguments(
 }
 
 fn usage() -> &'static str {
-    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-c5-calibration-frontier [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-ordering-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c31-c4-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
+    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-c5-calibration-frontier [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-ordering-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-capitalization-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c31-c4-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
 }
 
 #[allow(clippy::too_many_lines)]
@@ -535,6 +551,10 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
         validate_spent_holdout_digest(acknowledged, &holdout.manifest.holdout_sha256)?;
     }
     let corpus = bonjour::benchmark::open_artifact(&arguments.artifact)?;
+    if arguments.diagnose_capitalization_evidence {
+        let holdouts = load_spent_holdouts(arguments)?;
+        return run_capitalization_diagnostic(output, &corpus, holdouts, &fixtures);
+    }
     if arguments.diagnose_ordering_evidence {
         let holdouts = load_spent_holdouts(arguments)?;
         return run_ordering_diagnostic(output, &corpus, holdouts, &fixtures);
@@ -3196,6 +3216,16 @@ mod argument_tests {
         arguments
     }
 
+    fn capitalization_diagnostic_arguments() -> Vec<String> {
+        let mut arguments = calibration_frontier_arguments();
+        let mode = arguments
+            .iter_mut()
+            .find(|argument| argument.as_str() == "--diagnose-c5-calibration-frontier")
+            .unwrap();
+        *mode = "--diagnose-capitalization-evidence".to_string();
+        arguments
+    }
+
     #[test]
     fn relational_mode_requires_three_unique_spent_triplets() {
         let arguments = parse_owned(relational_arguments()).unwrap();
@@ -3312,6 +3342,39 @@ mod argument_tests {
             "--diagnose-relational-emission".to_string(),
         ] {
             let mut arguments = ordering_diagnostic_arguments();
+            arguments.push(extra.clone());
+            assert!(parse_owned(arguments).is_err(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn capitalization_diagnostic_requires_exactly_v1_through_v5() {
+        let arguments = parse_owned(capitalization_diagnostic_arguments()).unwrap();
+        assert!(arguments.diagnose_capitalization_evidence);
+        assert!(!arguments.diagnose_c5_calibration_frontier);
+        assert_eq!(arguments.clean_csv, None);
+        assert_eq!(arguments.spent_holdouts.len(), 5);
+
+        let mut incomplete = capitalization_diagnostic_arguments();
+        incomplete.truncate(incomplete.len() - 3);
+        assert!(parse_owned(incomplete).is_err());
+
+        let mut wrong_digest = capitalization_diagnostic_arguments();
+        let last = wrong_digest.len() - 1;
+        wrong_digest[last] = format!("--spent-sha256={DIGEST}");
+        assert!(parse_owned(wrong_digest).is_err());
+    }
+
+    #[test]
+    fn capitalization_diagnostic_rejects_tuning_and_other_modes() {
+        for extra in [
+            "--reference-threshold=0.80".to_string(),
+            "--development-only".to_string(),
+            "--sealed=sealed.csv".to_string(),
+            "--diagnose-ordering-evidence".to_string(),
+            "--diagnose-c5-calibration-frontier".to_string(),
+        ] {
+            let mut arguments = capitalization_diagnostic_arguments();
             arguments.push(extra.clone());
             assert!(parse_owned(arguments).is_err(), "{extra}");
         }
