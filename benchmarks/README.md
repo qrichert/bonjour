@@ -583,3 +583,30 @@ change until redistribution and the exact NOTICE are explicitly
 approved. External bulk-input checksums are recorded in
 [SOURCE_DATA.md](SOURCE_DATA.md), and the complete format/pipeline is
 documented in [`docs/name-data-format.md`](../docs/name-data-format.md).
+
+## C5 operating-point selection
+
+After the generic position, capitalization, and character-morphology
+experiments failed to earn promotion, a dense generation-held-out study
+selected a C5 operating point using only the existing calibration
+features. No corpus, artifact, candidate-generation, ranking, veto, or
+production behavior changed.
+
+The selected OOF point uses the controlled-C4 family at a 98.6% training
+target. Across held-out V1-V5 predictions it emitted 2,591 correct and
+38 wrong greetings for 98.55% precision and 40.00% recall, versus C4's
+1,305 correct / 13 wrong and 20.15% recall. Its Wilson 95% precision
+interval is 98.02%-98.95%; proxy precision is not a worldwide population
+guarantee.
+
+The final all-development C5 rule keeps C4 and adds a native, veto-free
+path requiring candidate quality `>= 0.70` and, for multiple candidates,
+winner margin `>= 0.50`. The frozen configuration SHA-256 is
+`427a15afb5c79846f80506f29b8d138a8c6969a8513c1d1dacf0ae1e491678b6`. It
+is a development candidate only. Production remains on C4 until an
+untouched REAL_PROXY_V6 one-shot comparison validates or rejects C5.
+
+The dense Pareto frontier, per-generation results, cost view, synthetic
+VALIDATION results, exact configuration, reproduction command, and
+deterministic report hash are recorded in
+[`name-eval/README.md`](name-eval/README.md).

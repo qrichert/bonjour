@@ -1701,3 +1701,164 @@ sealed real-world holdout.
 The runtime lexical gate made 6,959 clean-v1 keys (0.386%) ineligible,
 representing only 172,614 observations (0.039%). No additional
 sanitation pass was warranted.
+
+## C5 product operating-point selection
+
+The feature-search phase ended with generic position classified as
+marginal and generic capitalization and character morphology classified
+as harmful or no-value. Locale-aware ordering remains unresolved. None
+of those experimental features enters C5.
+
+The selection study therefore reused only the established seven
+calibration inputs: C3.1 decision score, candidate quality, winner
+margin, role signal, reliability, sole-candidate status, and native
+provenance. Candidate generation, ranking, normalization, hard vetoes,
+the corpus, the artifact, and production C4 behavior remained frozen. V6
+and TEST were not created, read, or evaluated.
+
+The primary evidence is generation-held-out. For every target and
+existing model family, each fold selected a policy using four spent
+proxy generations and applied it only to the omitted generation. The
+five disjoint held-out predictions form the OOF frontier. V1-V5 contain
+7,808 evaluable rows: 6,478 expected greetings and 1,330 expected NULLs.
+
+Frozen C4 emits 1,305 correct and 13 wrong greetings for 99.01%
+precision and 20.15% recall on that development population. It falsely
+abstains on 5,163 expected greetings, including 3,993 cases (61.64% of
+all expected greetings) where the winner is already correct and every
+hard veto passes.
+
+### Dense OOF Pareto frontier
+
+The training target is the constraint applied to each fold's four-
+generation training population. Observed OOF precision is reported
+without interpolation.
+
+| Family        | Training target | OOF precision | Recall | Correct | Wrong | NULL FP | Correct winner rejected |
+| ------------- | --------------: | ------------: | -----: | ------: | ----: | ------: | ----------------------: |
+| logistic      |          99.50% |        99.67% | 13.91% |     901 |     3 |       2 |                   4,397 |
+| logistic      |          99.30% |        99.29% | 15.11% |     979 |     7 |       3 |                   4,319 |
+| logistic      |          99.10% |        99.08% | 16.67% |   1,080 |    10 |       4 |                   4,218 |
+| logistic      |          99.00% |        98.98% | 18.05% |   1,169 |    12 |       4 |                   4,129 |
+| controlled C4 |          99.00% |        98.84% | 33.02% |   2,139 |    25 |       7 |                   3,159 |
+| controlled C4 |          98.80% |        98.80% | 36.92% |   2,392 |    29 |       6 |                   2,906 |
+| controlled C4 |          98.70% |        98.58% | 38.68% |   2,506 |    36 |      11 |                   2,792 |
+| controlled C4 |          98.60% |        98.55% | 40.00% |   2,591 |    38 |      11 |                   2,707 |
+| controlled C4 |          98.50% |        98.36% | 41.65% |   2,698 |    45 |      11 |                   2,600 |
+| controlled C4 |          98.40% |        98.32% | 43.32% |   2,806 |    48 |      13 |                   2,492 |
+| controlled C4 |          98.30% |        98.27% | 43.73% |   2,833 |    50 |      13 |                   2,465 |
+| controlled C4 |          98.20% |        98.16% | 45.28% |   2,933 |    55 |      15 |                   2,365 |
+| controlled C4 |          98.10% |        97.99% | 47.33% |   3,066 |    63 |      20 |                   2,232 |
+| controlled C4 |          98.00% |        97.91% | 49.07% |   3,179 |    68 |      22 |                   2,119 |
+| controlled C4 |          97.75% |        97.90% | 50.26% |   3,256 |    70 |      24 |                   2,042 |
+| controlled C4 |          97.50% |        97.63% | 50.93% |   3,299 |    80 |      31 |                   1,999 |
+| controlled C4 |          97.25% |        97.43% | 51.59% |   3,342 |    88 |      35 |                   1,956 |
+| controlled C4 |          97.00% |        96.93% | 53.04% |   3,436 |   109 |      31 |                   1,862 |
+
+The complete dense sweep retains every requested training target. The
+table above contains only nondominated, distinct emission signatures;
+missing target rows were empirically dominated rather than interpolated.
+
+### Product points
+
+Three actual OOF points were retained for product comparison:
+
+| Candidate    | Family / target     | Precision | Wilson 95%    | Recall | Correct / wrong | Wrong per 100 correct | Correct winner rejected |
+| ------------ | ------------------- | --------: | ------------- | -----: | --------------: | --------------------: | ----------------------: |
+| conservative | logistic / 99.10%   |    99.08% | 98.32%-99.50% | 16.67% |      1,080 / 10 |                 0.926 |                   4,218 |
+| balanced     | controlled / 98.60% |    98.55% | 98.02%-98.95% | 40.00% |      2,591 / 38 |                 1.467 |                   2,707 |
+| permissive   | controlled / 98.20% |    98.16% | 97.61%-98.58% | 45.28% |      2,933 / 55 |                 1.875 |                   2,365 |
+
+The balanced point is selected as the C5 development candidate. It adds
+1,286 correct and 25 wrong OOF emissions over C4 while reducing the
+correct-veto-free-winner rejection count from 3,993 to 2,707. The
+permissive point adds only another 342 correct emissions while adding 17
+wrong emissions. On separate synthetic VALIDATION, permissive is also
+dominated by balanced: it emits fewer correct and more wrong greetings.
+
+Balanced OOF stability by omitted generation is:
+
+| Held out | Emitted | Correct | Wrong | NULL FP | Precision | Recall |
+| -------- | ------: | ------: | ----: | ------: | --------: | -----: |
+| V1       |     590 |     582 |     8 |       4 |    98.64% | 36.01% |
+| V2       |     550 |     538 |    12 |       2 |    97.82% | 44.21% |
+| V3       |     528 |     518 |    10 |       2 |    98.11% | 42.05% |
+| V4       |     503 |     498 |     5 |       1 |    99.01% | 40.82% |
+| V5       |     458 |     455 |     3 |       2 |    99.34% | 38.14% |
+
+The minimum generation precision is 97.82%, the maximum generation wrong
+count is 12, and recall ranges from 36.01% to 44.21%. V1's label
+provenance differs from V2-V5, so the per-generation rows remain more
+important than a pooled precision claim.
+
+Separate synthetic VALIDATION results are:
+
+| Policy       | Emitted | Correct | Wrong | NULL FP | Precision | Recall |
+| ------------ | ------: | ------: | ----: | ------: | --------: | -----: |
+| C4           |  16,295 |  16,295 |     0 |       0 |   100.00% | 41.54% |
+| conservative |  16,072 |  16,019 |    53 |       0 |    99.67% | 40.84% |
+| balanced     |  24,243 |  23,596 |   647 |       0 |    97.33% | 60.16% |
+| permissive   |  23,673 |  22,926 |   747 |       0 |    96.84% | 58.45% |
+
+A loss of `false_abstentions + cost * wrong_emissions` selects 53.04%
+recall at 5x, 50.26% at 10x and 20x, 36.92% at 50x, and 13.91% at 100x.
+This table is decision support, not the selection mechanism.
+
+### Frozen development configuration
+
+The all-development refit corresponding to the selected OOF point is:
+
+```text
+schema=1
+name=C5-balanced-controlled-calibration-v1
+family=controlled_c4
+training_target=0.98599999999999999
+quality=0.69999999999999996
+reliability=0.00000000000000000
+role=0.00000000000000000
+margin=0.50000000000000000
+```
+
+Its canonical configuration SHA-256 is
+`427a15afb5c79846f80506f29b8d138a8c6969a8513c1d1dacf0ae1e491678b6`.
+Operationally, C5 keeps every C4 emission and otherwise emits only a
+native, veto-free selected winner with candidate quality at least 0.70
+and, when multiple candidates exist, winner margin at least 0.50. The
+reliability and role floors are zero because they did not constrain the
+selected empirical point; they remain explicit frozen fields.
+
+On all spent V1-V5 rows, this final single policy emits 2,527 correct
+and 33 wrong greetings at 98.71% precision and 39.01% recall. Those are
+development-fit metrics, not the OOF selection evidence and not fresh
+validation. C4 remains production behavior. C5 requires a single
+untouched REAL_PROXY_V6 comparison before any promotion.
+
+The four motivating qualitative examples were exercised locally only
+after selection. Repository-visible identities are literal `REDACTED`.
+Every case selected its intended first span. The conservative and
+balanced points abstained on all four; permissive emitted only
+`REDACTED` case 1. That case had quality 0.6964 and margin 1.0000. The
+other cases had margins 0.3053, 0.3075, and 0.3248. These examples did
+not influence fitting or selection.
+
+Run the selection with:
+
+```console
+cargo run --release --manifest-path benchmarks/name-eval/Cargo.toml -- \
+  ARTIFACT OUTPUT --select-freeze-c5-operating-point \
+  --spent-holdout=V1.csv --spent-manifest=V1.manifest.csv \
+  --spent-sha256=de95213f27fc1849032ee6788c8f16d7d515c1a991ae8b2e8414b7b155814c4e \
+  --spent-holdout=V2.csv --spent-manifest=V2.manifest.csv \
+  --spent-sha256=7d704a646b8dd9fa3820f88b9504d4397b676af9435532cf2da9befda7663a73 \
+  --spent-holdout=V3.csv --spent-manifest=V3.manifest.csv \
+  --spent-sha256=d70e4d4b2ed7e49bed09dc1e8d2ba60ade8a752e3b86c772e964bd64883ee6fe \
+  --spent-holdout=V4.csv --spent-manifest=V4.manifest.csv \
+  --spent-sha256=d95c589bec836faaeecaeda85b146989d2936914bff0209934f289ccb9446c7f \
+  --spent-holdout=V5.csv --spent-manifest=V5.manifest.csv \
+  --spent-sha256=69070614fee68401b896d6c5bfb4c22c55cca9744237f66213a9dd04291db6c7
+```
+
+Two independent release-mode runs produced byte-identical output. The
+final generated `report.md` has SHA-256
+`d19a1acfbf1a58fdadc87df55f29d95f3de41167a108bc26ec0cb48ddf7fff48`.
+Generated reports and proxy rows remain local and ignored.
