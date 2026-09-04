@@ -50,6 +50,21 @@ struct ProductCandidate {
     validation_metrics: EmissionMetrics,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct C5OnlyAggregate {
+    emitted: usize,
+    correct: usize,
+    wrong: usize,
+    null_false_emissions: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SealedC4C5Comparison {
+    c4: EmissionMetrics,
+    c5: EmissionMetrics,
+    c5_only: C5OnlyAggregate,
+}
+
 pub(crate) fn run_c5_selection(
     output: &Path,
     corpus: &impl EvidenceSource,
@@ -97,6 +112,88 @@ pub(crate) fn run_c5_selection(
     }
     let report = outputs.get("report.md").ok_or("C5 report missing")?;
     Ok(String::from_utf8(report.clone())?)
+}
+
+pub(crate) fn run_sealed_c4_c5_comparison(
+    output: &Path,
+    corpus: &impl EvidenceSource,
+    holdout: FrozenHoldout,
+) -> Result<String> {
+    assert_frozen_c5_configuration()?;
+    let rows = holdout
+        .cases
+        .iter()
+        .filter(|case| case.is_evaluable())
+        .enumerate()
+        .map(|(ordinal, case)| {
+            feature_row(
+                corpus,
+                Population::Validation,
+                ordinal,
+                &case.display_name,
+                case.expected_greeting(),
+                nonempty(&case.country_hint),
+                nonempty(&case.locale_hint),
+            )
+        })
+        .collect::<Vec<_>>();
+    let comparison = compare_c4_c5(&rows)?;
+    let outputs = sealed_comparison_outputs(&holdout, comparison)?;
+    let repeated = sealed_comparison_outputs(&holdout, comparison)?;
+    if outputs != repeated {
+        return Err("sealed C4/C5 aggregate output is not deterministic".into());
+    }
+    assert_sealed_aggregate_only(&outputs)?;
+    fs::write(
+        output.join("sealed_c4_c5_summary.csv"),
+        outputs
+            .get("sealed_c4_c5_summary.csv")
+            .ok_or("sealed C4/C5 summary is missing")?,
+    )?;
+    let report = outputs
+        .get("report.md")
+        .ok_or("sealed C4/C5 report is missing")?;
+    Ok(String::from_utf8(report.clone())?)
+}
+
+fn compare_c4_c5(rows: &[FeatureRow]) -> Result<SealedC4C5Comparison> {
+    let mut c4 = EmissionMetrics::default();
+    let mut c5 = EmissionMetrics::default();
+    let mut c5_only = C5OnlyAggregate::default();
+    for row in rows {
+        let c4_emits = Policy::C4.emits(row);
+        let c5_emits = frozen_c5_emits(row);
+        if c4_emits && !c5_emits {
+            return Err("frozen C5 violated its additive C4 invariant".into());
+        }
+        c4.observe(row, c4_emits);
+        c5.observe(row, c5_emits);
+        if !c4_emits && c5_emits {
+            c5_only.observe(row);
+        }
+    }
+    if c5.emitted != c4.emitted + c5_only.emitted
+        || c5.correct != c4.correct + c5_only.correct
+        || c5.wrong != c4.wrong + c5_only.wrong
+        || c5.null_false_emissions != c4.null_false_emissions + c5_only.null_false_emissions
+    {
+        return Err("frozen C5 aggregate is not the exact additive C4 delta".into());
+    }
+    Ok(SealedC4C5Comparison { c4, c5, c5_only })
+}
+
+impl C5OnlyAggregate {
+    fn observe(&mut self, row: &FeatureRow) {
+        self.emitted += 1;
+        if row.expected_greeting && row.selected_matches {
+            self.correct += 1;
+        } else {
+            self.wrong += 1;
+            if !row.expected_greeting {
+                self.null_false_emissions += 1;
+            }
+        }
+    }
 }
 
 fn assert_coarse_frontier(rows: &[FeatureRow]) -> Result<()> {
@@ -398,6 +495,21 @@ fn frozen_c5_digest() -> String {
     format!("{:x}", Sha256::digest(frozen_c5_config().as_bytes()))
 }
 
+fn assert_frozen_c5_configuration() -> Result<()> {
+    let parameters = frozen_c5_policy().parameters();
+    if parameters != "quality=0.70;reliability=0.00;role=0.00;margin=0.50" {
+        return Err(format!("frozen C5 parameters changed: {parameters}").into());
+    }
+    let digest = frozen_c5_digest();
+    if digest != C5_CONFIG_SHA256 {
+        return Err(format!(
+            "frozen C5 configuration digest changed: expected {C5_CONFIG_SHA256}, got {digest}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn assert_frozen_c5(
     selected: &ProductCandidate,
     proxy_rows: &[FeatureRow],
@@ -470,14 +582,7 @@ fn assert_frozen_c5(
     {
         return Err("frozen C5 implementation does not reproduce the selected policy".into());
     }
-    let digest = frozen_c5_digest();
-    if digest != C5_CONFIG_SHA256 {
-        return Err(format!(
-            "frozen C5 configuration digest changed: expected {C5_CONFIG_SHA256}, got {digest}"
-        )
-        .into());
-    }
-    Ok(())
+    assert_frozen_c5_configuration()
 }
 
 fn evaluate_frozen_c5(rows: &[FeatureRow]) -> EmissionMetrics {
@@ -486,6 +591,188 @@ fn evaluate_frozen_c5(rows: &[FeatureRow]) -> EmissionMetrics {
         metrics.observe(row, frozen_c5_emits(row));
     }
     metrics
+}
+
+fn sealed_comparison_outputs(
+    holdout: &FrozenHoldout,
+    comparison: SealedC4C5Comparison,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut outputs = BTreeMap::new();
+    outputs.insert(
+        "sealed_c4_c5_summary.csv".to_string(),
+        sealed_comparison_csv(comparison)?,
+    );
+    outputs.insert(
+        "report.md".to_string(),
+        sealed_comparison_report(holdout, comparison).into_bytes(),
+    );
+    Ok(outputs)
+}
+
+fn sealed_comparison_csv(comparison: SealedC4C5Comparison) -> Result<Vec<u8>> {
+    csv_bytes(|writer| {
+        writer.write_record([
+            "record",
+            "emitted",
+            "correct",
+            "wrong",
+            "null_fp",
+            "precision",
+            "wilson_95_lower",
+            "wilson_95_upper",
+            "recall",
+            "abstention_rate",
+            "false_abstentions",
+            "winner_correct_but_abstained",
+            "correct_per_wrong",
+        ])?;
+        write_sealed_policy_row(writer, "c4", comparison.c4)?;
+        write_sealed_policy_row(writer, "c5", comparison.c5)?;
+        writer.write_record([
+            "c5_only",
+            &comparison.c5_only.emitted.to_string(),
+            &comparison.c5_only.correct.to_string(),
+            &comparison.c5_only.wrong.to_string(),
+            &comparison.c5_only.null_false_emissions.to_string(),
+            &optional_float(ratio(
+                comparison.c5_only.correct,
+                comparison.c5_only.emitted,
+            )),
+            "",
+            "",
+            "",
+            "",
+            &(comparison.c4.false_abstentions - comparison.c5.false_abstentions).to_string(),
+            "",
+            &correct_per_wrong(comparison.c5_only.correct, comparison.c5_only.wrong),
+        ])?;
+        Ok(())
+    })
+}
+
+fn write_sealed_policy_row(
+    writer: &mut csv::Writer<Vec<u8>>,
+    name: &str,
+    metrics: EmissionMetrics,
+) -> Result<()> {
+    let interval = wilson_interval(metrics.correct, metrics.emitted);
+    writer.write_record([
+        name,
+        &metrics.emitted.to_string(),
+        &metrics.correct.to_string(),
+        &metrics.wrong.to_string(),
+        &metrics.null_false_emissions.to_string(),
+        &optional_float(metrics.precision()),
+        &interval.map_or_else(String::new, |value| float(value.lower)),
+        &interval.map_or_else(String::new, |value| float(value.upper)),
+        &optional_float(metrics.recall()),
+        &optional_float(metrics.abstention_rate()),
+        &metrics.false_abstentions.to_string(),
+        &metrics.winner_correct_but_abstained.to_string(),
+        &correct_per_wrong(metrics.correct, metrics.wrong),
+    ])?;
+    Ok(())
+}
+
+fn sealed_comparison_report(holdout: &FrozenHoldout, comparison: SealedC4C5Comparison) -> String {
+    let mut report = String::new();
+    writeln!(report, "# Sealed C4/C5 REAL_PROXY_V6 comparison\n").unwrap();
+    writeln!(
+        report,
+        "The holdout was checksum-verified as `{}` before the sole classifier invocation. It contains {} source rows: {} evaluable and {} skipped, with {} expected greetings and {} expected abstentions. Only aggregate counts were produced.\n",
+        holdout.manifest.holdout_sha256,
+        holdout.manifest.total_cases,
+        holdout.manifest.evaluable_cases,
+        holdout.manifest.skipped_cases,
+        holdout.manifest.expected_greetings,
+        holdout.manifest.expected_abstentions,
+    )
+    .unwrap();
+    writeln!(
+        report,
+        "| Classifier | Emitted | Correct | Wrong | NULL FP | Precision | Wilson 95% | Recall | Abstention | False abstentions | Correct veto-free winner rejected | Correct per wrong |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    )
+    .unwrap();
+    for (name, metrics) in [("C4", comparison.c4), ("C5", comparison.c5)] {
+        let interval = wilson_interval(metrics.correct, metrics.emitted).map_or_else(
+            || "n/a".to_string(),
+            |value| {
+                format!(
+                    "{}–{}",
+                    percent(Some(value.lower)),
+                    percent(Some(value.upper))
+                )
+            },
+        );
+        writeln!(
+            report,
+            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            metrics.emitted,
+            metrics.correct,
+            metrics.wrong,
+            metrics.null_false_emissions,
+            percent(metrics.precision()),
+            interval,
+            percent(metrics.recall()),
+            percent(metrics.abstention_rate()),
+            metrics.false_abstentions,
+            metrics.winner_correct_but_abstained,
+            correct_per_wrong(metrics.correct, metrics.wrong),
+        )
+        .unwrap();
+    }
+    let reduction = comparison.c4.false_abstentions - comparison.c5.false_abstentions;
+    writeln!(report, "\n## C5-only delta\n").unwrap();
+    writeln!(
+        report,
+        "C5 added {} emissions: {} correct, {} wrong, and {} expected-NULL false emissions. That is {} additional correct greetings per additional wrong greeting. False abstentions fell by {}.\n",
+        comparison.c5_only.emitted,
+        comparison.c5_only.correct,
+        comparison.c5_only.wrong,
+        comparison.c5_only.null_false_emissions,
+        correct_per_wrong(comparison.c5_only.correct, comparison.c5_only.wrong),
+        reduction,
+    )
+    .unwrap();
+    writeln!(report, "## Interpretation boundary\n").unwrap();
+    writeln!(report, "This is one-shot machine-consensus proxy evidence, not a worldwide population-precision claim. The aggregate checkpoint must be interpreted before any row is inspected. Production remains on C4; promotion requires a separate change.\n").unwrap();
+    report
+}
+
+fn correct_per_wrong(correct: usize, wrong: usize) -> String {
+    if wrong == 0 {
+        "no observed wrong emissions".to_string()
+    } else {
+        format!("{:.2}", correct as f64 / wrong as f64)
+    }
+}
+
+fn assert_sealed_aggregate_only(outputs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    if outputs.keys().map(String::as_str).collect::<Vec<_>>()
+        != ["report.md", "sealed_c4_c5_summary.csv"]
+    {
+        return Err("sealed C4/C5 comparator produced an unexpected output".into());
+    }
+    for (name, bytes) in outputs {
+        let text = std::str::from_utf8(bytes)?;
+        for forbidden in [
+            "display_name",
+            "source_id",
+            "source_row",
+            "user_name",
+            "expected_greeting",
+            "candidate_quality",
+            "winner_margin",
+            "decision_score",
+        ] {
+            if text.contains(forbidden) {
+                return Err(
+                    format!("sealed C4/C5 aggregate output {name} contains {forbidden}").into(),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1261,6 +1548,130 @@ mod tests {
             frozen_c5_policy().parameters(),
             "quality=0.70;reliability=0.00;role=0.00;margin=0.50"
         );
+    }
+
+    #[test]
+    fn sealed_comparison_is_additive_and_accounts_for_every_delta_outcome() {
+        let mut c4_correct = feature_row();
+        c4_correct.c4_emits = true;
+
+        let c5_only_correct = feature_row();
+
+        let mut c5_only_wrong = feature_row();
+        c5_only_wrong.selected_matches = false;
+
+        let mut c5_only_null = feature_row();
+        c5_only_null.expected_greeting = false;
+        c5_only_null.selected_matches = false;
+
+        let mut abstained_correct = feature_row();
+        abstained_correct.candidate_quality = f64::from_bits(C5_QUALITY_MIN.to_bits() - 1);
+
+        let comparison = compare_c4_c5(&[
+            c4_correct,
+            c5_only_correct,
+            c5_only_wrong,
+            c5_only_null,
+            abstained_correct,
+        ])
+        .unwrap();
+        assert_eq!(comparison.c4.emitted, 1);
+        assert_eq!(comparison.c4.correct, 1);
+        assert_eq!(comparison.c4.false_abstentions, 3);
+        assert_eq!(comparison.c4.winner_correct_but_abstained, 2);
+        assert_eq!(comparison.c5.emitted, 4);
+        assert_eq!(comparison.c5.correct, 2);
+        assert_eq!(comparison.c5.wrong, 2);
+        assert_eq!(comparison.c5.null_false_emissions, 1);
+        assert_eq!(comparison.c5.false_abstentions, 1);
+        assert_eq!(comparison.c5.winner_correct_but_abstained, 1);
+        assert_eq!(
+            comparison.c5_only,
+            C5OnlyAggregate {
+                emitted: 3,
+                correct: 1,
+                wrong: 2,
+                null_false_emissions: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn sealed_comparison_outputs_are_deterministic_and_aggregate_only() {
+        let holdout = FrozenHoldout {
+            cases: Vec::new(),
+            manifest: name_eval::holdout::HoldoutManifest {
+                format_version: 1,
+                holdout_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                total_cases: 2_000,
+                evaluable_cases: 1_500,
+                skipped_cases: 500,
+                expected_greetings: 1_200,
+                expected_abstentions: 300,
+                person_cases: 1_200,
+                non_person_cases: 100,
+                unknown_kind_cases: 700,
+                provenance: "fresh blind proxy agreement".to_string(),
+            },
+        };
+        let comparison = SealedC4C5Comparison {
+            c4: EmissionMetrics {
+                rows: 1_500,
+                expected_greetings: 1_200,
+                expected_nulls: 300,
+                emitted: 101,
+                correct: 100,
+                wrong: 1,
+                false_abstentions: 1_099,
+                winner_correct_but_abstained: 900,
+                expected_null_correct_abstentions: 300,
+                ..EmissionMetrics::default()
+            },
+            c5: EmissionMetrics {
+                rows: 1_500,
+                expected_greetings: 1_200,
+                expected_nulls: 300,
+                emitted: 122,
+                correct: 120,
+                wrong: 2,
+                false_abstentions: 1_078,
+                winner_correct_but_abstained: 880,
+                expected_null_correct_abstentions: 300,
+                ..EmissionMetrics::default()
+            },
+            c5_only: C5OnlyAggregate {
+                emitted: 21,
+                correct: 20,
+                wrong: 1,
+                null_false_emissions: 0,
+            },
+        };
+        let outputs = sealed_comparison_outputs(&holdout, comparison).unwrap();
+        assert_eq!(
+            outputs,
+            sealed_comparison_outputs(&holdout, comparison).unwrap()
+        );
+        assert!(assert_sealed_aggregate_only(&outputs).is_ok());
+        let combined = outputs
+            .values()
+            .map(|bytes| std::str::from_utf8(bytes).unwrap())
+            .collect::<String>();
+        for forbidden in [
+            "Private Display Name",
+            "case-private",
+            "display_name",
+            "expected_greeting",
+            "decision_score",
+        ] {
+            assert!(!combined.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn correct_per_wrong_handles_zero_and_finite_counts() {
+        assert_eq!(correct_per_wrong(44, 0), "no observed wrong emissions");
+        assert_eq!(correct_per_wrong(44, 2), "22.00");
     }
 
     #[test]

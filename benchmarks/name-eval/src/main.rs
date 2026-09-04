@@ -35,7 +35,7 @@ use c3_development::run_c3_development;
 use c31_development::run_c31_development;
 use calibration_frontier::{
     run_c5_selection, run_calibration_frontier, run_capitalization_diagnostic,
-    run_morphology_diagnostic, run_ordering_diagnostic,
+    run_morphology_diagnostic, run_ordering_diagnostic, run_sealed_c4_c5_comparison,
 };
 use classifier::{
     ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4,
@@ -203,6 +203,7 @@ struct Arguments {
     compare_sealed_c2_c3_sha256: Option<String>,
     compare_sealed_c2_c3_c31_sha256: Option<String>,
     compare_sealed_c31_c4_sha256: Option<String>,
+    compare_sealed_c4_c5_sha256: Option<String>,
     diagnose_relational_emission: bool,
     freeze_c4_relational_emission: bool,
     diagnose_c5_calibration_frontier: bool,
@@ -236,6 +237,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut compare_sealed_c2_c3_sha256 = None;
     let mut compare_sealed_c2_c3_c31_sha256 = None;
     let mut compare_sealed_c31_c4_sha256 = None;
+    let mut compare_sealed_c4_c5_sha256 = None;
     let mut diagnose_relational_emission = false;
     let mut freeze_c4_relational_emission = false;
     let mut diagnose_c5_calibration_frontier = false;
@@ -323,6 +325,14 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
                 );
             }
             compare_sealed_c31_c4_sha256 = Some(value.to_ascii_lowercase());
+        } else if let Some(value) = text.strip_prefix("--compare-sealed-c4-c5-sha256=") {
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(
+                    "sealed comparison SHA-256 must contain exactly 64 hexadecimal characters"
+                        .into(),
+                );
+            }
+            compare_sealed_c4_c5_sha256 = Some(value.to_ascii_lowercase());
         } else if text == "--diagnose-relational-emission" {
             diagnose_relational_emission = true;
         } else if text == "--freeze-c4-relational-emission" {
@@ -368,6 +378,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         + usize::from(compare_sealed_c2_c3_sha256.is_some())
         + usize::from(compare_sealed_c2_c3_c31_sha256.is_some())
         + usize::from(compare_sealed_c31_c4_sha256.is_some())
+        + usize::from(compare_sealed_c4_c5_sha256.is_some())
         + usize::from(diagnose_relational_emission)
         + usize::from(freeze_c4_relational_emission)
         + usize::from(diagnose_c5_calibration_frontier)
@@ -376,7 +387,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         + usize::from(diagnose_morphology_evidence)
         + usize::from(select_freeze_c5_operating_point);
     if explicit_modes > 1 {
-        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, C5-calibration-frontier, C5-selection, ordering-diagnostic, capitalization-diagnostic, morphology-diagnostic, sealed C1/C2 comparison, sealed C2/C3 comparison, sealed C2/C3/C3.1 comparison, and sealed C3.1/C4 comparison modes are mutually exclusive".into());
+        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, C5-calibration-frontier, C5-selection, ordering-diagnostic, capitalization-diagnostic, morphology-diagnostic, sealed C1/C2 comparison, sealed C2/C3 comparison, sealed C2/C3/C3.1 comparison, sealed C3.1/C4 comparison, and sealed C4/C5 comparison modes are mutually exclusive".into());
     }
     validate_spent_arguments(
         diagnose_relational_emission || freeze_c4_relational_emission,
@@ -397,7 +408,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         || compare_sealed_c1_c2_sha256.is_some()
         || compare_sealed_c2_c3_sha256.is_some()
         || compare_sealed_c2_c3_c31_sha256.is_some()
-        || compare_sealed_c31_c4_sha256.is_some();
+        || compare_sealed_c31_c4_sha256.is_some()
+        || compare_sealed_c4_c5_sha256.is_some();
     let (artifact, clean_csv, output) = if diagnose_relational_emission
         || freeze_c4_relational_emission
         || diagnose_c5_calibration_frontier
@@ -443,6 +455,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         if sealed.is_none() || development_only || reference_threshold_set {
             let mode = if sealed_only {
                 "--sealed-only"
+            } else if compare_sealed_c4_c5_sha256.is_some() {
+                "--compare-sealed-c4-c5-sha256"
             } else if compare_sealed_c31_c4_sha256.is_some() {
                 "--compare-sealed-c31-c4-sha256"
             } else if compare_sealed_c2_c3_c31_sha256.is_some() {
@@ -493,6 +507,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         compare_sealed_c2_c3_sha256,
         compare_sealed_c2_c3_c31_sha256,
         compare_sealed_c31_c4_sha256,
+        compare_sealed_c4_c5_sha256,
         diagnose_relational_emission,
         freeze_c4_relational_emission,
         diagnose_c5_calibration_frontier,
@@ -554,7 +569,7 @@ fn validate_spent_arguments(
 }
 
 fn usage() -> &'static str {
-    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-c5-calibration-frontier [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --select-freeze-c5-operating-point [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-ordering-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-capitalization-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-morphology-evidence --morphology-name-totals=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c31-c4-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
+    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-c5-calibration-frontier [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --select-freeze-c5-operating-point [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-ordering-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-capitalization-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-morphology-evidence --morphology-name-totals=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c31-c4-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c4-c5-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
 }
 
 #[allow(clippy::too_many_lines)]
@@ -576,7 +591,8 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
             .or(arguments.compare_sealed_c1_c2_sha256.as_deref())
             .or(arguments.compare_sealed_c2_c3_sha256.as_deref())
             .or(arguments.compare_sealed_c2_c3_c31_sha256.as_deref())
-            .or(arguments.compare_sealed_c31_c4_sha256.as_deref()),
+            .or(arguments.compare_sealed_c31_c4_sha256.as_deref())
+            .or(arguments.compare_sealed_c4_c5_sha256.as_deref()),
         frozen_holdout.as_ref(),
     ) {
         validate_spent_holdout_digest(acknowledged, &holdout.manifest.holdout_sha256)?;
@@ -613,6 +629,12 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
     if arguments.diagnose_relational_emission {
         let holdouts = load_spent_holdouts(arguments)?;
         return run_relational_diagnostic(output, &corpus, holdouts, &fixtures);
+    }
+    if let Some(acknowledged_sha256) = &arguments.compare_sealed_c4_c5_sha256 {
+        let holdout =
+            frozen_holdout.ok_or("--compare-sealed-c4-c5-sha256 requires a frozen holdout")?;
+        validate_spent_holdout_digest(acknowledged_sha256, &holdout.manifest.holdout_sha256)?;
+        return run_sealed_c4_c5_comparison(output, &corpus, holdout);
     }
     if let Some(acknowledged_sha256) = &arguments.compare_sealed_c31_c4_sha256 {
         let holdout =
@@ -3902,6 +3924,69 @@ mod argument_tests {
                 "--compare-sealed-c31-c4-sha256=short",
                 "--sealed=sealed.csv",
                 "--sealed-manifest=manifest.csv",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sealed_c4_c5_comparison_requires_digest_and_rejects_tuning_modes() {
+        let arguments = parse(&[
+            "artifact",
+            "output",
+            &format!("--compare-sealed-c4-c5-sha256={DIGEST}"),
+            "--sealed=sealed.csv",
+            "--sealed-manifest=manifest.csv",
+        ])
+        .unwrap();
+        assert_eq!(
+            arguments.compare_sealed_c4_c5_sha256.as_deref(),
+            Some(DIGEST)
+        );
+        assert_eq!(arguments.clean_csv, None);
+
+        for extra in [
+            "--sealed-only",
+            "--development-only",
+            "--reference-threshold=0.80",
+            &format!("--diagnose-spent-holdout-sha256={DIGEST}"),
+            &format!("--compare-sealed-c1-c2-sha256={DIGEST}"),
+            &format!("--compare-sealed-c2-c3-sha256={DIGEST}"),
+            &format!("--compare-sealed-c2-c3-c31-sha256={DIGEST}"),
+            &format!("--compare-sealed-c31-c4-sha256={DIGEST}"),
+            "--select-freeze-c5-operating-point",
+        ] {
+            assert!(
+                parse(&[
+                    "artifact",
+                    "output",
+                    &format!("--compare-sealed-c4-c5-sha256={DIGEST}"),
+                    "--sealed=sealed.csv",
+                    "--sealed-manifest=manifest.csv",
+                    extra,
+                ])
+                .is_err(),
+                "{extra}"
+            );
+        }
+        for invalid in ["short", &"g".repeat(64)] {
+            assert!(
+                parse(&[
+                    "artifact",
+                    "output",
+                    &format!("--compare-sealed-c4-c5-sha256={invalid}"),
+                    "--sealed=sealed.csv",
+                    "--sealed-manifest=manifest.csv",
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            parse(&[
+                "artifact",
+                "output",
+                &format!("--compare-sealed-c4-c5-sha256={DIGEST}"),
+                "--sealed=sealed.csv",
             ])
             .is_err()
         );

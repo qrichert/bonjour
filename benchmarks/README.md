@@ -610,3 +610,26 @@ The dense Pareto frontier, per-generation results, cost view, synthetic
 VALIDATION results, exact configuration, reproduction command, and
 deterministic report hash are recorded in
 [`name-eval/README.md`](name-eval/README.md).
+
+## REAL_PROXY_V6 C5 validation
+
+The frozen balanced C5 development candidate was compared once against
+production C4 on a fresh, value-disjoint, machine-consensus proxy
+holdout. Its sealed SHA-256 is
+`a02d7105ea4f084e9d4ee94b3633e5068eb35e076dd7413b58b6d65549e734b1`. Of
+2,000 sampled rows, 1,443 were evaluable after exact annotation
+consensus and 557 were skipped.
+
+| Classifier | Correct | Wrong | NULL FP | Precision | Recall |
+| ---------- | ------: | ----: | ------: | --------: | -----: |
+| C4         |     259 |     4 |       1 |    98.48% | 22.10% |
+| C5         |     484 |     7 |       3 |    98.57% | 41.30% |
+
+C5 added 225 correct and three wrong greetings, including two added
+expected-NULL false emissions. That is 75 additional correct greetings
+per additional wrong greeting, and false abstentions fell from 910
+to 684. The result validates C5 as the leading candidate, but does not
+claim worldwide precision: C5's case-level Wilson 95% interval is
+97.09%-99.31%, and exact machine consensus excludes ambiguous or
+disagreed labels. Production remains on C4 until a separate promotion
+change. No V6 row-level result was produced or inspected.

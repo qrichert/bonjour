@@ -1862,3 +1862,87 @@ Two independent release-mode runs produced byte-identical output. The
 final generated `report.md` has SHA-256
 `d19a1acfbf1a58fdadc87df55f29d95f3de41167a108bc26ec0cb48ddf7fff48`.
 Generated reports and proxy rows remain local and ignored.
+
+## REAL_PROXY_V6 pre-inference freeze checkpoint
+
+REAL_PROXY_V6 was sampled from the checksum-pinned Meta Kaggle
+`Users.csv` using Python `random.Random` reservoir sampling with seed
+`0x5245414C5F5636`. The source contained 33,084,108 rows. After 204
+blank or whitespace-only rows and 118,341 rows whose exact display-name
+value occurred in V1-V5 were excluded, 32,965,563 rows were eligible.
+The resulting sample contains 2,000 unique display-name values and has
+SHA-256
+`82977f38c728e3c5f93b644522942720cf50025f4e9e0830f9bf373a682ed7ea`. Its
+exact-value overlap with each of V1, V2, V3, V4, and V5 is zero.
+
+The 2,587,424,211-byte source had SHA-256
+`30b95ff7d079289fe76a0fada39ebbb174f15f6f85a2e09f7a208c6fdf57dd82` both
+before and after sampling. The five exclusion-source SHA-256 values
+were, in version order:
+
+```text
+V1  ccf7f2776355888c9f3c9d79cbb20a3ab9c3d354fb216a06ab75f814fa5bf182
+V2  e658d2262c9f639a703be6e521d81e273c79d187694c9ed1a02da0fa4532879e
+V3  9deefa258a64c873d833357e8f242f18fab01ca2eedfa8d2442a56d931d361e7
+V4  234857bb418ddd3fe6b812b998ad514adf63569e81d62a873dfa4c6c5dc99a46
+V5  e26c1e45c51ec87da4285110fd740a50b319149e4cfc5035862d3356d1a73c89
+```
+
+Two independent classifier-blind machine annotations were normalized
+mechanically. The raw files remained unchanged at SHA-256
+`0a3d406c1393f8abe87f4d6fbbc19b6b58bf1cbae0a284186b0139bb0592ee9f` and
+`2772416f91c8338ce948e6498b4013bba2f6cc2efbaaf7c331873a9c814995c0`.
+Annotator A supplied 1,579 exact greetings, 310 NULLs, 95 explicit
+skips, and 16 unusable labels mapped to SKIP. Annotator B supplied 1,272
+exact greetings, 346 NULLs, 27 explicit skips, and 355 unusable labels
+mapped to SKIP.
+
+Exact consensus produced 1,172 greeting agreements, 271 NULL agreements,
+462 annotator-skip cases, and 95 other disagreements. The frozen holdout
+therefore contains 2,000 cases: 1,443 evaluable and 557 skipped. Its
+canonical sealed SHA-256, recorded before any classifier inference, is:
+
+```text
+a02d7105ea4f084e9d4ee94b3633e5068eb35e076dd7413b58b6d65549e734b1
+```
+
+No C4 or C5 inference had occurred when this checkpoint was written.
+
+### One-shot C4/C5 result
+
+The release comparator authenticated the frozen digest and invoked C4
+and C5 exactly once on the same 1,443 evaluable cases. It wrote only an
+aggregate summary and aggregate report; no case IDs, display names,
+labels, predictions, failures, scores, traces, confidence buckets, or
+changed-case rows were produced or inspected.
+
+| Classifier | Emitted | Correct | Wrong | NULL FP | Precision | Wilson 95%    | Recall | Abstention | False abstentions | Correct winner rejected | Correct / wrong |
+| ---------- | ------: | ------: | ----: | ------: | --------: | ------------- | -----: | ---------: | ----------------: | ----------------------: | --------------: |
+| C4         |     263 |     259 |     4 |       1 |    98.48% | 96.16%-99.41% | 22.10% |     81.77% |               910 |                     703 |           64.75 |
+| C5         |     491 |     484 |     7 |       3 |    98.57% | 97.09%-99.31% | 41.30% |     65.97% |               684 |                     478 |           69.14 |
+
+C5 added 228 emissions over C4: 225 correct, three wrong, and two
+expected-NULL false emissions. Expected-NULL false emissions are a
+subset of wrong emissions. This is 75 additional correct greetings per
+additional wrong greeting. C5 reduced false abstentions by 226 and
+correct, veto-free winner rejections by 225.
+
+**A - C5 validated.** The unseen recall gain is large and directionally
+consistent with development, fresh precision remains in the intended
+high-98% regime, and the added errors do not indicate an unexpected
+safety collapse. C5 is now the leading classifier candidate. Production
+remains on frozen C4 until a separate promotion change.
+
+The case counts are still too small to claim worldwide precision, and
+machine consensus preferentially retains cases on which both annotators
+agree. In particular, C5's 98.57% observed precision has a 97.09%-99.31%
+case-level Wilson interval. The three added wrong emissions and two
+added expected-NULL emissions remain material product costs rather than
+being hidden by the recall improvement.
+
+The aggregate `report.md` has SHA-256
+`86bf5c60222cfbdea744894c2a7fb8edd84d2eff26f19f5e225eabbd33aa4886`. The
+aggregate `sealed_c4_c5_summary.csv` has SHA-256
+`4613e4f2933043e1a90f4af224045b6b56db83c2bb6b27a156f50c9966e282f2`. V6
+remains sealed and uninspected. Any future row-level diagnosis would
+require a separate explicit decision to spend it.
