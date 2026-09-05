@@ -20,6 +20,10 @@ default = []
 standalone = []
 benchmark-internals = []
 
+[[example]]
+name = "standalone"
+required-features = ["standalone"]
+
 [profile.release]
 codegen-units = 1
 lto = "fat"

@@ -728,6 +728,13 @@ deliberately omits the roughly 35 MiB artifact:
 $ cargo install bonjour
 ```
 
+crates.io provides normal Cargo versioning, dependency resolution, API
+documentation, and reproducible source builds. The data is distributed
+separately because even its compressed release archive is larger than
+crates.io's package limit. Runtime loading also lets multiple
+applications share one installed copy instead of embedding the same data
+in every binary.
+
 Download `bonjour-name-data-v1.tar.zst` from the matching GitHub release
 and extract it into the platform data directory checked by the CLI:
 
@@ -765,9 +772,18 @@ Repository linting, tests, and local documentation enable all features.
 Crates.io package verification and docs.rs use default features because
 the registry package intentionally excludes the embedded data.
 
-[Documentation] is available on docs.rs.
+[Documentation] is available on docs.rs. See the [distribution guide]
+for complete runtime-loaded and standalone library and binary examples.
 
 ## Rust API
+
+For runtime-loaded applications and reusable libraries, use the default
+dependency:
+
+```toml
+[dependencies]
+bonjour = "0.1"
+```
 
 Runtime-loaded mode uses the same separately downloaded artifact:
 
@@ -791,7 +807,37 @@ assert_eq!(simone.gender_hint, Some(bonjour::GenderHint::Male));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-With the `standalone` feature, use `Classifier::standalone()` instead.
+For a self-contained binary or library, enable `standalone`:
+
+```toml
+[dependencies]
+bonjour = { version = "0.1", features = ["standalone"] }
+```
+
+Then provide the extracted artifact while Cargo compiles `bonjour`:
+
+```console
+$ BONJOUR_DATA_DIR=/path/to/bonjour-name-data-v1 cargo build --release
+```
+
+The resulting binary does not need `BONJOUR_DATA_DIR` or external data
+at runtime:
+
+```rust,no_run
+use bonjour::Classifier;
+
+let classifier = Classifier::standalone()?;
+let inference = classifier.infer("Quentin Richert", Some("FR"), None);
+assert_eq!(inference.greeting(), Some("Quentin"));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The same feature works when `bonjour` is used from a library crate.
+Reusable libraries should generally keep the default runtime-loaded
+dependency and let the final application choose where data lives; a
+library that enables `standalone` must document the build-time artifact
+requirement to its users.
+
 `inference.greeting_name` is the selected candidate before the emission
 decision; `greeting()` applies frozen C5. Every candidate is a non-empty
 contiguous span of the original input, preserving its spelling, casing,
@@ -847,4 +893,5 @@ source-code license. Its exact notice ships inside the data archive.
   https://github.com/qrichert/bonjour/releases/latest
 [crates.io]: https://crates.io/crates/bonjour
 [Documentation]: https://docs.rs/bonjour
+[distribution guide]: docs/distribution.md
 [the artifact format and maintainer pipeline]: docs/name-data-format.md
