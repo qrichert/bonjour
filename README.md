@@ -695,7 +695,7 @@ C3.1 diagnostic score, C5 emission source, and rule traces.
 
 ## Installation
 
-There are two ways to install `bonjour`.
+There are two ways to install the Rust `bonjour` command.
 
 ### Self-contained binaries
 
@@ -774,6 +774,37 @@ the registry package intentionally excludes the embedded data.
 
 [Documentation] is available on docs.rs. See the [distribution guide]
 for complete runtime-loaded and standalone library and binary examples.
+
+### Python
+
+Install the `pyjour` package from [PyPI]:
+
+```console
+$ pip install pyjour
+```
+
+Or add it to a uv project:
+
+```console
+$ uv add pyjour
+```
+
+Python wheels are self-contained: they embed the authenticated name-data
+artifact and do not need a separate download or runtime data directory.
+
+```python
+import pyjour
+
+inference = pyjour.infer("Quentin Richert", country_hint="FR")
+assert inference.greeting_name == "Quentin"
+```
+
+The `pyjour` command mirrors the Rust command:
+
+```console
+$ pyjour "Quentin Richert"
+Bonjour Quentin !
+```
 
 ## Rust API
 
@@ -894,4 +925,5 @@ source-code license. Its exact notice ships inside the data archive.
 [crates.io]: https://crates.io/crates/bonjour
 [Documentation]: https://docs.rs/bonjour
 [distribution guide]: docs/distribution.md
+[PyPI]: https://pypi.org/project/pyjour/
 [the artifact format and maintainer pipeline]: docs/name-data-format.md

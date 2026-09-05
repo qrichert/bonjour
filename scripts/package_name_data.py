@@ -12,7 +12,6 @@ from pathlib import Path
 
 import zstandard
 
-
 ARCHIVE_NAME = "bonjour-name-data-v1.tar.zst"
 ROOT_NAME = "bonjour-name-data-v1"
 DOCUMENTS = ("manifest.json", "README.md", "NOTICE")
@@ -24,7 +23,9 @@ def main() -> None:
     parser.add_argument("artifact_directory", type=Path)
     parser.add_argument("--output-directory", type=Path, default=Path("dist"))
     arguments = parser.parse_args()
-    archive, checksum = package(arguments.artifact_directory, arguments.output_directory)
+    archive, checksum = package(
+        arguments.artifact_directory, arguments.output_directory
+    )
     print(f"Archive: {archive}")
     print(f"Checksum: {checksum}")
 
@@ -63,7 +64,9 @@ def validate_artifact(artifact_directory: Path) -> tuple[list[str], Path]:
     manifest_path = artifact_directory / "manifest.json"
     require_regular_file(manifest_path)
     if manifest_path.read_bytes() != pinned_bytes:
-        raise ValueError("artifact manifest does not match the pinned production manifest")
+        raise ValueError(
+            "artifact manifest does not match the pinned production manifest"
+        )
     manifest = json.loads(pinned_bytes)
     repository_files = artifact_directory / REPOSITORY_FILES_DIRECTORY
     constituent_directory = (
@@ -84,7 +87,9 @@ def validate_artifact(artifact_directory: Path) -> tuple[list[str], Path]:
     for path in artifact_directory.iterdir():
         if path.is_symlink():
             raise ValueError(f"refusing extra symlink: {path}")
-    return sorted(entries, key=lambda value: value.encode("utf-8")), constituent_directory
+    return sorted(
+        entries, key=lambda value: value.encode("utf-8")
+    ), constituent_directory
 
 
 def write_tar(
@@ -95,9 +100,10 @@ def write_tar(
     constituent_directory: Path | None = None,
 ) -> None:
     constituent_directory = constituent_directory or source
-    with destination.open("wb") as output, tarfile.open(
-        fileobj=output, mode="w", format=tarfile.USTAR_FORMAT
-    ) as archive:
+    with (
+        destination.open("wb") as output,
+        tarfile.open(fileobj=output, mode="w", format=tarfile.USTAR_FORMAT) as archive,
+    ):
         root = canonical_info(ROOT_NAME, is_directory=True)
         archive.addfile(root)
         for name in entries:

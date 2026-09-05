@@ -9,10 +9,9 @@ import json
 import os
 import random
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
-
 
 DEFAULT_SAMPLE_SIZE = 2_000
 DEFAULT_RNG_SEED = 0x5245414C
@@ -354,7 +353,7 @@ def prepare(
             "output_file": output_path.name,
             "output_size_bytes": output_temporary.stat().st_size,
             "output_sha256": sha256_file(output_temporary),
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "generated_at_utc": datetime.now(UTC).isoformat(),
         }
         write_json(provenance_temporary, provenance)
         publish_pair(

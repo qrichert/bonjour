@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "prepare_meta_kaggle_holdout.py"
 SPEC = importlib.util.spec_from_file_location(
     "prepare_meta_kaggle_holdout", SCRIPT_PATH
@@ -167,7 +166,9 @@ class PrepareMetaKaggleHoldoutTests(unittest.TestCase):
         self.assertEqual(first["eligible_nonblank_rows"], 4)
         self.assertEqual(first["exclusion_sources"][0]["rows"], 2)
         self.assertEqual(first["exclusion_sources"][0]["unique_display_names"], 1)
-        self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), source_before)
+        self.assertEqual(
+            hashlib.sha256(self.source.read_bytes()).hexdigest(), source_before
+        )
 
     def test_rejects_bad_exclusion_schema_and_insufficient_remaining_population(
         self,

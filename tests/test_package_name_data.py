@@ -8,7 +8,6 @@ from pathlib import Path
 
 import zstandard
 
-
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts/package_name_data.py"
 SPEC = importlib.util.spec_from_file_location("package_name_data", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -39,17 +38,25 @@ class PackageNameDataTests(unittest.TestCase):
             first = compressor.compress(first_tar.read_bytes())
             second = compressor.compress(second_tar.read_bytes())
             self.assertEqual(first, second)
-            self.assertEqual(hashlib.sha256(first).digest(), hashlib.sha256(second).digest())
+            self.assertEqual(
+                hashlib.sha256(first).digest(), hashlib.sha256(second).digest()
+            )
 
             decompressed = zstandard.ZstdDecompressor().decompress(first)
             with tarfile.open(fileobj=io.BytesIO(decompressed)) as archive:
                 members = archive.getmembers()
             self.assertEqual(
                 [member.name for member in members],
-                ["bonjour-name-data-v1", "bonjour-name-data-v1/a", "bonjour-name-data-v1/b"],
+                [
+                    "bonjour-name-data-v1",
+                    "bonjour-name-data-v1/a",
+                    "bonjour-name-data-v1/b",
+                ],
             )
             self.assertTrue(all(member.mtime == 0 for member in members))
-            self.assertTrue(all(member.uid == 0 and member.gid == 0 for member in members))
+            self.assertTrue(
+                all(member.uid == 0 and member.gid == 0 for member in members)
+            )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 [project]
 name = "pyjour"
-version = "0.0.0"
+version = "0.1.0"
 authors = [
     { name = "Quentin Richert", email = "noreply@richert.co" },
 ]
@@ -8,11 +8,16 @@ description = "Extract first names with confidence scores."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "0BSD"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "data/name-v1/NOTICE"]
 keywords = ["first-name", "name-extraction", "person-name", "nlp", "classification"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Implementation :: CPython",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Intended Audience :: Developers",
 ]
 
@@ -23,14 +28,22 @@ Repository = "https://github.com/qrichert/bonjour.git"
 [project.scripts]
 pyjour = "pyjour.main:main"
 
-[tool.setuptools]
-packages = ["pyjour"]
+[tool.maturin]
+bindings = "pyo3"
+features = ["extension-module"]
+manifest-path = "bindings/python/Cargo.toml"
+module-name = "pyjour._native"
+python-source = "."
+
+[tool.ruff.lint]
+extend-select = ["I", "D300"] # Imports, docstrings.
 
 [build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
 
 [dependency-groups]
 dev = [
+    "maturin>=1.9,<2.0",
     "zstandard==0.25.0",
 ]

@@ -221,6 +221,51 @@ $ BONJOUR_DATA_DIR=/path/to/bonjour-name-data-v1 \
 
 The resulting `bonjour` executable is self-contained.
 
+## Python wheels
+
+`pyjour` is the Python distribution, import package, and command name:
+
+```console
+$ pip install pyjour
+```
+
+Or, with uv:
+
+```console
+$ uv add pyjour
+```
+
+Every published wheel embeds the same authenticated artifact as a
+standalone Rust build. Python users do not install the separate data
+archive and do not set `BONJOUR_DATA_DIR`.
+
+```python
+import pyjour
+
+inference = pyjour.infer("Quentin Richert", country_hint="FR")
+print(inference.greeting_name)
+```
+
+`pyjour.infer()` returns a frozen summary containing the best candidate,
+the greeting actually emitted by C5, the diagnostic decision score,
+emission source, and gated gender evidence. `pyjour.infer_detailed()`
+returns the same diagnostic structure as `bonjour --json`.
+
+The command-line interface has the same greeting fallback and hint
+semantics:
+
+```console
+$ pyjour "Quentin Richert"
+Bonjour Quentin !
+
+$ pyjour --json --country=FR "Quentin Richert"
+```
+
+Version 0.1.0 targets ordinary GIL-enabled CPython 3.12 and newer.
+Wheels are built for x86-64 and Arm64 Linux, Intel and Apple Silicon
+macOS, and x86-64 Windows. PyPy, free-threaded CPython, and source
+distributions are not part of the initial release.
+
 ## Maintainer-owned artifact generation
 
 The artifact schema, exact source columns, sanitation thresholds,

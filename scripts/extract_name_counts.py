@@ -17,7 +17,9 @@ def parse_args() -> argparse.Namespace:
             "country CSV."
         )
     )
-    parser.add_argument("input_dir", type=Path, help="Directory containing CC.csv files.")
+    parser.add_argument(
+        "input_dir", type=Path, help="Directory containing CC.csv files."
+    )
     parser.add_argument(
         "output_dir",
         type=Path,
@@ -124,7 +126,8 @@ def main() -> None:
         tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent)
     )
     try:
-        combined_temporary = tempfile.NamedTemporaryFile(
+        # The file must close before its path is linked into place.
+        combined_temporary = tempfile.NamedTemporaryFile(  # noqa: SIM115
             mode="w",
             encoding="utf-8",
             newline="",

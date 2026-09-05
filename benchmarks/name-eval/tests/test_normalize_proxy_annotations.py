@@ -6,10 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
-SCRIPT_PATH = (
-    Path(__file__).parents[1] / "scripts" / "normalize_proxy_annotations.py"
-)
+SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "normalize_proxy_annotations.py"
 SPEC = importlib.util.spec_from_file_location(
     "normalize_proxy_annotations", SCRIPT_PATH
 )
@@ -123,9 +120,7 @@ class NormalizeProxyAnnotationsTests(unittest.TestCase):
         self.assertEqual(rows_b[3]["decision"], "SKIP")
         self.assertEqual(result["unusable_or_non_exact_cases"], 1)
         self.assertEqual(result["annotations"][0]["exact_greeting"], 2)
-        self.assertEqual(
-            result["annotations"][0]["invalid_or_empty_mapped_to_skip"], 1
-        )
+        self.assertEqual(result["annotations"][0]["invalid_or_empty_mapped_to_skip"], 1)
         self.assertNotIn(
             "not an exact accented span",
             provenance_path.read_text(encoding="utf-8"),

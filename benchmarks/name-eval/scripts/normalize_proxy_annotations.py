@@ -11,7 +11,6 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-
 CANONICAL_HEADER = (
     "id",
     "display_name",
@@ -77,7 +76,9 @@ def load_template(path: Path) -> list[SourceIdentity]:
     with path.open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
         if tuple(reader.fieldnames or ()) != CANONICAL_HEADER:
-            raise ValueError("annotation template header does not match the exchange format")
+            raise ValueError(
+                "annotation template header does not match the exchange format"
+            )
         rows = [source_identity(row) for row in reader]
     validate_identities(rows, "annotation template")
     return rows
@@ -101,7 +102,9 @@ def validate_source(template: list[SourceIdentity], source_path: Path) -> None:
         (row.display_name, row.country_hint, row.locale_hint) for row in template
     )
     if source_rows != template_rows:
-        raise ValueError("annotation template does not match the supplied holdout source")
+        raise ValueError(
+            "annotation template does not match the supplied holdout source"
+        )
 
 
 def source_identity(row: dict[str, str]) -> SourceIdentity:
@@ -195,7 +198,9 @@ def normalize_one(
             raise ValueError(f"{raw_path} contains duplicate columns")
         missing = set(IDENTITY_HEADER).difference(fields)
         if missing:
-            raise ValueError(f"{raw_path} is missing identity columns: {sorted(missing)}")
+            raise ValueError(
+                f"{raw_path} is missing identity columns: {sorted(missing)}"
+            )
         if "decision" not in fields and "first_name" not in fields:
             raise ValueError(f"{raw_path} has no supported annotation fields")
         raw_rows = list(reader)
@@ -258,9 +263,7 @@ def normalize_one(
         "exact_greeting": counts["exact_greeting"],
         "null": counts["null"],
         "annotator_skip": counts["annotator_skip"],
-        "invalid_or_empty_mapped_to_skip": counts[
-            "invalid_or_empty_mapped_to_skip"
-        ],
+        "invalid_or_empty_mapped_to_skip": counts["invalid_or_empty_mapped_to_skip"],
     }
     canonical_rows.sort(key=lambda row: row["id"])
     return canonical_rows, metadata, invalid_ids
