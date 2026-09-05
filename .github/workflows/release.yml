@@ -22,10 +22,21 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Verify tag, Cargo version, CLI version, and package
+      - name: Verify tag, package versions, CLI version, and package
         run: |
           version=$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           test "${{ github.ref_name }}" = "$version"
+          python3 - "$version" <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          expected = sys.argv[1]
+          for path in [Path("pyproject.toml"), Path("bindings/python/Cargo.toml")]:
+              document = tomllib.loads(path.read_text(encoding="utf-8"))
+              table = "project" if path.name == "pyproject.toml" else "package"
+              assert document[table]["version"] == expected, path
+          PY
           test "$(cargo run --quiet -- --version)" = "bonjour $version"
           cargo package --locked
           cargo package --list | grep -F 'data/name-v1/manifest.json'
@@ -101,7 +112,7 @@ jobs:
         run: |
           version=$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           test "$(target/release/bonjour --version)" = "bonjour $version"
-          target/release/bonjour 'Quentin Richert' | grep -F '"greeting_name": "Quentin"'
+          test "$(target/release/bonjour 'Quentin Richert')" = 'Bonjour Quentin !'
 
       - name: Prepare artifact
         run: |
@@ -118,9 +129,84 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  python-wheels:
+    name: Python wheel (${{ matrix.target }})
+    needs: metadata
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: '2014'
+          - os: macos-latest
+            target: universal2-apple-darwin
+            manylinux: 'off'
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: 'off'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          maturin-version: v1.15.0
+          args: --release --locked --compatibility pypi --out dist
+
+      - name: Smoke-test wheel
+        shell: bash
+        run: |
+          wheel=$(find "$PWD/dist" -maxdepth 1 -type f -name 'pyjour-*.whl')
+          test -n "$wheel"
+
+          environment="$RUNNER_TEMP/pyjour-wheel"
+          python -m venv "$environment"
+          if [ "$RUNNER_OS" = Windows ]; then
+            python_executable="$environment/Scripts/python.exe"
+            pyjour_executable="$environment/Scripts/pyjour.exe"
+          else
+            python_executable="$environment/bin/python"
+            pyjour_executable="$environment/bin/pyjour"
+          fi
+
+          "$python_executable" -m pip install --no-deps "$wheel"
+          unset BONJOUR_DATA_DIR
+          cd "$RUNNER_TEMP"
+          "$python_executable" - <<'PY'
+          import pyjour
+
+          inference = pyjour.infer("Quentin Richert")
+          assert inference.greeting_name == "Quentin"
+          PY
+          test "$("$pyjour_executable" --version)" = \
+            "pyjour ${{ github.ref_name }}"
+          test "$("$pyjour_executable" 'Quentin Richert')" = \
+            'Bonjour Quentin !'
+          "$pyjour_executable" --json 'Quentin Richert' | \
+            "$python_executable" -c \
+              'import json,sys; assert json.load(sys.stdin)["greeting_name"] == "Quentin"'
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyjour-wheel-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
   release:
     name: Create GitHub Release
-    needs: [build, name-data]
+    needs: [build, name-data, python-wheels]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -145,13 +231,14 @@ jobs:
           echo "$body" >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
 
-      - name: Download all artifacts
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: bonjour-*
           path: artifacts/
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ steps.tag.outputs.title }}
@@ -165,6 +252,7 @@ jobs:
     name: Publish crate
     needs: release
     runs-on: ubuntu-latest
+    environment: crates-io
     permissions:
       contents: read
       id-token: write
@@ -181,6 +269,28 @@ jobs:
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Publish crate
-        run: cargo publish
+        run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  publish-pypi:
+    name: Publish Python wheels
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pyjour-wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Publish wheels
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
