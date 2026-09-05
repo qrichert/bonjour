@@ -91,3 +91,33 @@ counting was disabled during the timed pass.
 The artifact remained unchanged at 36,632,687 bytes. The standalone C4
 benchmark binary was 37,665,008 bytes. This task records the existing
 allocation behavior and does not optimize it.
+
+## C5 production promotion result
+
+Measured after the C5 production promotion on 2026-09-05 with Rust
+1.93.0, target `x86_64-apple-darwin`, release profile, manifest SHA-256
+`6e5864efc224bf31aaa849c2acce780f7790fe76a42e56af2361ab1c7efcaf2a`, and
+50,000 iterations over the same eight inputs:
+
+| Measurement             | Runtime-loaded | Standalone |
+| ----------------------- | -------------: | ---------: |
+| Load time               |        0.249 s |    0.295 s |
+| Lookups/second          |         29,354 |     22,678 |
+| Nanoseconds/lookup      |         34,067 |     44,096 |
+| Emission checksum       |     `8cc2e086` | `8cc2e086` |
+| Allocation calls/lookup |            129 |        129 |
+| Allocated bytes/lookup  |      6,750.375 |  6,750.375 |
+
+The full emission checksum remained `8cc2e086fc208425`. These eight
+inputs do not happen to exercise a C5-only emission, so the checksum
+only confirms unchanged behavior on this benchmark set; the exhaustive
+production/benchmark parity test separately exercises every C5 emission
+source.
+
+The artifact remained unchanged at 36,632,687 bytes. The standalone C5
+benchmark binary was 37,665,040 bytes, 32 bytes larger than the recorded
+C4 binary. A second run of the same binary measured 20,119
+runtime-loaded and 19,068 standalone lookups per second, so the absolute
+timing was unstable on this machine and does not establish a C5
+performance regression. Allocation behavior was identical to the C4
+checkpoint.

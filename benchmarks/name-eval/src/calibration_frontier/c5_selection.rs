@@ -16,10 +16,6 @@ const PRODUCT_FLOORS: [(&str, f64); 3] = [
 ];
 const C5_NAME: &str = "C5-balanced-controlled-calibration-v1";
 const C5_TRAINING_TARGET: f64 = 0.986;
-const C5_QUALITY_MIN: f64 = 0.70;
-const C5_RELIABILITY_MIN: f64 = 0.0;
-const C5_ROLE_MIN: f64 = 0.0;
-const C5_MARGIN_MIN: f64 = 0.50;
 const C5_CONFIG_SHA256: &str = "427a15afb5c79846f80506f29b8d138a8c6969a8513c1d1dacf0ae1e491678b6";
 
 #[derive(Clone)]
@@ -474,20 +470,24 @@ fn select_product_recommendation(candidates: &[ProductCandidate]) -> Option<&Pro
 
 fn frozen_c5_policy() -> Policy {
     Policy::Controlled {
-        quality: C5_QUALITY_MIN,
-        reliability: C5_RELIABILITY_MIN,
-        role: C5_ROLE_MIN,
-        margin: C5_MARGIN_MIN,
+        quality: ALGORITHM_C5.quality_min,
+        reliability: ALGORITHM_C5.reliability_min,
+        role: ALGORITHM_C5.role_signal_min,
+        margin: ALGORITHM_C5.multiple_candidate_margin_min,
     }
 }
 
 pub(super) fn frozen_c5_emits(row: &FeatureRow) -> bool {
-    frozen_c5_policy().emits(row)
+    row.c5_emits
 }
 
 fn frozen_c5_config() -> String {
     format!(
-        "schema=1;name={C5_NAME};family=controlled_c4;training_target={C5_TRAINING_TARGET:.17};quality={C5_QUALITY_MIN:.17};reliability={C5_RELIABILITY_MIN:.17};role={C5_ROLE_MIN:.17};margin={C5_MARGIN_MIN:.17}"
+        "schema=1;name={C5_NAME};family=controlled_c4;training_target={C5_TRAINING_TARGET:.17};quality={:.17};reliability={:.17};role={:.17};margin={:.17}",
+        ALGORITHM_C5.quality_min,
+        ALGORITHM_C5.reliability_min,
+        ALGORITHM_C5.role_signal_min,
+        ALGORITHM_C5.multiple_candidate_margin_min,
     )
 }
 
@@ -581,6 +581,11 @@ fn assert_frozen_c5(
         || evaluate_frozen_c5(validation_rows) != validation
     {
         return Err("frozen C5 implementation does not reproduce the selected policy".into());
+    }
+    for row in proxy_rows.iter().chain(validation_rows) {
+        if frozen_c5_policy().emits(row) != frozen_c5_emits(row) {
+            return Err("shared C5 decision differs from the historically selected policy".into());
+        }
     }
     assert_frozen_c5_configuration()
 }
@@ -1418,13 +1423,13 @@ mod tests {
             winner_present: true,
             vetoes_pass: true,
             decision_score: 0.5,
-            candidate_quality: C5_QUALITY_MIN,
+            candidate_quality: ALGORITHM_C5.quality_min,
             candidate_count: 1,
-            winner_margin: C5_MARGIN_MIN,
+            winner_margin: ALGORITHM_C5.multiple_candidate_margin_min,
             margin_signal: 1.0,
             role_llr: 0.0,
-            role_signal: C5_ROLE_MIN,
-            reliability: C5_RELIABILITY_MIN,
+            role_signal: ALGORITHM_C5.role_signal_min,
+            reliability: ALGORITHM_C5.reliability_min,
             alphabetic_length: 5,
             native: true,
             segmentation_mechanism: None,
@@ -1437,6 +1442,7 @@ mod tests {
             c31_emits: false,
             c4_emits: false,
             c4_source: C4EmissionSource::Abstain,
+            c5_emits: true,
             unhinted: None,
         }
     }
@@ -1520,14 +1526,15 @@ mod tests {
         assert!(policy.emits(&boundary));
 
         let mut low_quality = boundary.clone();
-        low_quality.candidate_quality = f64::from_bits(C5_QUALITY_MIN.to_bits() - 1);
+        low_quality.candidate_quality = f64::from_bits(ALGORITHM_C5.quality_min.to_bits() - 1);
         assert!(!policy.emits(&low_quality));
 
         let mut competing = boundary.clone();
         competing.candidate_count = 2;
-        competing.winner_margin = C5_MARGIN_MIN;
+        competing.winner_margin = ALGORITHM_C5.multiple_candidate_margin_min;
         assert!(policy.emits(&competing));
-        competing.winner_margin = f64::from_bits(C5_MARGIN_MIN.to_bits() - 1);
+        competing.winner_margin =
+            f64::from_bits(ALGORITHM_C5.multiple_candidate_margin_min.to_bits() - 1);
         assert!(!policy.emits(&competing));
 
         let mut vetoed = boundary.clone();
@@ -1565,7 +1572,9 @@ mod tests {
         c5_only_null.selected_matches = false;
 
         let mut abstained_correct = feature_row();
-        abstained_correct.candidate_quality = f64::from_bits(C5_QUALITY_MIN.to_bits() - 1);
+        abstained_correct.candidate_quality =
+            f64::from_bits(ALGORITHM_C5.quality_min.to_bits() - 1);
+        abstained_correct.c5_emits = false;
 
         let comparison = compare_c4_c5(&[
             c4_correct,

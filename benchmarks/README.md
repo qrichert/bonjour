@@ -14,8 +14,8 @@ external names-dataset country CSVs
   -> name-indexes / name-corpus-audit      representation and tail experiments
   -> name-clean-v1                         selected sanitation and 5/2 policy
   -> name-surname-v2                       selected global surname role evidence
-  -> name-eval                             independent A/B/C/C1/C2/C3/C3.1/C4 evaluation
-  -> root crate                            frozen C4 production implementation
+  -> name-eval                             independent A/B/C/C1/C2/C3/C3.1/C4/C5 evaluation
+  -> root crate                            frozen C5 production implementation
   -> name-runtime                          load/startup/inference benchmark
 ```
 
@@ -496,9 +496,9 @@ quantization, proxy distributions, per-generation results, redacted
 qualitative observations, and reproducibility hashes are recorded in
 [`name-eval/README.md`](name-eval/README.md).
 
-## Current production model: C4
+## Current production model: C5
 
-Production inference now uses exactly the evaluator's frozen C4 code.
+Production inference now uses exactly the evaluator's frozen C5 code.
 The display name is NFC/punctuation/whitespace-canonicalized for lookup
 while its original UTF-8 text is retained for output. Candidate lookup
 tries canonical, title-case, lowercase, and accent-folded variants,
@@ -553,11 +553,20 @@ dominant native winner:
 ```
 
 Both paths retain every frozen C3.1 veto and emit the already-selected
-winner. `greeting()` uses C4; `greeting_at(...)` deliberately applies
-only an explicit C3.1 score threshold, so passing the C3.1 default can
-differ from `greeting()`. The returned greeting is the corresponding
+winner.
+
+C5 keeps every C4 emission and adds one native, veto-free path:
+
+```text
+candidate_quality >= 0.70
+
+if candidate_count >= 2:
+    winner_margin >= 0.50
+```
+
+`greeting()` uses C5. The returned greeting is the corresponding
 contiguous span of the original input—not the canonical lookup string.
-Gender is returned only alongside a default C4 emission and only when
+Gender is returned only alongside a default C5 emission and only when
 its majority share meets the frozen `0.80` threshold. Otherwise the
 classifier returns `None`, and the caller safely retains the complete
 display name.
@@ -633,3 +642,11 @@ claim worldwide precision: C5's case-level Wilson 95% interval is
 97.09%-99.31%, and exact machine consensus excludes ambiguous or
 disagreed labels. Production remains on C4 until a separate promotion
 change. No V6 row-level result was produced or inspected.
+
+## C5 production promotion
+
+After the aggregate-only V6 checkpoint was committed, the default
+library and CLI policy was changed from frozen C4 to the already-frozen
+C5 implementation. The production and benchmark paths share that
+implementation. Candidate generation, ranking, evidence, vetoes,
+artifact bytes, and every historical classifier remain unchanged.

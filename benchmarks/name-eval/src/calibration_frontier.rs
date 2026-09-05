@@ -9,8 +9,9 @@ use name_eval::holdout::FrozenHoldout;
 
 use crate::artifact::EvidenceSource;
 use crate::classifier::{
-    ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4, ALGORITHM_C31, C4DecisionBreakdown, C4EmissionSource,
-    C31DecisionBreakdown, c4_decision_breakdown, c4_emitted_candidate, diagnose_role_inference,
+    ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4, ALGORITHM_C5, ALGORITHM_C31, C4DecisionBreakdown,
+    C4EmissionSource, C31DecisionBreakdown, c4_decision_breakdown, c4_emitted_candidate,
+    c5_decision_from_c4, c5_emitted_candidate, diagnose_role_inference,
 };
 use crate::dataset::{Case, Split, generate_cases};
 use crate::metrics::greeting_matches;
@@ -117,6 +118,7 @@ struct FeatureRow {
     c31_emits: bool,
     c4_emits: bool,
     c4_source: C4EmissionSource,
+    c5_emits: bool,
     unhinted: Option<UnhintedFeatures>,
 }
 
@@ -147,6 +149,7 @@ struct UnhintedFeatures {
     vetoes_pass: bool,
     c31_emits: bool,
     c4_emits: bool,
+    c5_emits: bool,
     winner_changed: bool,
 }
 
@@ -603,6 +606,7 @@ fn feature_row_from_decision(
     unhinted: Option<UnhintedFeatures>,
 ) -> FeatureRow {
     let breakdown = &decision.c31;
+    let c5 = c5_decision_from_c4(decision.clone(), ALGORITHM_C5);
     let winner = breakdown.winner.as_ref();
     let selected = winner.map(|winner| winner.greeting_candidate.as_str());
     let expected_greeting_present = expected_greeting.is_some();
@@ -635,6 +639,7 @@ fn feature_row_from_decision(
         c31_emits: winner.is_some() && breakdown.final_score >= ALGORITHM_C2.threshold,
         c4_emits: c4_emitted_candidate(decision).is_some(),
         c4_source: decision.emission_source,
+        c5_emits: c5_emitted_candidate(&c5).is_some(),
         unhinted,
     }
 }
@@ -674,6 +679,7 @@ fn unhinted_features(
         vetoes_pass: row.vetoes_pass,
         c31_emits: row.c31_emits,
         c4_emits: row.c4_emits,
+        c5_emits: row.c5_emits,
         winner_changed: winner_changed
             || hinted.c31.winner.is_none() != decision.c31.winner.is_none(),
     }
@@ -2039,6 +2045,7 @@ fn row_without_hint(row: &FeatureRow) -> FeatureRow {
     result.vetoes_pass = unhinted.vetoes_pass;
     result.c31_emits = unhinted.c31_emits;
     result.c4_emits = unhinted.c4_emits;
+    result.c5_emits = unhinted.c5_emits;
     result
 }
 
@@ -2744,6 +2751,7 @@ mod tests {
             c31_emits: false,
             c4_emits: false,
             c4_source: C4EmissionSource::Abstain,
+            c5_emits: false,
             unhinted: None,
         }
     }

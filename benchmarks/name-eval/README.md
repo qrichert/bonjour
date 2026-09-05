@@ -1946,3 +1946,16 @@ aggregate `sealed_c4_c5_summary.csv` has SHA-256
 `4613e4f2933043e1a90f4af224045b6b56db83c2bb6b27a156f50c9966e282f2`. V6
 remains sealed and uninspected. Any future row-level diagnosis would
 require a separate explicit decision to spend it.
+
+### C5 production promotion
+
+After the sealed V6 checkpoint above was committed, a separate change
+promoted the already-frozen C5 policy to the default library and CLI
+behavior. Production and this evaluator now use the same canonical C5
+decision implementation. Existing C4 emissions retain their historical
+`c3_1`, `sole_native`, or `dominant_winner` provenance; `c5` identifies
+only an additional emission admitted by C5.
+
+The promotion did not inspect V6 rows, alter C5's configuration, change
+candidate generation or ranking, modify vetoes, or change the artifact.
+C2, C3, C3.1, and C4 remain frozen historical benchmark modes.

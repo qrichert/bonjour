@@ -23,39 +23,10 @@ mod lexical;
 
 pub use artifact::GenderHint;
 
-/// Frozen score threshold used by C3.1 and explicit score-only overrides.
-pub const DEFAULT_GREETING_THRESHOLD: f64 = classifier::ALGORITHM_C2.threshold;
-
-/// Invalid greeting threshold supplied by a caller.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct InvalidThreshold {
-    threshold: f64,
-}
-
-impl InvalidThreshold {
-    /// Return the rejected threshold.
-    #[must_use]
-    pub fn threshold(self) -> f64 {
-        self.threshold
-    }
-}
-
-impl fmt::Display for InvalidThreshold {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "greeting threshold must be a finite value in 0.0..=1.0, got {}",
-            self.threshold
-        )
-    }
-}
-
-impl Error for InvalidThreshold {}
-
-/// Production C4 emission path selected for an inference.
+/// Production C5 emission path selected for an inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum EmissionSource {
-    /// The frozen C3.1 score crossed its frozen threshold.
+    /// The frozen C3.1 score crossed its frozen decision boundary.
     #[serde(rename = "c3_1")]
     C31,
     /// The strict sole-native relational rule emitted the winner.
@@ -64,18 +35,22 @@ pub enum EmissionSource {
     /// The dominant-native-winner relational rule emitted the winner.
     #[serde(rename = "dominant_winner")]
     DominantWinner,
-    /// No frozen C4 emission path passed.
+    /// The balanced controlled-calibration rule emitted the winner.
+    #[serde(rename = "c5")]
+    C5,
+    /// No frozen C5 emission path passed.
     #[serde(rename = "abstain")]
     Abstain,
 }
 
 impl EmissionSource {
-    fn from_internal(source: classifier::C4EmissionSource) -> Self {
+    fn from_internal(source: classifier::C5EmissionSource) -> Self {
         match source {
-            classifier::C4EmissionSource::C31 => Self::C31,
-            classifier::C4EmissionSource::SoleNative => Self::SoleNative,
-            classifier::C4EmissionSource::DominantWinner => Self::DominantWinner,
-            classifier::C4EmissionSource::Abstain => Self::Abstain,
+            classifier::C5EmissionSource::C31 => Self::C31,
+            classifier::C5EmissionSource::SoleNative => Self::SoleNative,
+            classifier::C5EmissionSource::DominantWinner => Self::DominantWinner,
+            classifier::C5EmissionSource::C5 => Self::C5,
+            classifier::C5EmissionSource::Abstain => Self::Abstain,
         }
     }
 
@@ -84,14 +59,14 @@ impl EmissionSource {
     }
 }
 
-/// One production C4 inference over a display name.
+/// One production C5 inference over a display name.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Inference<'a> {
-    /// Best exact pre-threshold source-span candidate.
+    /// Best exact source-span candidate before the emission decision.
     pub greeting_name: Option<&'a str>,
-    /// Pre-threshold C3.1 decision score, not a calibrated probability.
+    /// Frozen C3.1 decision score, not a calibrated probability.
     pub decision_score: f64,
-    /// Frozen C4 path governing the default production decision.
+    /// Frozen C5 path governing the default production decision.
     pub emission_source: EmissionSource,
     /// Conservatively gated gender evidence for the candidate.
     pub gender_hint: Option<GenderHint>,
@@ -100,30 +75,13 @@ pub struct Inference<'a> {
 }
 
 impl<'a> Inference<'a> {
-    /// Select the greeting candidate using frozen production C4.
+    /// Select the greeting candidate using frozen production C5.
     #[must_use]
     pub fn greeting(&self) -> Option<&'a str> {
         self.emission_source
             .emits()
             .then_some(self.greeting_name)
             .flatten()
-    }
-
-    /// Select the candidate using an explicit C3.1 score threshold.
-    ///
-    /// This is a score-only override and deliberately does not apply C4's
-    /// categorical relational paths. Consequently,
-    /// `greeting_at(DEFAULT_GREETING_THRESHOLD)` can differ from [`Self::greeting`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidThreshold`] unless `threshold` is finite and within
-    /// `0.0..=1.0`.
-    pub fn greeting_at(&self, threshold: f64) -> Result<Option<&'a str>, InvalidThreshold> {
-        validate_threshold(threshold)?;
-        Ok(self
-            .greeting_name
-            .filter(|_| self.decision_score >= threshold))
     }
 }
 
@@ -204,16 +162,50 @@ pub struct RelationalRuleTrace {
     pub passed: bool,
 }
 
-/// Diagnostic trace of the frozen production C4 decision.
+/// Conditions evaluated for the frozen C5 controlled-calibration path.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ControlledRuleTrace {
+    /// Whether frozen C4 abstained before this additive path was considered.
+    pub c4_abstained: bool,
+    /// Whether the selected candidate has native, non-segmented provenance.
+    pub native_candidate: bool,
+    /// Number of viable corpus-supported candidates.
+    pub candidate_count: usize,
+    /// Whether at least one viable candidate was selected.
+    pub candidate_count_pass: bool,
+    /// Minimum candidate-ranking quality required by C5.
+    pub candidate_quality_min: f64,
+    /// Whether candidate-ranking quality passed its inclusive boundary.
+    pub candidate_quality_pass: bool,
+    /// Minimum raw winner margin for multiple candidates, or `None` for one.
+    pub winner_margin_min: Option<f64>,
+    /// Whether the raw winner margin passed its inclusive boundary.
+    pub winner_margin_pass: bool,
+    /// Frozen minimum evidence reliability.
+    pub reliability_min: f64,
+    /// Whether reliability passed its inclusive boundary.
+    pub reliability_pass: bool,
+    /// Frozen minimum given-name role signal.
+    pub role_signal_min: f64,
+    /// Whether the role signal passed its inclusive boundary.
+    pub role_signal_pass: bool,
+    /// Whether every frozen C3.1 veto passed.
+    pub vetoes_pass: bool,
+    /// Whether this complete additive path passed.
+    pub passed: bool,
+}
+
+/// Diagnostic trace of the frozen production C5 decision.
 ///
 /// Winner-only values are absent when no candidate was selected, including a
 /// hard organization-marker abstention. The separately ranked candidates may
 /// still contain counterfactual entries in that case.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct DecisionTrace {
-    /// Frozen C4 path governing the default production decision.
+    /// Frozen C5 path governing the default production decision.
     pub emission_source: EmissionSource,
-    /// Number of viable corpus-supported candidates considered by C4.
+    /// Number of viable corpus-supported candidates considered by C5.
     pub candidate_count: usize,
     /// Ranking score of the selected candidate.
     pub candidate_quality: Option<f64>,
@@ -249,28 +241,22 @@ pub struct DecisionTrace {
     pub sole_native: RelationalRuleTrace,
     /// Dominant-native-winner relational path and every frozen condition.
     pub dominant_winner: RelationalRuleTrace,
+    /// Balanced controlled-calibration path and every frozen condition.
+    pub c5: ControlledRuleTrace,
 }
 
-/// Unthresholded inference together with every eligible candidate.
+/// Inference diagnostics together with every eligible candidate.
 ///
 /// Candidate output is diagnostic: inclusion or scorer support does not imply
 /// that a candidate is safe to use as a greeting.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DetailedInference<'a> {
-    /// Selected pre-threshold candidate, unchanged C3.1 score, and C4 result.
+    /// Selected pre-emission candidate, unchanged C3.1 score, and C5 result.
     pub inference: Inference<'a>,
     /// Existing inputs and arithmetic behind the final decision score.
     pub decision: DecisionTrace,
     /// Ranked candidates followed by unscored candidates in source order.
     pub candidates: Vec<CandidateScore<'a>>,
-}
-
-fn validate_threshold(threshold: f64) -> Result<(), InvalidThreshold> {
-    if threshold.is_finite() && (0.0..=1.0).contains(&threshold) {
-        Ok(())
-    } else {
-        Err(InvalidThreshold { threshold })
-    }
 }
 
 /// Stable category for artifact-loading failures.
@@ -392,7 +378,7 @@ impl Classifier {
         embedded::artifact().map(|artifact| Self { artifact })
     }
 
-    /// Infer the best exact greeting candidate from `display_name` using C4.
+    /// Infer the best exact greeting candidate from `display_name` using C5.
     #[must_use]
     pub fn infer<'a>(
         &self,
@@ -412,12 +398,12 @@ impl Classifier {
         locale_hint: Option<&str>,
         gender_hint: Option<GenderHint>,
     ) -> Inference<'a> {
-        let (diagnostic, raw, c4) =
+        let (diagnostic, raw, c5) =
             self.diagnose_with_gender(display_name, country_hint, locale_hint, gender_hint);
-        inference_from_diagnostic(display_name, &diagnostic, &raw, &c4)
+        inference_from_diagnostic(display_name, &diagnostic, &raw, &c5)
     }
 
-    /// Infer and return every ranked C4 candidate for diagnostics.
+    /// Infer and return every ranked C5 candidate for diagnostics.
     #[must_use]
     pub fn infer_detailed<'a>(
         &self,
@@ -428,7 +414,7 @@ impl Classifier {
         self.infer_detailed_with_gender(display_name, country_hint, locale_hint, None)
     }
 
-    /// Infer with a gender hint and return every ranked C4 candidate.
+    /// Infer with a gender hint and return every ranked C5 candidate.
     #[must_use]
     pub fn infer_detailed_with_gender<'a>(
         &self,
@@ -437,11 +423,11 @@ impl Classifier {
         locale_hint: Option<&str>,
         gender_hint: Option<GenderHint>,
     ) -> DetailedInference<'a> {
-        let (diagnostic, raw, c4) =
+        let (diagnostic, raw, c5) =
             self.diagnose_with_gender(display_name, country_hint, locale_hint, gender_hint);
-        let decision = decision_trace(&c4);
+        let decision = decision_trace(&c5);
         let candidates = candidate_scores(display_name, &diagnostic.candidates);
-        let inference = inference_from_diagnostic(display_name, &diagnostic, &raw, &c4);
+        let inference = inference_from_diagnostic(display_name, &diagnostic, &raw, &c5);
         DetailedInference {
             inference,
             decision,
@@ -458,7 +444,7 @@ impl Classifier {
     ) -> (
         classifier::RoleInferenceDiagnostic,
         classifier::RawInference,
-        classifier::C4DecisionBreakdown,
+        classifier::C5DecisionBreakdown,
     ) {
         let diagnostic = classifier::diagnose_role_inference(
             &self.artifact,
@@ -467,23 +453,24 @@ impl Classifier {
             country_hint,
             locale_hint,
         );
-        let c4 = classifier::c4_decision_breakdown(
+        let c5 = classifier::c5_decision_breakdown(
             &diagnostic,
             classifier::ALGORITHM_C2,
             classifier::ALGORITHM_C31,
             classifier::ALGORITHM_C4,
+            classifier::ALGORITHM_C5,
         );
         let mut raw = diagnostic.inference.clone();
-        raw.confidence = c4.c31.final_score;
+        raw.confidence = c5.c4.c31.final_score;
         if let Some(gender_hint) = gender_hint {
             classifier::apply_gender_hint(&diagnostic, &mut raw, gender_hint);
         }
-        (diagnostic, raw, c4)
+        (diagnostic, raw, c5)
     }
 }
 
-fn decision_trace(decision: &classifier::C4DecisionBreakdown) -> DecisionTrace {
-    let breakdown = &decision.c31;
+fn decision_trace(decision: &classifier::C5DecisionBreakdown) -> DecisionTrace {
+    let breakdown = &decision.c4.c31;
     let winner = breakdown.winner.as_ref();
     DecisionTrace {
         emission_source: EmissionSource::from_internal(decision.emission_source),
@@ -515,8 +502,28 @@ fn decision_trace(decision: &classifier::C4DecisionBreakdown) -> DecisionTrace {
             ampersand: breakdown.ampersand,
             candidate_too_short: breakdown.candidate_too_short,
         },
-        sole_native: relational_rule_trace(&decision.sole_native),
-        dominant_winner: relational_rule_trace(&decision.dominant_winner),
+        sole_native: relational_rule_trace(&decision.c4.sole_native),
+        dominant_winner: relational_rule_trace(&decision.c4.dominant_winner),
+        c5: controlled_rule_trace(&decision.controlled),
+    }
+}
+
+fn controlled_rule_trace(rule: &classifier::C5RuleBreakdown) -> ControlledRuleTrace {
+    ControlledRuleTrace {
+        c4_abstained: rule.c4_abstained,
+        native_candidate: rule.native_candidate,
+        candidate_count: rule.candidate_count,
+        candidate_count_pass: rule.candidate_count_pass,
+        candidate_quality_min: rule.candidate_quality_min,
+        candidate_quality_pass: rule.candidate_quality_pass,
+        winner_margin_min: rule.winner_margin_min,
+        winner_margin_pass: rule.winner_margin_pass,
+        reliability_min: rule.reliability_min,
+        reliability_pass: rule.reliability_pass,
+        role_signal_min: rule.role_signal_min,
+        role_signal_pass: rule.role_signal_pass,
+        vetoes_pass: rule.vetoes_pass,
+        passed: rule.passed,
     }
 }
 
@@ -542,7 +549,7 @@ fn inference_from_diagnostic<'a>(
     display_name: &'a str,
     diagnostic: &classifier::RoleInferenceDiagnostic,
     raw: &classifier::RawInference,
-    c4: &classifier::C4DecisionBreakdown,
+    c5: &classifier::C5DecisionBreakdown,
 ) -> Inference<'a> {
     let greeting_name = raw
         .greeting_candidate
@@ -550,7 +557,7 @@ fn inference_from_diagnostic<'a>(
         .then(|| source_greeting_span(display_name, diagnostic.candidates.first()))
         .flatten();
     debug_assert_eq!(raw.greeting_candidate.is_some(), greeting_name.is_some());
-    let emission_source = EmissionSource::from_internal(c4.emission_source);
+    let emission_source = EmissionSource::from_internal(c5.emission_source);
     let gender_emitted =
         greeting_name.is_some() && emission_source.emits() && raw.gender_hint.is_some();
 
@@ -672,13 +679,13 @@ mod tests {
         assert_value_traits::<CandidateSignals>();
         assert_value_traits::<DecisionContributions>();
         assert_value_traits::<RelationalRuleTrace>();
+        assert_value_traits::<ControlledRuleTrace>();
         assert_value_traits::<DecisionTrace>();
         assert_value_traits::<DecisionVetoes>();
         assert_detailed_traits::<DetailedInference<'static>>();
         assert_enum_traits::<EmissionSource>();
         assert_enum_traits::<GenderHint>();
         assert_enum_traits::<LoadErrorKind>();
-        assert_error_traits::<InvalidThreshold>();
         assert_error_traits::<LoadError>();
     }
 
@@ -697,42 +704,33 @@ mod tests {
             "\"dominant_winner\""
         );
         assert_eq!(
+            serde_json::to_string(&EmissionSource::C5).unwrap(),
+            "\"c5\""
+        );
+        assert_eq!(
             serde_json::to_string(&EmissionSource::Abstain).unwrap(),
             "\"abstain\""
         );
     }
 
     #[test]
-    fn greeting_threshold_is_configurable_and_validated() {
+    fn greeting_uses_the_production_emission_source() {
         let inference = Inference {
             greeting_name: Some("Quentin"),
-            decision_score: DEFAULT_GREETING_THRESHOLD,
-            emission_source: EmissionSource::C31,
+            decision_score: 0.5,
+            emission_source: EmissionSource::C5,
             gender_hint: Some(GenderHint::Male),
             gender_confidence: 0.9,
         };
         assert_eq!(inference.greeting(), Some("Quentin"));
-        assert_eq!(inference.greeting_at(0.0).unwrap(), Some("Quentin"));
-        assert_eq!(inference.greeting_at(1.0).unwrap(), None);
-
-        for threshold in [f64::NAN, f64::NEG_INFINITY, -0.1, 1.1, f64::INFINITY] {
-            let error = inference.greeting_at(threshold).unwrap_err();
-            assert_eq!(error.threshold().to_bits(), threshold.to_bits());
-            assert!(error.to_string().contains("finite value in 0.0..=1.0"));
-        }
-
-        let relational = Inference {
+        let abstention = Inference {
             greeting_name: Some("Quentin"),
-            decision_score: DEFAULT_GREETING_THRESHOLD - 0.1,
-            emission_source: EmissionSource::SoleNative,
+            decision_score: 1.0,
+            emission_source: EmissionSource::Abstain,
             gender_hint: None,
             gender_confidence: 0.0,
         };
-        assert_eq!(relational.greeting(), Some("Quentin"));
-        assert_eq!(
-            relational.greeting_at(DEFAULT_GREETING_THRESHOLD).unwrap(),
-            None
-        );
+        assert_eq!(abstention.greeting(), None);
     }
 
     #[test]
@@ -784,10 +782,6 @@ mod tests {
 
         assert_eq!(detailed.inference, lightweight);
         assert_eq!(detailed.inference.greeting(), lightweight.greeting());
-        assert_eq!(
-            detailed.inference.greeting_at(0.5).unwrap(),
-            lightweight.greeting_at(0.5).unwrap()
-        );
         assert!(!detailed.candidates.is_empty());
         assert!(
             detailed
@@ -827,6 +821,7 @@ mod tests {
         assert!(detailed.decision.vetoes.strong_organization_marker);
         assert!(!detailed.decision.sole_native.vetoes_pass);
         assert!(!detailed.decision.dominant_winner.vetoes_pass);
+        assert!(!detailed.decision.c5.vetoes_pass);
         assert!(!detailed.candidates.is_empty());
     }
 
@@ -846,6 +841,7 @@ mod tests {
         assert_eq!(segmented.decision.segmented_candidate, Some(true));
         assert!(!segmented.decision.sole_native.native_candidate);
         assert!(!segmented.decision.dominant_winner.native_candidate);
+        assert!(!segmented.decision.c5.native_candidate);
         assert_eq!(
             segmented.decision.segmentation_mechanism,
             Some("lower_to_upper")
@@ -890,7 +886,7 @@ mod tests {
 
     #[cfg(all(feature = "standalone", bonjour_embedded_data))]
     #[test]
-    fn production_c4_default_and_explicit_score_threshold_are_distinct() {
+    fn production_c5_preserves_c4_emission_provenance() {
         let classifier = Classifier::standalone().unwrap();
         let detailed = classifier.infer_detailed("Arthur Field", None, None);
 
@@ -900,15 +896,9 @@ mod tests {
             EmissionSource::DominantWinner
         );
         assert_eq!(detailed.inference.greeting(), Some("Arthur"));
-        assert_eq!(
-            detailed
-                .inference
-                .greeting_at(DEFAULT_GREETING_THRESHOLD)
-                .unwrap(),
-            None
-        );
         assert!(detailed.decision.dominant_winner.passed);
         assert!(!detailed.decision.sole_native.passed);
+        assert!(!detailed.decision.c5.passed);
         assert_eq!(detailed.inference.gender_hint, Some(GenderHint::Male));
     }
 

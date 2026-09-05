@@ -43,6 +43,8 @@ use classifier::{
     c4_decision_breakdown, c4_emitted_candidate, c31_inference_from_diagnostic,
     candidate_diagnostics, diagnose_role_inference, infer_prethreshold,
 };
+#[cfg(test)]
+use classifier::{ALGORITHM_C5, C5EmissionSource, c5_decision_from_c4};
 use corpus_audit::{LexicalAudit, audit_clean_v1};
 use dataset::{
     C0_TEST_GENERATOR_SEED, C0_TEST_SHA256, Case, DEV_TARGET, FRESH_TEST_GENERATOR_SEED,
@@ -4481,7 +4483,7 @@ mod sealed_report_tests {
 }
 
 #[cfg(test)]
-mod production_c4_parity_tests {
+mod production_c5_parity_tests {
     use super::*;
 
     #[derive(Default)]
@@ -4489,11 +4491,12 @@ mod production_c4_parity_tests {
         c31: usize,
         sole_native: usize,
         dominant_winner: usize,
+        c5: usize,
         abstain: usize,
     }
 
     #[test]
-    fn production_c4_matches_benchmark_on_regression_dev_and_validation() {
+    fn production_c5_matches_benchmark_on_regression_dev_and_validation() {
         let Some(directory) = std::env::var_os("BONJOUR_TEST_DATA_DIR").map(PathBuf::from) else {
             return;
         };
@@ -4516,9 +4519,10 @@ mod production_c4_parity_tests {
                 diagnose_role_inference(&corpus, ALGORITHM_C3, &case.input, country, locale);
             let c31 = c31_inference_from_diagnostic(&diagnostic, ALGORITHM_C2, ALGORITHM_C31);
             let c4 = c4_decision_breakdown(&diagnostic, ALGORITHM_C2, ALGORITHM_C31, ALGORITHM_C4);
+            let c5 = c5_decision_from_c4(c4, ALGORITHM_C5);
             let production = production.infer_detailed(&case.input, country, locale);
-            let expected_source = source_winner(&case.input, &diagnostic, &c4);
-            let expected_emission = (c4.emission_source != C4EmissionSource::Abstain)
+            let expected_source = source_winner(&case.input, &diagnostic, &c5);
+            let expected_emission = (c5.emission_source != C5EmissionSource::Abstain)
                 .then_some(expected_source)
                 .flatten();
 
@@ -4534,23 +4538,14 @@ mod production_c4_parity_tests {
                 case.id
             );
             assert_eq!(
-                production
-                    .inference
-                    .greeting_at(bonjour::DEFAULT_GREETING_THRESHOLD)
-                    .unwrap(),
-                c31.greeting_at(ALGORITHM_C2.threshold).and(expected_source),
-                "{}",
-                case.id,
-            );
-            assert_eq!(
                 production.inference.decision_score.to_bits(),
-                c4.c31.final_score.to_bits(),
+                c5.c4.c31.final_score.to_bits(),
                 "{}",
                 case.id,
             );
             assert_eq!(
                 production.inference.emission_source,
-                public_emission_source(c4.emission_source),
+                public_emission_source(c5.emission_source),
                 "{}",
                 case.id,
             );
@@ -4570,44 +4565,47 @@ mod production_c4_parity_tests {
                 "{}",
                 case.id,
             );
-            assert_decision_trace(&production.decision, &c4, &case.id);
+            assert_decision_trace(&production.decision, &c5, &case.id);
 
-            match c4.emission_source {
-                C4EmissionSource::C31 => counts.c31 += 1,
-                C4EmissionSource::SoleNative => counts.sole_native += 1,
-                C4EmissionSource::DominantWinner => counts.dominant_winner += 1,
-                C4EmissionSource::Abstain => counts.abstain += 1,
+            match c5.emission_source {
+                C5EmissionSource::C31 => counts.c31 += 1,
+                C5EmissionSource::SoleNative => counts.sole_native += 1,
+                C5EmissionSource::DominantWinner => counts.dominant_winner += 1,
+                C5EmissionSource::C5 => counts.c5 += 1,
+                C5EmissionSource::Abstain => counts.abstain += 1,
             }
         }
 
         assert!(counts.c31 > 0);
         assert!(counts.sole_native > 0);
         assert!(counts.dominant_winner > 0);
+        assert!(counts.c5 > 0);
         assert!(counts.abstain > 0);
     }
 
     fn source_winner<'a>(
         input: &'a str,
         diagnostic: &classifier::RoleInferenceDiagnostic,
-        c4: &classifier::C4DecisionBreakdown,
+        c5: &classifier::C5DecisionBreakdown,
     ) -> Option<&'a str> {
-        c4.c31.winner.as_ref()?;
+        c5.c4.c31.winner.as_ref()?;
         let candidate = diagnostic.candidates.first()?;
         input.get(candidate.byte_start?..candidate.byte_end?)
     }
 
-    fn public_emission_source(source: C4EmissionSource) -> bonjour::EmissionSource {
+    fn public_emission_source(source: C5EmissionSource) -> bonjour::EmissionSource {
         match source {
-            C4EmissionSource::C31 => bonjour::EmissionSource::C31,
-            C4EmissionSource::SoleNative => bonjour::EmissionSource::SoleNative,
-            C4EmissionSource::DominantWinner => bonjour::EmissionSource::DominantWinner,
-            C4EmissionSource::Abstain => bonjour::EmissionSource::Abstain,
+            C5EmissionSource::C31 => bonjour::EmissionSource::C31,
+            C5EmissionSource::SoleNative => bonjour::EmissionSource::SoleNative,
+            C5EmissionSource::DominantWinner => bonjour::EmissionSource::DominantWinner,
+            C5EmissionSource::C5 => bonjour::EmissionSource::C5,
+            C5EmissionSource::Abstain => bonjour::EmissionSource::Abstain,
         }
     }
 
     fn assert_decision_trace(
         public: &bonjour::DecisionTrace,
-        internal: &classifier::C4DecisionBreakdown,
+        internal: &classifier::C5DecisionBreakdown,
         case_id: &str,
     ) {
         assert_eq!(
@@ -4618,14 +4616,78 @@ mod production_c4_parity_tests {
         assert_eq!(
             public.candidate_count,
             internal
+                .c4
                 .c31
                 .winner
                 .as_ref()
                 .map_or(0, |winner| winner.candidate_count),
             "{case_id}",
         );
-        assert_rule_trace(&public.sole_native, &internal.sole_native, case_id);
-        assert_rule_trace(&public.dominant_winner, &internal.dominant_winner, case_id);
+        assert_rule_trace(&public.sole_native, &internal.c4.sole_native, case_id);
+        assert_rule_trace(
+            &public.dominant_winner,
+            &internal.c4.dominant_winner,
+            case_id,
+        );
+        assert_c5_rule_trace(&public.c5, &internal.controlled, case_id);
+    }
+
+    fn assert_c5_rule_trace(
+        public: &bonjour::ControlledRuleTrace,
+        internal: &classifier::C5RuleBreakdown,
+        case_id: &str,
+    ) {
+        assert_eq!(public.c4_abstained, internal.c4_abstained, "{case_id}");
+        assert_eq!(
+            public.native_candidate, internal.native_candidate,
+            "{case_id}"
+        );
+        assert_eq!(
+            public.candidate_count, internal.candidate_count,
+            "{case_id}"
+        );
+        assert_eq!(
+            public.candidate_count_pass, internal.candidate_count_pass,
+            "{case_id}"
+        );
+        assert_eq!(
+            public.candidate_quality_min.to_bits(),
+            internal.candidate_quality_min.to_bits(),
+            "{case_id}"
+        );
+        assert_eq!(
+            public.candidate_quality_pass, internal.candidate_quality_pass,
+            "{case_id}"
+        );
+        assert_eq!(
+            public.winner_margin_min.map(f64::to_bits),
+            internal.winner_margin_min.map(f64::to_bits),
+            "{case_id}"
+        );
+        assert_eq!(
+            public.winner_margin_pass, internal.winner_margin_pass,
+            "{case_id}"
+        );
+        assert_eq!(
+            public.reliability_min.to_bits(),
+            internal.reliability_min.to_bits(),
+            "{case_id}"
+        );
+        assert_eq!(
+            public.reliability_pass, internal.reliability_pass,
+            "{case_id}"
+        );
+        assert_eq!(
+            public.role_signal_min.to_bits(),
+            internal.role_signal_min.to_bits(),
+            "{case_id}"
+        );
+        assert_eq!(
+            public.role_signal_pass, internal.role_signal_pass,
+            "{case_id}"
+        );
+        assert_eq!(public.vetoes_pass, internal.vetoes_pass, "{case_id}");
+        assert_eq!(public.passed, internal.passed, "{case_id}");
     }
 
     fn assert_rule_trace(

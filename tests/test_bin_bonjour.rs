@@ -11,7 +11,7 @@ fn help() {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "\
-usage: bonjour [--data-dir=PATH] [--country=XX] [--gender=F|M] [--locale=LOCALE] [--threshold=FLOAT | --json] <display name>
+usage: bonjour [--data-dir=PATH] [--country=XX] [--gender=F|M] [--locale=LOCALE] [--json] <display name>
 
 Arguments:
   <display name>        Display name to inspect.
@@ -21,8 +21,7 @@ Options:
   --country=<XX>        Two-letter country hint.
   --gender=<F|M>        Gender hint.
   --locale=<LOCALE>     Locale used as country fallback.
-  --threshold=<FLOAT>   Override C4 with a C3.1 score threshold (C3.1 default: 0.7897588240573696).
-  --json                Print the unthresholded inference as JSON.
+  --json                Print detailed inference as JSON.
   -h, --help            Show this message and exit.
   -V, --version         Show the version and exit.
 "
@@ -56,21 +55,14 @@ fn malformed_invocation_uses_exit_two() {
 }
 
 #[test]
-fn invalid_and_conflicting_threshold_options_use_exit_two() {
-    for arguments in [
-        vec!["--threshold=", "Quentin Richert"],
-        vec!["--threshold=NaN", "Quentin Richert"],
-        vec!["--threshold=inf", "Quentin Richert"],
-        vec!["--threshold=-0.1", "Quentin Richert"],
-        vec!["--threshold=1.1", "Quentin Richert"],
-        vec!["--threshold=0.7", "--threshold=0.8", "Quentin Richert"],
-        vec!["--json", "--threshold=0.8", "Quentin Richert"],
-    ] {
-        let output = Command::new(BONJOUR).args(arguments).output().unwrap();
-        assert_eq!(output.status.code(), Some(2));
-        assert!(output.stdout.is_empty());
-        assert!(!output.stderr.is_empty());
-    }
+fn removed_threshold_option_is_rejected() {
+    let output = Command::new(BONJOUR)
+        .args(["--threshold=0.8", "Quentin Richert"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown option"));
 }
 
 #[cfg(not(feature = "standalone"))]

@@ -430,6 +430,14 @@ pub struct C4EmissionConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct C5EmissionConfig {
+    pub quality_min: f64,
+    pub reliability_min: f64,
+    pub role_signal_min: f64,
+    pub multiple_candidate_margin_min: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecisionContributions {
     pub candidate_quality: f64,
     pub winner_margin: f64,
@@ -504,6 +512,57 @@ pub struct C4DecisionBreakdown {
     pub dominant_winner: C4RuleBreakdown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum C5EmissionSource {
+    C31,
+    SoleNative,
+    DominantWinner,
+    C5,
+    Abstain,
+}
+
+impl C5EmissionSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::C31 => "c3_1",
+            Self::SoleNative => "sole_native",
+            Self::DominantWinner => "dominant_winner",
+            Self::C5 => "c5",
+            Self::Abstain => "abstain",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct C5RuleBreakdown {
+    pub c4_abstained: bool,
+    pub native_candidate: bool,
+    pub candidate_count: usize,
+    pub candidate_count_pass: bool,
+    pub candidate_quality: Option<f64>,
+    pub candidate_quality_min: f64,
+    pub candidate_quality_pass: bool,
+    pub winner_margin: Option<f64>,
+    pub winner_margin_min: Option<f64>,
+    pub winner_margin_pass: bool,
+    pub reliability: Option<f64>,
+    pub reliability_min: f64,
+    pub reliability_pass: bool,
+    pub role_signal: Option<f64>,
+    pub role_signal_min: f64,
+    pub role_signal_pass: bool,
+    pub vetoes_pass: bool,
+    pub passed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct C5DecisionBreakdown {
+    pub c4: C4DecisionBreakdown,
+    pub emission_source: C5EmissionSource,
+    pub controlled: C5RuleBreakdown,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct C2ScoreBreakdown {
     margin_signal: f64,
@@ -544,6 +603,15 @@ pub const ALGORITHM_C4: C4EmissionConfig = C4EmissionConfig {
     dominant_reliability_min: 0.75,
     dominant_role_signal_min: 0.40,
     dominant_winner_margin_min: 0.50,
+};
+
+/// Frozen after cross-generation selection over spent `REAL_PROXY_V1` through
+/// `REAL_PROXY_V5`, then independently validated on untouched `REAL_PROXY_V6`.
+pub const ALGORITHM_C5: C5EmissionConfig = C5EmissionConfig {
+    quality_min: 0.70,
+    reliability_min: 0.0,
+    role_signal_min: 0.0,
+    multiple_candidate_margin_min: 0.50,
 };
 
 pub fn infer_prethreshold(
@@ -1660,6 +1728,112 @@ fn c31_vetoes_pass(c31: &C31DecisionBreakdown) -> bool {
         && !c31.candidate_too_short
 }
 
+pub fn c5_decision_breakdown(
+    diagnostic: &RoleInferenceDiagnostic,
+    c2_config: C2EmissionConfig,
+    c31_config: C31EmissionConfig,
+    c4_config: C4EmissionConfig,
+    c5_config: C5EmissionConfig,
+) -> C5DecisionBreakdown {
+    debug_assert!(c5_config_is_valid(c5_config));
+    let c4 = c4_decision_breakdown(diagnostic, c2_config, c31_config, c4_config);
+    c5_decision_from_c4(c4, c5_config)
+}
+
+pub fn c5_emitted_candidate(decision: &C5DecisionBreakdown) -> Option<&str> {
+    (decision.emission_source != C5EmissionSource::Abstain)
+        .then(|| {
+            decision
+                .c4
+                .c31
+                .winner
+                .as_ref()
+                .map(|winner| winner.greeting_candidate.as_str())
+        })
+        .flatten()
+}
+
+pub fn c5_config_is_valid(config: C5EmissionConfig) -> bool {
+    [
+        config.quality_min,
+        config.reliability_min,
+        config.role_signal_min,
+        config.multiple_candidate_margin_min,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+}
+
+pub fn c5_decision_from_c4(
+    c4: C4DecisionBreakdown,
+    config: C5EmissionConfig,
+) -> C5DecisionBreakdown {
+    debug_assert!(c5_config_is_valid(config));
+    let controlled = c5_rule_breakdown(&c4, config);
+    let emission_source = match c4.emission_source {
+        C4EmissionSource::C31 => C5EmissionSource::C31,
+        C4EmissionSource::SoleNative => C5EmissionSource::SoleNative,
+        C4EmissionSource::DominantWinner => C5EmissionSource::DominantWinner,
+        C4EmissionSource::Abstain if controlled.passed => C5EmissionSource::C5,
+        C4EmissionSource::Abstain => C5EmissionSource::Abstain,
+    };
+    C5DecisionBreakdown {
+        c4,
+        emission_source,
+        controlled,
+    }
+}
+
+fn c5_rule_breakdown(c4: &C4DecisionBreakdown, config: C5EmissionConfig) -> C5RuleBreakdown {
+    let c31 = &c4.c31;
+    let winner = c31.winner.as_ref();
+    let c4_abstained = c4.emission_source == C4EmissionSource::Abstain;
+    let native_candidate = c31.segmented_candidate == Some(false);
+    let candidate_count = winner.map_or(0, |winner| winner.candidate_count);
+    let candidate_count_pass = candidate_count >= 1;
+    let candidate_quality = winner.map(|winner| winner.winner_score);
+    let candidate_quality_pass =
+        candidate_quality.is_some_and(|quality| quality >= config.quality_min);
+    let winner_margin = winner.map(|winner| winner.winner_margin);
+    let winner_margin_min = (candidate_count >= 2).then_some(config.multiple_candidate_margin_min);
+    let winner_margin_pass = winner_margin_min
+        .is_none_or(|minimum| winner_margin.is_some_and(|margin| margin >= minimum));
+    let reliability = winner.map(|winner| winner.reliability);
+    let reliability_pass =
+        reliability.is_some_and(|reliability| reliability >= config.reliability_min);
+    let role_signal = winner.map(|winner| winner.role_signal);
+    let role_signal_pass = role_signal.is_some_and(|role| role >= config.role_signal_min);
+    let vetoes_pass = c31_vetoes_pass(c31);
+    let passed = c4_abstained
+        && native_candidate
+        && candidate_count_pass
+        && candidate_quality_pass
+        && winner_margin_pass
+        && reliability_pass
+        && role_signal_pass
+        && vetoes_pass;
+    C5RuleBreakdown {
+        c4_abstained,
+        native_candidate,
+        candidate_count,
+        candidate_count_pass,
+        candidate_quality,
+        candidate_quality_min: config.quality_min,
+        candidate_quality_pass,
+        winner_margin,
+        winner_margin_min,
+        winner_margin_pass,
+        reliability,
+        reliability_min: config.reliability_min,
+        reliability_pass,
+        role_signal,
+        role_signal_min: config.role_signal_min,
+        role_signal_pass,
+        vetoes_pass,
+        passed,
+    }
+}
+
 pub fn apply_gender_hint(
     diagnostic: &RoleInferenceDiagnostic,
     inference: &mut RawInference,
@@ -2145,6 +2319,16 @@ mod tests {
             candidate_too_short: false,
             segmented_candidate_penalty: 0.0,
             final_score: 0.5,
+        }
+    }
+
+    fn c5_winner(candidate_count: usize) -> WinnerFeatures {
+        WinnerFeatures {
+            winner_score: ALGORITHM_C5.quality_min,
+            winner_margin: ALGORITHM_C5.multiple_candidate_margin_min,
+            reliability: ALGORITHM_C5.reliability_min,
+            role_signal: ALGORITHM_C5.role_signal_min,
+            ..c4_winner(candidate_count)
         }
     }
 
@@ -2972,6 +3156,131 @@ mod tests {
         assert!(!c4_config_is_valid(C4EmissionConfig {
             dominant_winner_margin_min: f64::NAN,
             ..ALGORITHM_C4
+        }));
+    }
+
+    #[test]
+    fn c5_preserves_every_c4_emission_and_selected_winner() {
+        for c4_source in [
+            C4EmissionSource::C31,
+            C4EmissionSource::SoleNative,
+            C4EmissionSource::DominantWinner,
+        ] {
+            let c4 = C4DecisionBreakdown {
+                c31: c31_breakdown_for_c4(c4_winner(2)),
+                emission_source: c4_source,
+                sole_native: c4_decision_from_c31(
+                    c31_breakdown_for_c4(c4_winner(1)),
+                    ALGORITHM_C2.threshold,
+                    ALGORITHM_C4,
+                )
+                .sole_native,
+                dominant_winner: c4_decision_from_c31(
+                    c31_breakdown_for_c4(c4_winner(2)),
+                    ALGORITHM_C2.threshold,
+                    ALGORITHM_C4,
+                )
+                .dominant_winner,
+            };
+            let decision = c5_decision_from_c4(c4, ALGORITHM_C5);
+            let expected_source = match c4_source {
+                C4EmissionSource::C31 => C5EmissionSource::C31,
+                C4EmissionSource::SoleNative => C5EmissionSource::SoleNative,
+                C4EmissionSource::DominantWinner => C5EmissionSource::DominantWinner,
+                C4EmissionSource::Abstain => unreachable!(),
+            };
+            assert_eq!(decision.emission_source, expected_source);
+            assert_eq!(c5_emitted_candidate(&decision), Some("Selected"));
+            assert!(!decision.controlled.passed);
+        }
+    }
+
+    #[test]
+    fn c5_controlled_rule_has_exact_inclusive_boundaries() {
+        for candidate_count in [1, 2] {
+            let c4 = c4_decision_from_c31(
+                c31_breakdown_for_c4(c5_winner(candidate_count)),
+                ALGORITHM_C2.threshold,
+                ALGORITHM_C4,
+            );
+            assert_eq!(c4.emission_source, C4EmissionSource::Abstain);
+            let boundary = c5_decision_from_c4(c4, ALGORITHM_C5);
+            assert_eq!(boundary.emission_source, C5EmissionSource::C5);
+            assert!(boundary.controlled.passed);
+            assert_eq!(c5_emitted_candidate(&boundary), Some("Selected"));
+            assert_eq!(
+                boundary.controlled.winner_margin_min,
+                (candidate_count >= 2).then_some(ALGORITHM_C5.multiple_candidate_margin_min)
+            );
+        }
+
+        let low_quality = WinnerFeatures {
+            winner_score: immediately_below(ALGORITHM_C5.quality_min),
+            ..c5_winner(1)
+        };
+        let decision = c5_decision_from_c4(
+            c4_decision_from_c31(
+                c31_breakdown_for_c4(low_quality),
+                ALGORITHM_C2.threshold,
+                ALGORITHM_C4,
+            ),
+            ALGORITHM_C5,
+        );
+        assert_eq!(decision.emission_source, C5EmissionSource::Abstain);
+        assert!(!decision.controlled.candidate_quality_pass);
+
+        let low_margin = WinnerFeatures {
+            winner_margin: immediately_below(ALGORITHM_C5.multiple_candidate_margin_min),
+            ..c5_winner(2)
+        };
+        let decision = c5_decision_from_c4(
+            c4_decision_from_c31(
+                c31_breakdown_for_c4(low_margin),
+                ALGORITHM_C2.threshold,
+                ALGORITHM_C4,
+            ),
+            ALGORITHM_C5,
+        );
+        assert_eq!(decision.emission_source, C5EmissionSource::Abstain);
+        assert!(!decision.controlled.winner_margin_pass);
+    }
+
+    #[test]
+    fn c5_controlled_rule_preserves_vetoes_and_native_provenance() {
+        for mutate in [
+            |breakdown: &mut C31DecisionBreakdown| breakdown.hard_organization_marker = true,
+            |breakdown: &mut C31DecisionBreakdown| breakdown.generic_organization_marker = true,
+            |breakdown: &mut C31DecisionBreakdown| breakdown.ampersand = true,
+            |breakdown: &mut C31DecisionBreakdown| breakdown.candidate_too_short = true,
+        ] {
+            let mut c31 = c31_breakdown_for_c4(c5_winner(1));
+            mutate(&mut c31);
+            let decision = c5_decision_from_c4(
+                c4_decision_from_c31(c31, ALGORITHM_C2.threshold, ALGORITHM_C4),
+                ALGORITHM_C5,
+            );
+            assert_eq!(decision.emission_source, C5EmissionSource::Abstain);
+            assert!(!decision.controlled.vetoes_pass);
+        }
+
+        let mut segmented = c5_winner(1);
+        segmented.candidate_origin = "handle_segment";
+        segmented.segmentation_mechanism = Some("digit");
+        let decision = c5_decision_from_c4(
+            c4_decision_from_c31(
+                c31_breakdown_for_c4(segmented),
+                ALGORITHM_C2.threshold,
+                ALGORITHM_C4,
+            ),
+            ALGORITHM_C5,
+        );
+        assert_eq!(decision.emission_source, C5EmissionSource::Abstain);
+        assert!(!decision.controlled.native_candidate);
+
+        assert!(c5_config_is_valid(ALGORITHM_C5));
+        assert!(!c5_config_is_valid(C5EmissionConfig {
+            multiple_candidate_margin_min: f64::NAN,
+            ..ALGORITHM_C5
         }));
     }
 
