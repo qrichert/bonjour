@@ -147,6 +147,10 @@ jobs:
             manylinux: 'off'
 
     steps:
+      - name: Preserve repository line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       - name: Checkout repository
         uses: actions/checkout@v6
 
