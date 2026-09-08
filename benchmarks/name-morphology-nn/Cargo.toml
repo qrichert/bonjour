@@ -1,0 +1,22 @@
+[package]
+name = "name-morphology-nn-data"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bonjour = { version = "0.1.0", path = "../..", package = "bonjour", features = ["benchmark-internals"] }
+csv = "1.4.0"
+name-eval = { version = "0.0.0", path = "../name-eval" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10.9"
+unicode-casefold = "0.2.0"
+unicode-general-category = "1.1.0"
+unicode-normalization = "0.1.25"
+unicode-script = "0.5.8"
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
