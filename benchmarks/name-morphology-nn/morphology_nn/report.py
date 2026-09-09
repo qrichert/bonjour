@@ -15,7 +15,7 @@ from .data import encode_utf8, load_json, sha256_file
 from .metrics import percentiles
 from .model import inference_operations, load_export, parameter_count
 
-REQUIRED = ("Olivier", "Baris", "Sieffert", "Aras")
+REQUIRED = ("Olivier", "Baris", "REDACTED", "REDACTED")
 NEGATIVE_REPORT_POPULATIONS = (
     "strong_surname",
     "surname_only",

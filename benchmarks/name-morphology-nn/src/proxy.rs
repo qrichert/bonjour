@@ -3,8 +3,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use bonjour::benchmark::{
-    ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C31, c31_decision_breakdown, diagnose_role_inference,
-    open_artifact,
+    ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4, ALGORITHM_C5, ALGORITHM_C31, C4DecisionBreakdown,
+    C4EmissionSource, c4_decision_breakdown, c5_decision_from_c4, c5_emitted_candidate,
+    c31_decision_breakdown, diagnose_role_inference, open_artifact,
 };
 use name_eval::holdout::{FrozenHoldout, load_frozen};
 use serde::Serialize;
@@ -30,6 +31,33 @@ struct ProxyRow {
     outcome: &'static str,
     c31_emits: bool,
     role_llr: Option<f64>,
+    role_signal: Option<f64>,
+    reliability: Option<f64>,
+    winner_margin: Option<f64>,
+    candidate_quality: Option<f64>,
+    country_hint: String,
+}
+
+#[derive(Serialize)]
+struct ConditionalProxyRow {
+    population: &'static str,
+    ordinal: usize,
+    normalized_candidate: String,
+    expected_greeting: bool,
+    selected_matches: bool,
+    winner_present: bool,
+    c31_emits: bool,
+    c4_emits: bool,
+    c4_source: &'static str,
+    c5_emits: bool,
+    candidate_count: Option<usize>,
+    native_candidate: bool,
+    segmented_candidate: Option<bool>,
+    vetoes_pass: bool,
+    hard_organization_marker: bool,
+    generic_organization_marker: bool,
+    ampersand: bool,
+    candidate_too_short: bool,
     role_signal: Option<f64>,
     reliability: Option<f64>,
     winner_margin: Option<f64>,
@@ -63,6 +91,41 @@ pub(crate) fn stream_proxy(artifact_path: &Path, inputs: Vec<ProxyInput>) -> Res
                 &decision,
             );
             writer.serialize(row)?;
+        }
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+pub(crate) fn stream_conditional_proxy(
+    artifact_path: &Path,
+    inputs: Vec<ProxyInput>,
+) -> Result<()> {
+    let artifact = open_artifact(artifact_path)?;
+    let holdouts = validate_and_order(inputs)?;
+    let stdout = io::stdout();
+    let mut writer = csv::Writer::from_writer(stdout.lock());
+    for (population, holdout) in holdouts {
+        for (ordinal, case) in holdout.cases.iter().enumerate() {
+            if !case.is_evaluable() {
+                continue;
+            }
+            let diagnostic = diagnose_role_inference(
+                &artifact,
+                ALGORITHM_C3,
+                &case.display_name,
+                nonempty(&case.country_hint),
+                nonempty(&case.locale_hint),
+            );
+            let decision =
+                c4_decision_breakdown(&diagnostic, ALGORITHM_C2, ALGORITHM_C31, ALGORITHM_C4);
+            writer.serialize(conditional_proxy_row(
+                population,
+                ordinal,
+                case.expected_greeting(),
+                &case.country_hint,
+                &decision,
+            ))?;
         }
     }
     writer.flush()?;
@@ -135,6 +198,53 @@ fn proxy_row(
         candidate_quality: Some(winner.winner_score),
         country_hint: normalized_country(country_hint),
     }
+}
+
+fn conditional_proxy_row(
+    population: &'static str,
+    ordinal: usize,
+    expected: Option<&str>,
+    country_hint: &str,
+    decision: &C4DecisionBreakdown,
+) -> ConditionalProxyRow {
+    let breakdown = &decision.c31;
+    let winner = breakdown.winner.as_ref();
+    let selected = winner.map(|winner| winner.greeting_candidate.as_str());
+    let c5 = c5_decision_from_c4(decision.clone(), ALGORITHM_C5);
+    ConditionalProxyRow {
+        population,
+        ordinal,
+        normalized_candidate: winner
+            .map(|winner| model_normalize(&winner.greeting_candidate))
+            .unwrap_or_default(),
+        expected_greeting: expected.is_some(),
+        selected_matches: expected.is_some() && greeting_matches(expected, selected),
+        winner_present: winner.is_some(),
+        c31_emits: winner.is_some() && emits_at_c31_threshold(breakdown.final_score),
+        c4_emits: winner.is_some() && decision.emission_source != C4EmissionSource::Abstain,
+        c4_source: decision.emission_source.as_str(),
+        c5_emits: c5_emitted_candidate(&c5).is_some(),
+        candidate_count: winner.map(|winner| winner.candidate_count),
+        native_candidate: breakdown.segmented_candidate == Some(false),
+        segmented_candidate: breakdown.segmented_candidate,
+        vetoes_pass: c31_vetoes_pass(breakdown),
+        hard_organization_marker: breakdown.hard_organization_marker,
+        generic_organization_marker: breakdown.generic_organization_marker,
+        ampersand: breakdown.ampersand,
+        candidate_too_short: breakdown.candidate_too_short,
+        role_signal: winner.map(|winner| winner.role_signal),
+        reliability: winner.map(|winner| winner.reliability),
+        winner_margin: winner.map(|winner| winner.winner_margin),
+        candidate_quality: winner.map(|winner| winner.winner_score),
+        country_hint: normalized_country(country_hint),
+    }
+}
+
+fn c31_vetoes_pass(decision: &bonjour::benchmark::C31DecisionBreakdown) -> bool {
+    !decision.hard_organization_marker
+        && !decision.generic_organization_marker
+        && !decision.ampersand
+        && !decision.candidate_too_short
 }
 
 fn emits_at_c31_threshold(score: f64) -> bool {

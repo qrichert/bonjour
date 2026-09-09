@@ -135,3 +135,45 @@ score/role grids, and bounded morphology-source error examples. The
 selected float32 weights are exported in a deterministic,
 documented-by-metadata binary suitable for a later custom Rust reader;
 this experiment does not implement that reader or quantization.
+
+## Frozen conditional-value follow-up
+
+The follow-up evaluator tests whether the exact selected network adds
+residual information inside the existing deterministic evidence gate. It
+does not retrain the model or implement an emission rule. The Python
+command accepts only the frozen selection, the already-produced
+morphology TEST receipt, and the streamed spent-proxy rows; it has no
+morphology TEST-row input.
+
+```sh
+set -o pipefail
+benchmarks/name-morphology-nn/target/release/name-morphology-nn-data \
+  conditional-proxy \
+  _wip/name-eval-artifact-c/c32-q8-surname-global \
+  --sealed=_wip/real-proxy-v1/sealed.csv \
+  --manifest=_wip/real-proxy-v1/sealed.manifest.csv \
+  --sealed=_wip/real-proxy-v3/sealed.csv \
+  --manifest=_wip/real-proxy-v3/sealed.manifest.csv \
+  --sealed=_wip/real-proxy-v4/sealed.csv \
+  --manifest=_wip/real-proxy-v4/sealed.manifest.csv | \
+uv run --project benchmarks/name-morphology-nn \
+  --directory benchmarks/name-morphology-nn --python 3.12 \
+  python -m morphology_nn evaluate-conditional \
+  --selection ../../_wip/name-morphology-nn-v1/selection \
+  --test-receipt ../../_wip/name-morphology-nn-v1/test/test_receipt.json \
+  --output ../../_wip/name-morphology-nn-conditional-v1
+```
+
+Every searched admission is additive over frozen C4 and remains native,
+veto-free, and conditioned on candidate quality, reliability, role
+signal, and multiple-candidate margin. The augmented family adds only a
+lower bound on the frozen uncalibrated neural score. Outputs are
+aggregate-only: the selected candidate exists solely in the
+Rust-to-Python pipe and is discarded before analysis. The receipt pins
+the exact model, metadata, selected thresholds, morphology TEST receipt,
+V1/V3/V4 digests, grids, and output hashes.
+
+The result is descriptive development evidence from spent proxies. Its
+pooled frontier and leave-one-generation-out comparison can justify only
+a separate classifier-integration experiment, never a production rule by
+themselves.

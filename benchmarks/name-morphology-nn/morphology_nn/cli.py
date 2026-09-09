@@ -143,6 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_proxy.add_argument("--output", type=Path, required=True)
     evaluate_proxy.set_defaults(action=run_evaluate_proxy)
 
+    evaluate_conditional = commands.add_parser("evaluate-conditional")
+    evaluate_conditional.add_argument("--selection", type=Path, required=True)
+    evaluate_conditional.add_argument("--test-receipt", type=Path, required=True)
+    evaluate_conditional.add_argument("--output", type=Path, required=True)
+    evaluate_conditional.set_defaults(action=run_evaluate_conditional)
+
     report = commands.add_parser("report")
     report.add_argument("--data", type=Path, required=True)
     report.add_argument("--selection", type=Path, required=True)
@@ -337,6 +343,18 @@ def run_evaluate_proxy(arguments: argparse.Namespace) -> None:
         write_json(temporary / "evaluation_receipt.json", receipt)
 
     publish_directory(arguments.output, write)
+
+
+def run_evaluate_conditional(arguments: argparse.Namespace) -> None:
+    from .conditional import evaluate_conditional
+
+    configure_torch()
+    evaluate_conditional(
+        selection=arguments.selection,
+        test_receipt=arguments.test_receipt,
+        output=arguments.output,
+        source=sys.stdin,
+    )
 
 
 def run_report(arguments: argparse.Namespace) -> None:

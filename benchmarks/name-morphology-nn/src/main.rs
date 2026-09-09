@@ -29,6 +29,7 @@ fn run() -> Result<()> {
     match command.to_str() {
         Some("prepare") => run_prepare(arguments.collect()),
         Some("proxy") => run_proxy(arguments.collect()),
+        Some("conditional-proxy") => run_conditional_proxy(arguments.collect()),
         _ => Err(usage().into()),
     }
 }
@@ -49,6 +50,16 @@ fn run_prepare(arguments: Vec<OsString>) -> Result<()> {
 }
 
 fn run_proxy(arguments: Vec<OsString>) -> Result<()> {
+    let (artifact, inputs) = parse_proxy_arguments(arguments)?;
+    proxy::stream_proxy(&artifact, inputs)
+}
+
+fn run_conditional_proxy(arguments: Vec<OsString>) -> Result<()> {
+    let (artifact, inputs) = parse_proxy_arguments(arguments)?;
+    proxy::stream_conditional_proxy(&artifact, inputs)
+}
+
+fn parse_proxy_arguments(arguments: Vec<OsString>) -> Result<(PathBuf, Vec<ProxyInput>)> {
     let mut arguments = arguments.into_iter();
     let artifact = PathBuf::from(arguments.next().ok_or_else(usage)?);
     require_directory(&artifact, "artifact")?;
@@ -72,7 +83,7 @@ fn run_proxy(arguments: Vec<OsString>) -> Result<()> {
         .zip(manifests)
         .map(|(sealed, manifest)| ProxyInput { sealed, manifest })
         .collect();
-    proxy::stream_proxy(&artifact, inputs)
+    Ok((artifact, inputs))
 }
 
 fn require_file(path: &Path, label: &str) -> Result<()> {
@@ -92,5 +103,5 @@ fn require_directory(path: &Path, label: &str) -> Result<()> {
 }
 
 fn usage() -> String {
-    "usage:\n  name-morphology-nn-data prepare <artifact> <name-totals.csv> <clean-v1.csv> <new-output-directory>\n  name-morphology-nn-data proxy <artifact> [--sealed=FILE --manifest=FILE]x3".to_string()
+    "usage:\n  name-morphology-nn-data prepare <artifact> <name-totals.csv> <clean-v1.csv> <new-output-directory>\n  name-morphology-nn-data proxy <artifact> [--sealed=FILE --manifest=FILE]x3\n  name-morphology-nn-data conditional-proxy <artifact> [--sealed=FILE --manifest=FILE]x3".to_string()
 }
