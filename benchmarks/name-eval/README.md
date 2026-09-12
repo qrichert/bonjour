@@ -2324,3 +2324,122 @@ only an additional emission admitted by C5.
 The promotion did not inspect V6 rows, alter C5's configuration, change
 candidate generation or ranking, modify vetoes, or change the artifact.
 C2, C3, C3.1, and C4 remain frozen historical benchmark modes.
+
+## Frozen REAL_PROXY_V8 surname-complement validation
+
+REAL_PROXY_V8 tested unchanged production C6 against C6 plus the
+previously selected count-at-least-1 surname-complement residual. It
+used 2,000 fresh Meta Kaggle rows sampled with the predeclared seed
+`0x5245414C5F5638`, excluding exact display-name values from V1 through
+V7. The 2,587,424,211-byte source remained stable at SHA-256
+`30b95ff7d079289fe76a0fada39ebbb174f15f6f85a2e09f7a208c6fdf57dd82`. Of
+33,084,108 source rows, 204 were blank or whitespace-only and 157,613
+matched one of 13,995 prior values, leaving 32,926,291 eligible rows.
+Independent sampling runs produced the same 2,000-row source at SHA-256
+`88724aa37022c6ab857a3dee6d32dd17ce2baa3189eb5cbcbff51b9ebc6276d7`.
+
+Two independent classifier-blind machine annotations were normalized
+mechanically without repairing labels. Annotator A supplied 1,195 exact
+greetings, 18 NULLs, and 787 explicit skips; annotator B supplied 1,030
+exact greetings, 18 NULLs, and 952 explicit skips. Both supplied 2,000
+schema-valid rows and zero unusable or non-exact labels. Their raw
+annotation SHA-256 values were
+`64eb68f1b88796832bcbd3e6a50277db99224ad6b043249e4449b5f9b970c9b2` and
+`f61cfb689b0f0312790142338e343640c28bf464dc0465050039858034508ec4`.
+
+Exact consensus produced 989 greeting agreements, 15 NULL agreements,
+995 cases with an annotator SKIP, and one other disagreement. The
+canonical holdout therefore has 1,004 evaluable and 996 skipped rows. It
+was independently serialized twice and frozen before any classifier or
+surname-membership lookup at SHA-256:
+
+```text
+55fe9ae0efc7e604e55c997f8c26cd2cfc3e97961514a6a3780cd2f0420ae6c9
+```
+
+### Frozen surname artifact verification
+
+V8 queried the exact production-shaped candidate selected on spent V1-V7
+evidence. No count threshold, fingerprint width, MPHF parameter,
+normalization rule, key, or artifact constituent changed:
+
+| Constituent        |       Bytes | SHA-256                                                            |
+| ------------------ | ----------: | ------------------------------------------------------------------ |
+| `manifest.csv`     |         710 | `99d7be0c592eb817eb6ae2c4e59517a12753e86302abed390099293d6c02b675` |
+| `names.mphf`       |  15,248,560 | `40bcd571685a0fab7f93337b288d32e2ee25937feaa3c7be8e3a0ec86920f635` |
+| `fingerprints.u32` | 141,668,176 | `a419dfb9d6d792ae08710c1f007cfd58442a0e7224f2630e9d33bd7becdabc7b` |
+
+The candidate contains 35,417,044 surname-observed keys absent from the
+retained given-name index and occupies 156,917,446 bytes (149.65 MiB).
+Together with the unchanged 36,632,687-byte given-name artifact, it
+would occupy 193,550,133 bytes (184.58 MiB).
+
+Before sealed evaluation, a new exact scan of the same 105 authoritative
+raw files reproduced 491,655,925 source rows, 489,631,377 nonempty
+surnames, and the selected member stream at 35,417,044 keys, 467,302,147
+bytes, and SHA-256
+`710d491599f2140ccdb85e25cb553d574584bad30ef3543904cdcd7270703013`. All
+35,417,044 member lookups succeeded. Another 1,803,175 retained-given
+queries and 100,000 deterministic generated nonmembers produced zero
+observed false accepts. The aggregate verification receipt has SHA-256
+`3db00159a31b4825e1cf7f06bac6641af3cac8f0af8f0774d05918903b36941e`. The
+enumerable member stream and remote scan workspace were then removed.
+
+The MPHF maps every query to a candidate slot; independent 32-bit
+fingerprint verification performs membership rejection. The nominal
+accidental acceptance probability remains approximately `2^-32` per
+unrelated query, not zero.
+
+### One-shot C6 comparison
+
+The release evaluator authenticated the frozen V8 digest, candidate
+constituents, and verification receipt before running exactly the two
+frozen policies. It wrote aggregate outputs only. No V8 row, failure,
+correct addition, prediction, candidate, score, or qualitative sample
+was serialized or inspected.
+
+Two preliminary invocations stopped during given-name artifact path
+validation, before loading surname membership or running holdout
+inference, and produced no evaluation output. The corrected sealed
+invocation performed the one successful inference pass reported here.
+
+| Policy                | Emitted | Correct | Wrong | NULL FP | Precision |  Recall | Abstention rate |
+| --------------------- | ------: | ------: | ----: | ------: | --------: | ------: | --------------: |
+| Frozen C6             |     528 |     520 |     8 |       0 |   98.485% | 52.578% |         47.410% |
+| C6 + surname residual |     543 |     535 |     8 |       0 |   98.527% | 54.095% |         45.916% |
+
+The frozen surname residual added **15 emissions: 15 correct, zero
+wrong, and zero expected-NULL false emissions** beyond C6. Expected-NULL
+false emissions are a subset of wrong emissions. The residual topology
+contained 35 evaluable rows.
+
+Under the preregistered interpretation this is **strong validation**:
+the exact membership candidate recovered meaningful unseen greetings
+with no observed additional error. The evidence validates the candidate
+for a separate production-engineering decision; it does not decide
+whether roughly 150 MiB is worth shipping and does not enable the
+branch. The small 1,004-row evaluable population—and especially its 15
+expected-NULL rows—limits safety precision and remains machine-consensus
+proxy evidence rather than worldwide ground truth.
+
+Historical V7 remains unchanged:
+
+```text
+first-position:   +55 correct / 0 wrong / 0 NULL FP
+surname residual: +18 correct / 1 wrong / 1 NULL FP
+```
+
+Two post-checkpoint evaluator runs produced byte-identical aggregate
+outputs:
+
+| Output                    | SHA-256                                                            |
+| ------------------------- | ------------------------------------------------------------------ |
+| `artifact_validation.csv` | `3db00159a31b4825e1cf7f06bac6641af3cac8f0af8f0774d05918903b36941e` |
+| `policy_metrics.csv`      | `608e11f9b6015a17d6ed1ecaa01faa20f869a526bf3ecb514f01aff17f7d8b26` |
+| `surname_delta.csv`       | `14df7e5b55d6d4d0e1c544a5fa1b1bfa1ab32b7a8ab4df9489d6586f2d907589` |
+| `run_manifest.csv`        | `a5f609738c9495e48e648fadd42d7ed9f794ebbe3d492c5051413e0616300ec7` |
+| `validation_report.md`    | `e737eb04672270d88060ffee943dea9c8e4bb6cf587abf24dd959cc5164b3a88` |
+
+V8 is now spent and was not used for threshold or artifact-size
+selection. Production remains unchanged C6, no surname artifact is
+loaded by normal inference, and no V9 was created.

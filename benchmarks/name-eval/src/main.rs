@@ -22,6 +22,7 @@ mod lexical;
 mod metrics;
 mod proxy_diagnostic;
 mod relational_diagnostic;
+mod surname_complement_validation;
 mod surname_index_selection;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,6 +64,9 @@ use name_eval::holdout::{
 };
 use proxy_diagnostic::run_proxy_diagnostic;
 use relational_diagnostic::{run_c4_development_freeze, run_relational_diagnostic};
+use surname_complement_validation::{
+    run_surname_complement_validation, verify_frozen_surname_candidate,
+};
 use surname_index_selection::{prepare_surname_index_selection, run_surname_index_selection};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -222,6 +226,8 @@ struct Arguments {
     validate_complement_evidence_sha256: Option<String>,
     prepare_surname_index_selection: bool,
     select_surname_only_index: bool,
+    verify_frozen_surname_candidate: bool,
+    validate_frozen_surname_candidate_sha256: Option<String>,
     select_freeze_c5_operating_point: bool,
     morphology_name_totals: Option<PathBuf>,
     complement_probes: Option<PathBuf>,
@@ -231,6 +237,9 @@ struct Arguments {
     surname_key_directory: Option<PathBuf>,
     surname_name_totals: Option<PathBuf>,
     surname_selection_probes: Option<PathBuf>,
+    surname_membership_directory: Option<PathBuf>,
+    surname_member_keys: Option<PathBuf>,
+    surname_verification_receipt: Option<PathBuf>,
     spent_holdouts: Vec<PathBuf>,
     spent_manifests: Vec<PathBuf>,
     spent_sha256s: Vec<String>,
@@ -268,6 +277,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut validate_complement_evidence_sha256 = None;
     let mut prepare_surname_index_selection = false;
     let mut select_surname_only_index = false;
+    let mut verify_frozen_surname_candidate = false;
+    let mut validate_frozen_surname_candidate_sha256 = None;
     let mut select_freeze_c5_operating_point = false;
     let mut morphology_name_totals = None;
     let mut complement_probes = None;
@@ -277,6 +288,9 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut surname_key_directory = None;
     let mut surname_name_totals = None;
     let mut surname_selection_probes = None;
+    let mut surname_membership_directory = None;
+    let mut surname_member_keys = None;
+    let mut surname_verification_receipt = None;
     let mut spent_holdouts = Vec::new();
     let mut spent_manifests = Vec::new();
     let mut spent_sha256s = Vec::new();
@@ -386,6 +400,12 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             prepare_surname_index_selection = true;
         } else if text == "--select-surname-only-index" {
             select_surname_only_index = true;
+        } else if text == "--verify-frozen-surname-candidate" {
+            verify_frozen_surname_candidate = true;
+        } else if let Some(value) = text.strip_prefix("--validate-frozen-surname-candidate-sha256=")
+        {
+            validate_frozen_surname_candidate_sha256 =
+                Some(parse_sha256(value, "sealed V8 holdout")?);
         } else if text == "--select-freeze-c5-operating-point" {
             select_freeze_c5_operating_point = true;
         } else if let Some(value) = text.strip_prefix("--morphology-name-totals=") {
@@ -404,6 +424,12 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             surname_name_totals = Some(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("--surname-selection-probes=") {
             surname_selection_probes = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("--surname-membership-directory=") {
+            surname_membership_directory = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("--surname-member-keys=") {
+            surname_member_keys = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("--surname-verification-receipt=") {
+            surname_verification_receipt = Some(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("--spent-holdout=") {
             spent_holdouts.push(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("--spent-manifest=") {
@@ -423,6 +449,14 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     }
     if sealed.is_some() != sealed_manifest.is_some() {
         return Err("--sealed and --sealed-manifest must be supplied together".into());
+    }
+    if validate_frozen_surname_candidate_sha256
+        .as_deref()
+        .is_some_and(|digest| digest != surname_complement_validation::V8_SHA256)
+    {
+        return Err(
+            "surname-complement validation requires the pinned REAL_PROXY_V8 digest".into(),
+        );
     }
     let explicit_modes = usize::from(sealed_only)
         + usize::from(diagnose_spent_holdout_sha256.is_some())
@@ -445,9 +479,11 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         + usize::from(validate_complement_evidence_sha256.is_some())
         + usize::from(prepare_surname_index_selection)
         + usize::from(select_surname_only_index)
+        + usize::from(verify_frozen_surname_candidate)
+        + usize::from(validate_frozen_surname_candidate_sha256.is_some())
         + usize::from(select_freeze_c5_operating_point);
     if explicit_modes > 1 {
-        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, C5-calibration-frontier, C5-selection, ordering-diagnostic, capitalization-diagnostic, morphology-diagnostic, complement-diagnostic, V7 complement preparation/validation, sealed C1/C2 comparison, sealed C2/C3 comparison, sealed C2/C3/C3.1 comparison, sealed C3.1/C4 comparison, and sealed C4/C5 comparison modes are mutually exclusive".into());
+        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, C5-calibration-frontier, C5-selection, ordering-diagnostic, capitalization-diagnostic, morphology-diagnostic, complement-diagnostic, V7 complement preparation/validation, surname-candidate verification/V8 validation, sealed C1/C2 comparison, sealed C2/C3 comparison, sealed C2/C3/C3.1 comparison, sealed C3.1/C4 comparison, and sealed C4/C5 comparison modes are mutually exclusive".into());
     }
     validate_spent_arguments(
         diagnose_relational_emission || freeze_c4_relational_emission,
@@ -472,8 +508,15 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         || compare_sealed_c2_c3_c31_sha256.is_some()
         || compare_sealed_c31_c4_sha256.is_some()
         || compare_sealed_c4_c5_sha256.is_some()
-        || validate_complement_evidence_sha256.is_some();
-    let (artifact, clean_csv, output) = if prepare_surname_index_selection {
+        || validate_complement_evidence_sha256.is_some()
+        || validate_frozen_surname_candidate_sha256.is_some();
+    let (artifact, clean_csv, output) = if verify_frozen_surname_candidate {
+        if positional.len() != 1 || sealed.is_some() || development_only || reference_threshold_set
+        {
+            return Err("--verify-frozen-surname-candidate forbids sealed/tuning flags and takes only an output path".into());
+        }
+        (PathBuf::new(), None, positional.remove(0))
+    } else if prepare_surname_index_selection {
         if positional.len() != 1 || sealed.is_some() || development_only || reference_threshold_set
         {
             return Err("--prepare-surname-index-selection requires seven spent holdout triplets, forbids sealed/tuning flags, and takes only an output path".into());
@@ -551,6 +594,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
                 "--compare-sealed-c1-c2-sha256"
             } else if validate_complement_evidence_sha256.is_some() {
                 "--validate-complement-evidence-sha256"
+            } else if validate_frozen_surname_candidate_sha256.is_some() {
+                "--validate-frozen-surname-candidate-sha256"
             } else if develop_c3_spent_holdout_sha256.is_some() {
                 "--develop-c3-from-spent-holdout-sha256"
             } else if develop_c31_spent_holdout_sha256.is_some() {
@@ -603,6 +648,10 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             && surname_key_directory.is_none()
             && surname_name_totals.is_none()
             && surname_selection_probes.is_some()
+    } else if verify_frozen_surname_candidate {
+        surname_inventory.is_none()
+            && surname_key_directory.is_none()
+            && surname_selection_probes.is_none()
     } else {
         surname_inventory.is_none()
             && surname_key_directory.is_none()
@@ -611,6 +660,24 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     };
     if !valid_surname_selection_files {
         return Err("surname-index preparation requires one private probe file; final selection additionally requires one surname inventory, key directory, and name-totals file; these inputs are forbidden by other modes".into());
+    }
+    let valid_frozen_surname_files = if verify_frozen_surname_candidate {
+        surname_membership_directory.is_some()
+            && surname_member_keys.is_some()
+            && surname_name_totals.is_some()
+            && surname_verification_receipt.is_none()
+    } else if validate_frozen_surname_candidate_sha256.is_some() {
+        surname_membership_directory.is_some()
+            && surname_member_keys.is_none()
+            && surname_name_totals.is_none()
+            && surname_verification_receipt.is_some()
+    } else {
+        surname_membership_directory.is_none()
+            && surname_member_keys.is_none()
+            && surname_verification_receipt.is_none()
+    };
+    if !valid_frozen_surname_files {
+        return Err("surname-candidate verification requires membership, member-key, and name-total paths; V8 validation requires membership and verification-receipt paths; these inputs are forbidden by other modes".into());
     }
     Ok(Arguments {
         artifact,
@@ -641,6 +708,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         validate_complement_evidence_sha256,
         prepare_surname_index_selection,
         select_surname_only_index,
+        verify_frozen_surname_candidate,
+        validate_frozen_surname_candidate_sha256,
         select_freeze_c5_operating_point,
         morphology_name_totals,
         complement_probes,
@@ -650,6 +719,9 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         surname_key_directory,
         surname_name_totals,
         surname_selection_probes,
+        surname_membership_directory,
+        surname_member_keys,
+        surname_verification_receipt,
         spent_holdouts,
         spent_manifests,
         spent_sha256s,
@@ -737,7 +809,14 @@ fn validate_spent_arguments(
     Ok(())
 }
 
-fn usage() -> &'static str {
+fn usage() -> String {
+    format!(
+        "{}\n  name-eval <new-output-directory> --verify-frozen-surname-candidate --surname-membership-directory=DIR --surname-member-keys=FILE --surname-name-totals=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --validate-frozen-surname-candidate-sha256=SHA256 --surname-membership-directory=DIR --surname-verification-receipt=FILE --sealed=FILE --sealed-manifest=FILE",
+        legacy_usage()
+    )
+}
+
+fn legacy_usage() -> &'static str {
     "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-c5-calibration-frontier [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --select-freeze-c5-operating-point [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-ordering-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-capitalization-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-morphology-evidence --morphology-name-totals=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-complement-evidence --complement-probes=FILE --complement-surname-counts=FILE --complement-surname-manifest=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <new-output-directory> --prepare-complement-lookup-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --validate-complement-evidence-sha256=SHA256 --complement-surname-counts=FILE --complement-surname-manifest=FILE --sealed=FILE --sealed-manifest=FILE\n  name-eval <new-output-directory> --prepare-surname-index-selection --surname-selection-probes=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x7\n  name-eval <c32-artifact-directory> <new-output-directory> --select-surname-only-index --complement-surname-counts=FILE --complement-surname-manifest=FILE --surname-inventory=FILE --surname-key-directory=DIR --surname-name-totals=FILE --surname-selection-probes=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x7\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c31-c4-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c4-c5-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
 }
 
@@ -763,7 +842,10 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
             .or(arguments.compare_sealed_c31_c4_sha256.as_deref())
             .or(arguments.compare_sealed_c4_c5_sha256.as_deref())
             .or(arguments.prepare_complement_lookup_sha256.as_deref())
-            .or(arguments.validate_complement_evidence_sha256.as_deref()),
+            .or(arguments.validate_complement_evidence_sha256.as_deref())
+            .or(arguments
+                .validate_frozen_surname_candidate_sha256
+                .as_deref()),
         frozen_holdout.as_ref(),
     ) {
         validate_spent_holdout_digest(acknowledged, &holdout.manifest.holdout_sha256)?;
@@ -784,7 +866,42 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
                 .ok_or("surname-index preparation is missing probes")?,
         );
     }
+    if arguments.verify_frozen_surname_candidate {
+        return verify_frozen_surname_candidate(
+            output,
+            arguments
+                .surname_membership_directory
+                .as_deref()
+                .ok_or("surname-candidate verification is missing its membership directory")?,
+            arguments
+                .surname_member_keys
+                .as_deref()
+                .ok_or("surname-candidate verification is missing its member-key stream")?,
+            arguments
+                .surname_name_totals
+                .as_deref()
+                .ok_or("surname-candidate verification is missing name totals")?,
+        );
+    }
     let corpus = bonjour::benchmark::open_artifact(&arguments.artifact)?;
+    if arguments.validate_frozen_surname_candidate_sha256.is_some() {
+        let holdout = frozen_holdout
+            .as_ref()
+            .ok_or("V8 surname-complement validation requires a frozen holdout")?;
+        return run_surname_complement_validation(
+            output,
+            &corpus,
+            holdout,
+            arguments
+                .surname_membership_directory
+                .as_deref()
+                .ok_or("V8 validation is missing its surname membership directory")?,
+            arguments
+                .surname_verification_receipt
+                .as_deref()
+                .ok_or("V8 validation is missing its artifact verification receipt")?,
+        );
+    }
     if arguments.select_surname_only_index {
         return run_surname_index_selection(
             output,
@@ -3627,6 +3744,31 @@ mod argument_tests {
         arguments
     }
 
+    fn surname_candidate_verification_arguments() -> Vec<String> {
+        vec![
+            "output".to_string(),
+            "--verify-frozen-surname-candidate".to_string(),
+            "--surname-membership-directory=membership".to_string(),
+            "--surname-member-keys=members.txt".to_string(),
+            "--surname-name-totals=name-totals.csv".to_string(),
+        ]
+    }
+
+    fn v8_validation_arguments() -> Vec<String> {
+        vec![
+            "artifact".to_string(),
+            "output".to_string(),
+            format!(
+                "--validate-frozen-surname-candidate-sha256={}",
+                surname_complement_validation::V8_SHA256
+            ),
+            "--surname-membership-directory=membership".to_string(),
+            "--surname-verification-receipt=artifact-validation.csv".to_string(),
+            "--sealed=sealed.csv".to_string(),
+            "--sealed-manifest=manifest.csv".to_string(),
+        ]
+    }
+
     #[test]
     fn relational_mode_requires_three_unique_spent_triplets() {
         let arguments = parse_owned(relational_arguments()).unwrap();
@@ -3999,6 +4141,66 @@ mod argument_tests {
             .find(|argument| argument.starts_with("--spent-sha256="))
             .unwrap();
         *digest = format!("--spent-sha256={DIGEST}");
+        assert!(parse_owned(wrong_digest).is_err());
+    }
+
+    #[test]
+    fn frozen_surname_candidate_verification_requires_only_fixed_artifact_inputs() {
+        let arguments = parse_owned(surname_candidate_verification_arguments()).unwrap();
+        assert!(arguments.verify_frozen_surname_candidate);
+        assert_eq!(arguments.artifact, PathBuf::new());
+        assert_eq!(arguments.clean_csv, None);
+        assert_eq!(
+            arguments.surname_member_keys,
+            Some(PathBuf::from("members.txt"))
+        );
+
+        for prefix in [
+            "--surname-membership-directory=",
+            "--surname-member-keys=",
+            "--surname-name-totals=",
+        ] {
+            let mut missing = surname_candidate_verification_arguments();
+            missing.retain(|argument| !argument.starts_with(prefix));
+            assert!(parse_owned(missing).is_err(), "{prefix}");
+        }
+        let mut forbidden = surname_candidate_verification_arguments();
+        forbidden.push("--sealed=sealed.csv".to_string());
+        forbidden.push("--sealed-manifest=manifest.csv".to_string());
+        assert!(parse_owned(forbidden).is_err());
+    }
+
+    #[test]
+    fn v8_validation_requires_pinned_digest_sealed_pair_and_verification_receipt() {
+        let arguments = parse_owned(v8_validation_arguments()).unwrap();
+        assert_eq!(arguments.clean_csv, None);
+        assert_eq!(
+            arguments
+                .validate_frozen_surname_candidate_sha256
+                .as_deref(),
+            Some(surname_complement_validation::V8_SHA256)
+        );
+        assert_eq!(
+            arguments.surname_verification_receipt,
+            Some(PathBuf::from("artifact-validation.csv"))
+        );
+
+        for prefix in [
+            "--surname-membership-directory=",
+            "--surname-verification-receipt=",
+            "--sealed=",
+            "--sealed-manifest=",
+        ] {
+            let mut missing = v8_validation_arguments();
+            missing.retain(|argument| !argument.starts_with(prefix));
+            assert!(parse_owned(missing).is_err(), "{prefix}");
+        }
+        let mut wrong_digest = v8_validation_arguments();
+        let digest = wrong_digest
+            .iter_mut()
+            .find(|argument| argument.starts_with("--validate-frozen-surname-candidate-sha256="))
+            .unwrap();
+        *digest = format!("--validate-frozen-surname-candidate-sha256={DIGEST}");
         assert!(parse_owned(wrong_digest).is_err());
     }
 
