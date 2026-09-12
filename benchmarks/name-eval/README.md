@@ -1746,6 +1746,68 @@ proxies, but the single LOGO error and empty synthetic topology are
 insufficient for a safe promotion. A fresh preregistered holdout would
 be required before selecting a rule or storage threshold.
 
+## Frozen REAL_PROXY_V7 complement validation
+
+V7 tested the already selected first-position and positive
+complement-surname gates without modifying C5 or selecting a storage
+threshold. It used 2,000 fresh Meta Kaggle rows drawn with seed
+`0x5245414C5F5637`, exactly excluding display-name values from V1
+through V6. The 33,084,108-row source was stable before and after
+sampling at SHA-256
+`30b95ff7d079289fe76a0fada39ebbb174f15f6f85a2e09f7a208c6fdf57dd82`.
+There were 32,946,270 eligible rows after blank and prior-value
+exclusions. Independent reproduction produced the same 31,305-byte
+sample at SHA-256
+`00bc32574aeec19f1a532373d8637d26fe9713de095490f5d7ce57ca88e6dd55`.
+
+Two independent classifier-blind machine annotations produced 1,542
+exact greeting agreements and 249 exact NULL agreements. Another 175
+rows had an annotator SKIP and 34 disagreed. The resulting 2,000-row
+holdout contains 1,791 evaluable and 209 skipped rows and was frozen,
+before classifier inference or surname joining, at SHA-256
+`901e630f2ed612e9cd40f5c2ecd28f9d47c9768b10ddd762d2136c5a56cd8a6d`.
+
+The offline surname join exported a classifier-blind superset of 1,886
+lexical keys from the sealed inputs. An exact UTF-8 byte-equality scan
+of the same 105 authoritative files recounted 491,655,925 rows and
+489,631,377 non-empty surnames. It matched 1,408 keys across 31,710,468
+observations. The scan tested only the frozen `surname_count >= 1`
+hypothesis; no alternate count threshold was evaluated.
+
+The one-shot aggregate comparison was:
+
+| Policy                            | Emitted | Correct | Wrong | NULL FP | Precision |  Recall |
+| --------------------------------- | ------: | ------: | ----: | ------: | --------: | ------: |
+| Frozen C5                         |     566 |     548 |    18 |       4 |   96.820% | 35.538% |
+| C5 + first-position reference     |     621 |     603 |    18 |       4 |   97.101% | 39.105% |
+| C5 + reference + surname residual |     640 |     621 |    19 |       5 |   97.031% | 40.272% |
+
+The first-position reference gate added 55 correct greetings with no
+observed error. The complement-surname residual then added 18 correct
+greetings and one expected-NULL false emission. Combined, the frozen
+gates added 73 correct greetings and one error. The strict topology
+contained 152 evaluable rows.
+
+The aggregate verdict is **mixed but real signal** for
+complement-surname evidence. Its unseen residual value generalized, and
+the single NULL error is consistent with the earlier LOGO warning, but
+it is not safe enough to promote directly. V7 is spent. No individual
+failure was inspected, no gate was retuned, no production surname index
+or artifact was built, and production C5 remains unchanged. A separate
+task may use spent V1-V7 evidence to choose a coverage/size
+representation, which would still require a fresh validation before
+promotion.
+
+The aggregate output hashes are:
+
+| Output                   | SHA-256                                                            |
+| ------------------------ | ------------------------------------------------------------------ |
+| `policy_metrics.csv`     | `db96f34699059b2af65402ca668de659646f9e77cd71175c914bded849c7ed6d` |
+| `additive_deltas.csv`    | `39856d782c24893d5c2792f40960bf5414ad1343dc0a40121155945a93a2b112` |
+| `complement_classes.csv` | `4f6476a2ff9722431466fcb71fee14f15f34adf8e3a07e31afab7df71415bbbf` |
+| `run_manifest.csv`       | `124caa1737c229b4afa17f15b80d820a5aa195fa20fb6e2d56741d8ef7cfe5fd` |
+| `report.md`              | `d0696da791f94c2d6aecaef1800a4c56d071ba8db00138282e8e75e99ce76cb6` |
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.
