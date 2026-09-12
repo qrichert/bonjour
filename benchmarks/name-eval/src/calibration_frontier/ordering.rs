@@ -61,14 +61,14 @@ const SURNAME_FIRST_REGIONS: [[u8; 2]; 12] = [
 ];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum NameOrderPrior {
+pub(super) enum NameOrderPrior {
     GivenFirst,
     SurnameFirst,
     Neutral,
 }
 
 impl NameOrderPrior {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::GivenFirst => "given_first",
             Self::SurnameFirst => "surname_first",
@@ -673,7 +673,7 @@ fn comma_inversion_candidate(display_name: &str, candidate: &CandidateDiagnostic
         && candidate.start > 0
 }
 
-fn resolve_name_order_prior(
+pub(super) fn resolve_name_order_prior(
     country_hint: Option<&str>,
     locale_hint: Option<&str>,
 ) -> NameOrderPrior {

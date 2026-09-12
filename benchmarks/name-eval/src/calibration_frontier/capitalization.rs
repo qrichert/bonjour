@@ -13,7 +13,9 @@ use super::{
     feature_row_from_decision, greeting_matches, percent, ratio, validate_and_order_holdouts,
     wilson_interval,
 };
-use crate::classifier::{C4EmissionSource, CandidateDiagnostic, RoleInferenceDiagnostic, canonicalize};
+use crate::classifier::{
+    C4EmissionSource, CandidateDiagnostic, RoleInferenceDiagnostic, canonicalize,
+};
 use crate::dataset::{Case, Split, generate_cases};
 
 const ADDITIVE_FEATURE_COUNT: usize = 17;
@@ -635,7 +637,10 @@ fn build_structural_suite(
         .filter(|case| case.split == Split::Validation)
         .filter(|case| case.expected_greeting.is_some())
     {
-        let expected = case.expected_greeting.as_deref().expect("filtered greeting");
+        let expected = case
+            .expected_greeting
+            .as_deref()
+            .expect("filtered greeting");
         let occurrences = case.input.match_indices(expected).collect::<Vec<_>>();
         let [(start, _)] = occurrences.as_slice() else {
             if occurrences.is_empty() {
@@ -844,10 +849,7 @@ fn input_case_stats(display_name: &str) -> InputCasing {
         .iter()
         .map(|stats| stats.counts.alphabetic)
         .sum::<usize>();
-    let cased = tokens
-        .iter()
-        .map(|stats| stats.counts.cased)
-        .sum::<usize>();
+    let cased = tokens.iter().map(|stats| stats.counts.cased).sum::<usize>();
     InputCasing {
         any_usable_token,
         all_tokens_same,
@@ -878,9 +880,7 @@ fn candidate_casing(row: &CapitalizationRow, index: usize) -> CandidateCasing {
         .iter()
         .copied()
         .enumerate()
-        .filter(|(token, stats)| {
-            (*token < selected.start || *token >= end) && stats.has_signal()
-        })
+        .filter(|(token, stats)| (*token < selected.start || *token >= end) && stats.has_signal())
         .max_by(|(left_index, left), (right_index, right)| {
             left.counts
                 .alphabetic
@@ -904,12 +904,8 @@ fn contrast_stats(candidate: CaseStats, competitor: CaseStats) -> CandidateCasin
     }
     let contrast = match (candidate.class, competitor.class) {
         (left, right) if left == right => ContrastClass::Same,
-        (CaseClass::TitleLike, CaseClass::AllUpper) => {
-            ContrastClass::CandidateTitleCompetitorUpper
-        }
-        (CaseClass::AllUpper, CaseClass::TitleLike) => {
-            ContrastClass::CandidateUpperCompetitorTitle
-        }
+        (CaseClass::TitleLike, CaseClass::AllUpper) => ContrastClass::CandidateTitleCompetitorUpper,
+        (CaseClass::AllUpper, CaseClass::TitleLike) => ContrastClass::CandidateUpperCompetitorTitle,
         _ => ContrastClass::OtherContrast,
     };
     let ordering = compare_uppercase_proportions(candidate, competitor);
@@ -923,8 +919,7 @@ fn contrast_stats(candidate: CaseStats, competitor: CaseStats) -> CandidateCasin
     } else {
         competitor.uppercase_proportion() - candidate.uppercase_proportion()
     };
-    let support =
-        (0.5 * title_upper_direction + 0.5 * uppercase_fraction_delta).clamp(-1.0, 1.0);
+    let support = (0.5 * title_upper_direction + 0.5 * uppercase_fraction_delta).clamp(-1.0, 1.0);
     CandidateCasing {
         candidate,
         competitor,
@@ -999,8 +994,20 @@ fn is_name_component_separator(character: char) -> bool {
     character.is_whitespace()
         || matches!(
             character,
-            '\'' | '‘' | '’' | '‛' | 'ʻ' | 'ʼ' | '＇'
-                | '-' | '‐' | '‑' | '‒' | '–' | '—' | '―' | '−'
+            '\'' | '‘'
+                | '’'
+                | '‛'
+                | 'ʻ'
+                | 'ʼ'
+                | '＇'
+                | '-'
+                | '‐'
+                | '‑'
+                | '‒'
+                | '–'
+                | '—'
+                | '―'
+                | '−'
         )
 }
 
@@ -1151,10 +1158,7 @@ fn ranking_metrics(rows: &[CapitalizationRow], config: RankingConfig) -> Ranking
     metrics
 }
 
-fn select_ranking_config(
-    rows: &[CapitalizationRow],
-    configs: &[RankingConfig],
-) -> RankingConfig {
+fn select_ranking_config(rows: &[CapitalizationRow], configs: &[RankingConfig]) -> RankingConfig {
     configs
         .iter()
         .copied()
@@ -1187,10 +1191,7 @@ struct RankingFold {
     adjusted: RankingMetrics,
 }
 
-fn ranking_logo(
-    rows: &[CapitalizationRow],
-    configs: &[RankingConfig],
-) -> Vec<RankingFold> {
+fn ranking_logo(rows: &[CapitalizationRow], configs: &[RankingConfig]) -> Vec<RankingFold> {
     Population::PROXIES
         .into_iter()
         .map(|held_out| {
@@ -1251,20 +1252,14 @@ fn ranked_rows(
         .collect()
 }
 
-fn fit_model(
-    rows: &[RankedRow],
-    variant: CalibrationVariant,
-) -> Result<CapitalizationModel> {
+fn fit_model(rows: &[RankedRow], variant: CalibrationVariant) -> Result<CapitalizationModel> {
     match variant {
         CalibrationVariant::Additive => Ok(CapitalizationModel::Additive(fit_logistic(
             rows,
             RankedRow::additive_features,
         )?)),
         CalibrationVariant::Interaction | CalibrationVariant::RerankedInteraction => Ok(
-            CapitalizationModel::Interaction(fit_logistic(
-                rows,
-                RankedRow::interaction_features,
-            )?),
+            CapitalizationModel::Interaction(fit_logistic(rows, RankedRow::interaction_features)?),
         ),
     }
 }
@@ -1345,9 +1340,7 @@ fn logistic_training_rows<const N: usize>(
         .map(|population| {
             let count = rows
                 .iter()
-                .filter(|row| {
-                    row.features.population == *population && row.features.eligible()
-                })
+                .filter(|row| row.features.population == *population && row.features.eligible())
                 .count();
             (*population, count)
         })
@@ -1594,10 +1587,7 @@ fn capitalization_logo(
     Ok(results)
 }
 
-fn best_by_target(
-    folds: &[FoldResult],
-    ranking_useful: bool,
-) -> Vec<CrossValidatedPoint> {
+fn best_by_target(folds: &[FoldResult], ranking_useful: bool) -> Vec<CrossValidatedPoint> {
     let mut variants = CalibrationVariant::BASE.to_vec();
     if ranking_useful {
         variants.push(CalibrationVariant::RerankedInteraction);
@@ -1631,10 +1621,7 @@ fn best_by_target(
         .collect()
 }
 
-fn compare_cross_validated(
-    left: &CrossValidatedPoint,
-    right: &CrossValidatedPoint,
-) -> Ordering {
+fn compare_cross_validated(left: &CrossValidatedPoint, right: &CrossValidatedPoint) -> Ordering {
     left.metrics
         .correct
         .cmp(&right.metrics.correct)
@@ -1724,10 +1711,7 @@ fn baseline_full_development(
 }
 
 fn assert_capitalization_dataset_counts(rows: &[CapitalizationRow]) -> Result<()> {
-    let baseline = rows
-        .iter()
-        .map(|row| row.base.clone())
-        .collect::<Vec<_>>();
+    let baseline = rows.iter().map(|row| row.base.clone()).collect::<Vec<_>>();
     super::assert_dataset_counts(&baseline)
 }
 
@@ -1907,21 +1891,47 @@ fn feature_rows_csv(rows: &[CapitalizationRow]) -> Result<Vec<u8>> {
             format!("{:.17}", row.base.role_signal),
             format!("{:.17}", row.base.reliability),
             row.base.native.to_string(),
-            casing.map_or("other", |value| value.candidate.class.as_str()).to_string(),
-            casing.is_some_and(|value| value.candidate.has_signal()).to_string(),
-            casing.map_or("other", |value| value.competitor.class.as_str()).to_string(),
-            casing.is_some_and(|value| value.competitor.has_signal()).to_string(),
+            casing
+                .map_or("other", |value| value.candidate.class.as_str())
+                .to_string(),
+            casing
+                .is_some_and(|value| value.candidate.has_signal())
+                .to_string(),
+            casing
+                .map_or("other", |value| value.competitor.class.as_str())
+                .to_string(),
+            casing
+                .is_some_and(|value| value.competitor.has_signal())
+                .to_string(),
             casing
                 .map_or(CompetitorCaseSource::None, |value| value.competitor_source)
                 .as_str()
                 .to_string(),
-            casing.map_or("none_or_unusable", |value| value.contrast.as_str()).to_string(),
-            casing.is_some_and(|value| value.candidate_less_uppercase).to_string(),
-            casing.is_some_and(|value| value.candidate_more_uppercase).to_string(),
-            format!("{:.17}", casing.map_or(0.0, |value| value.candidate.cased_proportion())),
-            format!("{:.17}", casing.map_or(0.0, |value| value.candidate.uppercase_proportion())),
-            format!("{:.17}", casing.map_or(0.0, |value| value.title_upper_direction)),
-            format!("{:.17}", casing.map_or(0.0, |value| value.uppercase_fraction_delta)),
+            casing
+                .map_or("none_or_unusable", |value| value.contrast.as_str())
+                .to_string(),
+            casing
+                .is_some_and(|value| value.candidate_less_uppercase)
+                .to_string(),
+            casing
+                .is_some_and(|value| value.candidate_more_uppercase)
+                .to_string(),
+            format!(
+                "{:.17}",
+                casing.map_or(0.0, |value| value.candidate.cased_proportion())
+            ),
+            format!(
+                "{:.17}",
+                casing.map_or(0.0, |value| value.candidate.uppercase_proportion())
+            ),
+            format!(
+                "{:.17}",
+                casing.map_or(0.0, |value| value.title_upper_direction)
+            ),
+            format!(
+                "{:.17}",
+                casing.map_or(0.0, |value| value.uppercase_fraction_delta)
+            ),
             format!("{:.17}", casing.map_or(0.0, |value| value.support)),
             row.input_casing.contains_contrast.to_string(),
             row.input_casing.all_tokens_same.to_string(),
@@ -1960,9 +1970,7 @@ impl DiagnosticPopulation {
         match self {
             Self::Correct => row.base.expected_greeting && row.base.selected_matches,
             Self::Wrong => {
-                row.base.expected_greeting
-                    && row.base.winner_present
-                    && !row.base.selected_matches
+                row.base.expected_greeting && row.base.winner_present && !row.base.selected_matches
             }
             Self::ExpectedNull => !row.base.expected_greeting && row.base.winner_present,
             Self::C4RejectedCorrect => {
@@ -2066,7 +2074,9 @@ fn write_distribution_row(
     total: usize,
 ) -> Result<()> {
     writer.write_record([
-        population.map_or("COMBINED", Population::as_str).to_string(),
+        population
+            .map_or("COMBINED", Population::as_str)
+            .to_string(),
         group.as_str().to_string(),
         feature.to_string(),
         value.to_string(),
@@ -2116,7 +2126,9 @@ fn availability_csv(rows: &[CapitalizationRow]) -> Result<Vec<u8>> {
         ] {
             let count = selected.iter().filter(|row| predicate(row)).count();
             writer.write_record([
-                population.map_or("COMBINED", Population::as_str).to_string(),
+                population
+                    .map_or("COMBINED", Population::as_str)
+                    .to_string(),
                 metric.to_string(),
                 count.to_string(),
                 selected.len().to_string(),
@@ -2277,12 +2289,9 @@ fn model_form_comparison_csv(
         "correct_winner_rejected",
     ])?;
     for target in CAPITALIZATION_TARGETS {
-        let logistic = aggregate_baseline_fold_metrics(
-            baseline_folds,
-            super::Family::Logistic,
-            target,
-        )
-        .ok_or("pure logistic baseline fold missing")?;
+        let logistic =
+            aggregate_baseline_fold_metrics(baseline_folds, super::Family::Logistic, target)
+                .ok_or("pure logistic baseline fold missing")?;
         write_model_form_row(&mut writer, target, "baseline_logistic", logistic)?;
         for variant in [
             CalibrationVariant::Additive,
@@ -2390,8 +2399,7 @@ fn logo_results_csv(folds: &[FoldResult]) -> Result<Vec<u8>> {
             fold.held_out_metrics.wrong.to_string(),
             fold.held_out_metrics.null_false_emissions.to_string(),
             fold.held_out_metrics.false_abstentions.to_string(),
-            fold
-                .held_out_metrics
+            fold.held_out_metrics
                 .winner_correct_but_abstained
                 .to_string(),
         ])?;
@@ -2431,7 +2439,8 @@ fn coefficients_csv(selections: &[SelectedPoint]) -> Result<Vec<u8>> {
                     "intercept".to_string(),
                     format!("{:.17}", model.intercept),
                 ])?;
-                for (name, coefficient) in INTERACTION_FEATURE_NAMES.iter().zip(model.coefficients) {
+                for (name, coefficient) in INTERACTION_FEATURE_NAMES.iter().zip(model.coefficients)
+                {
                     writer.write_record([
                         format!("{:.3}", selection.target),
                         selection.variant.as_str().to_string(),
@@ -2497,7 +2506,8 @@ fn validation_csv(
                 .iter()
                 .filter(|row| row.category == **category)
                 .collect::<Vec<_>>();
-            let metrics = evaluate_policy(selected.iter().copied(), &selection.full_development.policy);
+            let metrics =
+                evaluate_policy(selected.iter().copied(), &selection.full_development.policy);
             writer.write_record([
                 format!("{:.3}", selection.target),
                 "capitalization".to_string(),
@@ -2552,9 +2562,8 @@ fn structural_csv(
                 .iter()
                 .filter(|row| row.base.selected_matches)
                 .count();
-            let (base_category, transformation) = category
-                .rsplit_once(':')
-                .unwrap_or((category, "unknown"));
+            let (base_category, transformation) =
+                category.rsplit_once(':').unwrap_or((category, "unknown"));
             writer.write_record([
                 format!("{:.3}", selection.target),
                 "baseline".to_string(),
@@ -2576,14 +2585,14 @@ fn structural_csv(
                 .iter()
                 .filter(|row| row.category == **category)
                 .collect::<Vec<_>>();
-            let metrics = evaluate_policy(selected.iter().copied(), &selection.full_development.policy);
+            let metrics =
+                evaluate_policy(selected.iter().copied(), &selection.full_development.policy);
             let correct_winners = selected
                 .iter()
                 .filter(|row| row.features.selected_matches)
                 .count();
-            let (base_category, transformation) = category
-                .rsplit_once(':')
-                .unwrap_or((category, "unknown"));
+            let (base_category, transformation) =
+                category.rsplit_once(':').unwrap_or((category, "unknown"));
             writer.write_record([
                 format!("{:.3}", selection.target),
                 "capitalization".to_string(),
@@ -2664,13 +2673,19 @@ fn qualitative_csv(outcomes: &[QualitativeOutcome]) -> Result<Vec<u8>> {
             outcome.variant.as_str().to_string(),
             outcome.frozen_candidate.clone(),
             outcome.experimental_candidate.clone(),
-            casing.map_or("other", |value| value.candidate.class.as_str()).to_string(),
-            casing.map_or("other", |value| value.competitor.class.as_str()).to_string(),
+            casing
+                .map_or("other", |value| value.candidate.class.as_str())
+                .to_string(),
+            casing
+                .map_or("other", |value| value.competitor.class.as_str())
+                .to_string(),
             casing
                 .map_or(CompetitorCaseSource::None, |value| value.competitor_source)
                 .as_str()
                 .to_string(),
-            casing.map_or("none_or_unusable", |value| value.contrast.as_str()).to_string(),
+            casing
+                .map_or("none_or_unusable", |value| value.contrast.as_str())
+                .to_string(),
             format!("{:.17}", casing.map_or(0.0, |value| value.support)),
             outcome.emits.to_string(),
         ])?;
@@ -2702,7 +2717,10 @@ fn build_report(
         "C4 remains frozen production behavior. This benchmark-only experiment measures whether Unicode-aware contrastive casing and its interactions with existing evidence move the generation-held-out calibration frontier. Generic or locale-aware ordering evidence is excluded, no C5 policy is frozen, and no fresh holdout is used.\n"
     )?;
     writeln!(report, "## Data and provenance\n")?;
-    writeln!(report, "| Population | SHA-256 | Evaluable | Greetings | NULL |")?;
+    writeln!(
+        report,
+        "| Population | SHA-256 | Evaluable | Greetings | NULL |"
+    )?;
     writeln!(report, "|---|---|---:|---:|---:|")?;
     for holdout in holdouts {
         let population = Population::from_digest(&holdout.manifest.holdout_sha256)
@@ -2726,8 +2744,14 @@ fn build_report(
         report,
         "\nCombined: {} rows, {} expected greetings, {} expected NULLs. V1 retains its distinct single-annotation provenance; V2-V5 use exact machine-annotation consensus. These are proxy labels, not worldwide ground truth.\n",
         proxy_rows.len(),
-        proxy_rows.iter().filter(|row| row.base.expected_greeting).count(),
-        proxy_rows.iter().filter(|row| !row.base.expected_greeting).count(),
+        proxy_rows
+            .iter()
+            .filter(|row| row.base.expected_greeting)
+            .count(),
+        proxy_rows
+            .iter()
+            .filter(|row| !row.base.expected_greeting)
+            .count(),
     )?;
 
     writeln!(report, "## Feature definitions and availability\n")?;
@@ -2756,7 +2780,10 @@ fn build_report(
     }
 
     writeln!(report, "\n## Direct correlation\n")?;
-    writeln!(report, "| Population | Rows | Title/upper contrast | Any nonzero contrast | No usable pair |")?;
+    writeln!(
+        report,
+        "| Population | Rows | Title/upper contrast | Any nonzero contrast | No usable pair |"
+    )?;
     writeln!(report, "|---|---:|---:|---:|---:|")?;
     for group in DiagnosticPopulation::ALL {
         let selected = proxy_rows
@@ -2790,14 +2817,18 @@ fn build_report(
         )?;
     }
 
-    let frozen_ranking = ranking_folds.iter().fold(RankingMetrics::default(), |mut sum, fold| {
-        add_ranking_metrics(&mut sum, fold.frozen);
-        sum
-    });
-    let adjusted_ranking = ranking_folds.iter().fold(RankingMetrics::default(), |mut sum, fold| {
-        add_ranking_metrics(&mut sum, fold.adjusted);
-        sum
-    });
+    let frozen_ranking = ranking_folds
+        .iter()
+        .fold(RankingMetrics::default(), |mut sum, fold| {
+            add_ranking_metrics(&mut sum, fold.frozen);
+            sum
+        });
+    let adjusted_ranking = ranking_folds
+        .iter()
+        .fold(RankingMetrics::default(), |mut sum, fold| {
+            add_ranking_metrics(&mut sum, fold.adjusted);
+            sum
+        });
     writeln!(report, "\n## Ranking experiment\n")?;
     writeln!(
         report,
@@ -2808,9 +2839,15 @@ fn build_report(
         full_ranking.parameters(),
         MAX_CASE_ADJUSTMENT,
     )?;
-    writeln!(report, "| Ranking | Correct winner | Wrong winner | NULL winner | Ceiling |")?;
+    writeln!(
+        report,
+        "| Ranking | Correct winner | Wrong winner | NULL winner | Ceiling |"
+    )?;
     writeln!(report, "|---|---:|---:|---:|---:|")?;
-    for (label, metrics) in [("Frozen", frozen_ranking), ("Capitalization", adjusted_ranking)] {
+    for (label, metrics) in [
+        ("Frozen", frozen_ranking),
+        ("Capitalization", adjusted_ranking),
+    ] {
         writeln!(
             report,
             "| {label} | {} | {} | {} | {} |",
@@ -2822,8 +2859,14 @@ fn build_report(
     }
 
     writeln!(report, "\n## Out-of-fold calibration frontier\n")?;
-    writeln!(report, "| Target | Baseline | Baseline precision | Baseline recall | Capitalization | Precision | Recall | Δ recall | Correct | Wrong | NULL FP | Correct winner rejected |")?;
-    writeln!(report, "|---:|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")?;
+    writeln!(
+        report,
+        "| Target | Baseline | Baseline precision | Baseline recall | Capitalization | Precision | Recall | Δ recall | Correct | Wrong | NULL FP | Correct winner rejected |"
+    )?;
+    writeln!(
+        report,
+        "|---:|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|"
+    )?;
     for target in CAPITALIZATION_TARGETS {
         let base = baseline_best
             .iter()
@@ -2853,27 +2896,21 @@ fn build_report(
     }
 
     writeln!(report, "\n## Additive versus interaction terms\n")?;
-    writeln!(report, "| Target | Pure logistic recall | Additive casing recall | Interaction recall | Reranked interaction recall |")?;
+    writeln!(
+        report,
+        "| Target | Pure logistic recall | Additive casing recall | Interaction recall | Reranked interaction recall |"
+    )?;
     writeln!(report, "|---:|---:|---:|---:|---:|")?;
     for target in CAPITALIZATION_TARGETS {
-        let logistic = aggregate_baseline_fold_metrics(
-            baseline_folds,
-            super::Family::Logistic,
-            target,
-        )
-        .ok_or("pure logistic baseline target missing")?;
-        let additive = aggregate_capitalization_fold_metrics(
-            folds,
-            CalibrationVariant::Additive,
-            target,
-        )
-        .ok_or("additive capitalization target missing")?;
-        let interaction = aggregate_capitalization_fold_metrics(
-            folds,
-            CalibrationVariant::Interaction,
-            target,
-        )
-        .ok_or("interaction capitalization target missing")?;
+        let logistic =
+            aggregate_baseline_fold_metrics(baseline_folds, super::Family::Logistic, target)
+                .ok_or("pure logistic baseline target missing")?;
+        let additive =
+            aggregate_capitalization_fold_metrics(folds, CalibrationVariant::Additive, target)
+                .ok_or("additive capitalization target missing")?;
+        let interaction =
+            aggregate_capitalization_fold_metrics(folds, CalibrationVariant::Interaction, target)
+                .ok_or("interaction capitalization target missing")?;
         let reranked = aggregate_capitalization_fold_metrics(
             folds,
             CalibrationVariant::RerankedInteraction,
@@ -2886,12 +2923,18 @@ fn build_report(
             percent(logistic.recall()),
             percent(additive.recall()),
             percent(interaction.recall()),
-            reranked.map_or_else(|| "not evaluated".to_string(), |metrics| percent(metrics.recall())),
+            reranked.map_or_else(
+                || "not evaluated".to_string(),
+                |metrics| percent(metrics.recall())
+            ),
         )?;
     }
 
     writeln!(report, "\n## Per-generation stability\n")?;
-    writeln!(report, "| Held out | Target | Variant | Precision | Recall | Correct | Wrong | NULL FP |")?;
+    writeln!(
+        report,
+        "| Held out | Target | Variant | Precision | Recall | Correct | Wrong | NULL FP |"
+    )?;
     writeln!(report, "|---|---:|---|---:|---:|---:|---:|---:|")?;
     for fold in folds {
         writeln!(
@@ -2921,9 +2964,7 @@ fn build_report(
         baseline_selections
             .iter()
             .find(|selection| selection.target == 0.99),
-        selections
-            .iter()
-            .find(|selection| selection.target == 0.99),
+        selections.iter().find(|selection| selection.target == 0.99),
     ) {
         let baseline_metrics = super::evaluate_policy(
             structural_suite.rows.iter().map(|row| &row.base),
@@ -2931,7 +2972,10 @@ fn build_report(
         );
         let ranked = ranked_rows(&structural_suite.rows, casing.variant, casing.ranking);
         let casing_metrics = evaluate_policy(ranked.iter(), &casing.full_development.policy);
-        writeln!(report, "| 99% full-development policy | Correct | Wrong | Recall |")?;
+        writeln!(
+            report,
+            "| 99% full-development policy | Correct | Wrong | Recall |"
+        )?;
         writeln!(report, "|---|---:|---:|---:|")?;
         writeln!(
             report,
@@ -2951,7 +2995,10 @@ fn build_report(
         )?;
     }
 
-    writeln!(report, "| Target | Policy | Transformation | Correct | Wrong | Recall |")?;
+    writeln!(
+        report,
+        "| Target | Policy | Transformation | Correct | Wrong | Recall |"
+    )?;
     writeln!(report, "|---:|---|---|---:|---:|---:|")?;
     for target in [0.995, 0.99] {
         let baseline = baseline_selections
@@ -2979,9 +3026,7 @@ fn build_report(
                 &baseline.full_development.policy,
             );
             let casing_metrics = evaluate_policy(
-                ranked
-                    .iter()
-                    .filter(|row| row.category.ends_with(&suffix)),
+                ranked.iter().filter(|row| row.category.ends_with(&suffix)),
                 &casing.full_development.policy,
             );
             for (label, metrics) in [
@@ -3027,7 +3072,10 @@ fn build_report(
         report,
         "Identifying example text is redacted. The diagnostic path remains exercised only after model selection.\n"
     )?;
-    writeln!(report, "| Input | Target | Variant | Winner before → after | Contrast | Support | Emits |")?;
+    writeln!(
+        report,
+        "| Input | Target | Variant | Winner before → after | Contrast | Support | Emits |"
+    )?;
     writeln!(report, "|---|---:|---|---|---|---:|---:|")?;
     for outcome in qualitative {
         writeln!(
@@ -3077,9 +3125,7 @@ fn classify_recommendation(
         .into_iter()
         .map(|target| {
             let base = baseline.iter().find(|point| point.target == target);
-            let casing = capitalization
-                .iter()
-                .find(|point| point.target == target);
+            let casing = capitalization.iter().find(|point| point.target == target);
             match (base, casing) {
                 (Some(base), Some(casing)) => {
                     casing.metrics.recall().unwrap_or(0.0) - base.metrics.recall().unwrap_or(0.0)
@@ -3101,25 +3147,17 @@ fn classify_recommendation(
         .iter()
         .find(|selection| selection.target == 0.99)
         .map(|selection| {
-            let ranked = ranked_rows(
-                &structural_suite.rows,
-                selection.variant,
-                selection.ranking,
-            );
+            let ranked = ranked_rows(&structural_suite.rows, selection.variant, selection.ranking);
             evaluate_policy(ranked.iter(), &selection.full_development.policy)
         });
     let structural_safe = baseline_structural
         .zip(capitalization_structural)
         .is_some_and(|(baseline, capitalization)| {
-            capitalization.correct >= baseline.correct
-                && capitalization.wrong <= baseline.wrong
+            capitalization.correct >= baseline.correct && capitalization.wrong <= baseline.wrong
         });
     let like_for_like_gain = [0.99, 0.98].into_iter().any(|target| {
-        let baseline = aggregate_baseline_fold_metrics(
-            baseline_folds,
-            super::Family::Logistic,
-            target,
-        );
+        let baseline =
+            aggregate_baseline_fold_metrics(baseline_folds, super::Family::Logistic, target);
         let casing = aggregate_capitalization_fold_metrics(
             capitalization_folds,
             CalibrationVariant::Interaction,
@@ -3214,8 +3252,14 @@ mod tests {
         assert_eq!(supportive.support.to_bits(), 0.875_f64.to_bits());
         assert_eq!(reverse.support.to_bits(), (-0.875_f64).to_bits());
         assert_eq!(same.support.to_bits(), 0.0_f64.to_bits());
-        assert_eq!(contrast_stats(lower, lower).support.to_bits(), 0.0_f64.to_bits());
-        assert_eq!(contrast_stats(title, uncased).support.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            contrast_stats(lower, lower).support.to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            contrast_stats(title, uncased).support.to_bits(),
+            0.0_f64.to_bits()
+        );
     }
 
     #[test]
@@ -3241,7 +3285,10 @@ mod tests {
         let title = classify_case("Jean");
         let mixed = classify_case("JeAN");
         assert_eq!(compare_uppercase_proportions(title, mixed), Ordering::Less);
-        assert_eq!(compare_uppercase_proportions(mixed, title), Ordering::Greater);
+        assert_eq!(
+            compare_uppercase_proportions(mixed, title),
+            Ordering::Greater
+        );
     }
 
     #[test]
@@ -3286,7 +3333,10 @@ mod tests {
 
     #[test]
     fn title_transform_preserves_name_component_boundaries() {
-        assert_eq!(title_like_transform("o’CONNOR jean-pierre"), "O’Connor Jean-Pierre");
+        assert_eq!(
+            title_like_transform("o’CONNOR jean-pierre"),
+            "O’Connor Jean-Pierre"
+        );
     }
 
     fn candidate(display: &str, score: f64) -> CandidateDiagnostic {

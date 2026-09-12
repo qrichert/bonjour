@@ -35,7 +35,8 @@ use c3_development::run_c3_development;
 use c31_development::run_c31_development;
 use calibration_frontier::{
     run_c5_selection, run_calibration_frontier, run_capitalization_diagnostic,
-    run_morphology_diagnostic, run_ordering_diagnostic, run_sealed_c4_c5_comparison,
+    run_complement_diagnostic, run_morphology_diagnostic, run_ordering_diagnostic,
+    run_sealed_c4_c5_comparison,
 };
 use classifier::{
     ALGORITHM_A, ALGORITHM_B, ALGORITHM_C, ALGORITHM_C1, ALGORITHM_C2, ALGORITHM_C3, ALGORITHM_C4,
@@ -212,8 +213,12 @@ struct Arguments {
     diagnose_ordering_evidence: bool,
     diagnose_capitalization_evidence: bool,
     diagnose_morphology_evidence: bool,
+    diagnose_complement_evidence: bool,
     select_freeze_c5_operating_point: bool,
     morphology_name_totals: Option<PathBuf>,
+    complement_probes: Option<PathBuf>,
+    complement_surname_counts: Option<PathBuf>,
+    complement_surname_manifest: Option<PathBuf>,
     spent_holdouts: Vec<PathBuf>,
     spent_manifests: Vec<PathBuf>,
     spent_sha256s: Vec<String>,
@@ -246,8 +251,12 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut diagnose_ordering_evidence = false;
     let mut diagnose_capitalization_evidence = false;
     let mut diagnose_morphology_evidence = false;
+    let mut diagnose_complement_evidence = false;
     let mut select_freeze_c5_operating_point = false;
     let mut morphology_name_totals = None;
+    let mut complement_probes = None;
+    let mut complement_surname_counts = None;
+    let mut complement_surname_manifest = None;
     let mut spent_holdouts = Vec::new();
     let mut spent_manifests = Vec::new();
     let mut spent_sha256s = Vec::new();
@@ -347,10 +356,18 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             diagnose_capitalization_evidence = true;
         } else if text == "--diagnose-morphology-evidence" {
             diagnose_morphology_evidence = true;
+        } else if text == "--diagnose-complement-evidence" {
+            diagnose_complement_evidence = true;
         } else if text == "--select-freeze-c5-operating-point" {
             select_freeze_c5_operating_point = true;
         } else if let Some(value) = text.strip_prefix("--morphology-name-totals=") {
             morphology_name_totals = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("--complement-probes=") {
+            complement_probes = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("--complement-surname-counts=") {
+            complement_surname_counts = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("--complement-surname-manifest=") {
+            complement_surname_manifest = Some(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("--spent-holdout=") {
             spent_holdouts.push(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("--spent-manifest=") {
@@ -387,9 +404,10 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         + usize::from(diagnose_ordering_evidence)
         + usize::from(diagnose_capitalization_evidence)
         + usize::from(diagnose_morphology_evidence)
+        + usize::from(diagnose_complement_evidence)
         + usize::from(select_freeze_c5_operating_point);
     if explicit_modes > 1 {
-        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, C5-calibration-frontier, C5-selection, ordering-diagnostic, capitalization-diagnostic, morphology-diagnostic, sealed C1/C2 comparison, sealed C2/C3 comparison, sealed C2/C3/C3.1 comparison, sealed C3.1/C4 comparison, and sealed C4/C5 comparison modes are mutually exclusive".into());
+        return Err("sealed-only, spent-diagnostic, C2-development, C3-development, C3.1-development, relational-diagnostic, C4-freeze, C5-calibration-frontier, C5-selection, ordering-diagnostic, capitalization-diagnostic, morphology-diagnostic, complement-diagnostic, sealed C1/C2 comparison, sealed C2/C3 comparison, sealed C2/C3/C3.1 comparison, sealed C3.1/C4 comparison, and sealed C4/C5 comparison modes are mutually exclusive".into());
     }
     validate_spent_arguments(
         diagnose_relational_emission || freeze_c4_relational_emission,
@@ -397,6 +415,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             || diagnose_ordering_evidence
             || diagnose_capitalization_evidence
             || diagnose_morphology_evidence
+            || diagnose_complement_evidence
             || select_freeze_c5_operating_point,
         &spent_holdouts,
         &spent_manifests,
@@ -418,6 +437,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         || diagnose_ordering_evidence
         || diagnose_capitalization_evidence
         || diagnose_morphology_evidence
+        || diagnose_complement_evidence
         || select_freeze_c5_operating_point
     {
         if positional.len() != 2 || sealed.is_some() || development_only || reference_threshold_set
@@ -426,6 +446,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
                 "--select-freeze-c5-operating-point"
             } else if diagnose_morphology_evidence {
                 "--diagnose-morphology-evidence"
+            } else if diagnose_complement_evidence {
+                "--diagnose-complement-evidence"
             } else if diagnose_capitalization_evidence {
                 "--diagnose-capitalization-evidence"
             } else if diagnose_ordering_evidence {
@@ -441,6 +463,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
                 || diagnose_ordering_evidence
                 || diagnose_capitalization_evidence
                 || diagnose_morphology_evidence
+                || diagnose_complement_evidence
                 || select_freeze_c5_operating_point
             {
                 5
@@ -492,6 +515,17 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     if diagnose_morphology_evidence != morphology_name_totals.is_some() {
         return Err("--diagnose-morphology-evidence requires exactly one --morphology-name-totals path, which is forbidden by other modes".into());
     }
+    if diagnose_complement_evidence
+        != (complement_probes.is_some()
+            && complement_surname_counts.is_some()
+            && complement_surname_manifest.is_some())
+        || !diagnose_complement_evidence
+            && (complement_probes.is_some()
+                || complement_surname_counts.is_some()
+                || complement_surname_manifest.is_some())
+    {
+        return Err("--diagnose-complement-evidence requires exactly one each of --complement-probes, --complement-surname-counts, and --complement-surname-manifest; all three are forbidden by other modes".into());
+    }
     Ok(Arguments {
         artifact,
         clean_csv,
@@ -516,8 +550,12 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         diagnose_ordering_evidence,
         diagnose_capitalization_evidence,
         diagnose_morphology_evidence,
+        diagnose_complement_evidence,
         select_freeze_c5_operating_point,
         morphology_name_totals,
+        complement_probes,
+        complement_surname_counts,
+        complement_surname_manifest,
         spent_holdouts,
         spent_manifests,
         spent_sha256s,
@@ -536,7 +574,7 @@ fn validate_spent_arguments(
             return Ok(());
         }
         return Err(
-            "spent holdout triplets require a relational, calibration-frontier, C5-selection, ordering, capitalization, or morphology diagnostic mode".into(),
+            "spent holdout triplets require a relational, calibration-frontier, C5-selection, ordering, capitalization, morphology, or complement diagnostic mode".into(),
         );
     }
     let expected = if frontier_enabled { 5 } else { 3 };
@@ -571,7 +609,7 @@ fn validate_spent_arguments(
 }
 
 fn usage() -> &'static str {
-    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-c5-calibration-frontier [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --select-freeze-c5-operating-point [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-ordering-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-capitalization-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-morphology-evidence --morphology-name-totals=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c31-c4-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c4-c5-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
+    "usage:\n  name-eval <c32-artifact-directory> <clean-v1.csv> <new-output-directory> [--sealed=FILE --sealed-manifest=FILE] [--reference-threshold=FLOAT] [--development-only]\n  name-eval <c32-artifact-directory> <new-output-directory> --sealed-only --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c2-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c3-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --develop-c31-from-spent-holdout-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --freeze-c4-relational-emission [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x3\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-c5-calibration-frontier [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --select-freeze-c5-operating-point [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-ordering-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-capitalization-evidence [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-morphology-evidence --morphology-name-totals=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --diagnose-complement-evidence --complement-probes=FILE --complement-surname-counts=FILE --complement-surname-manifest=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x5\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c1-c2-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c2-c3-c31-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c31-c4-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --compare-sealed-c4-c5-sha256=SHA256 --sealed=FILE --sealed-manifest=FILE"
 }
 
 #[allow(clippy::too_many_lines)]
@@ -600,6 +638,30 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
         validate_spent_holdout_digest(acknowledged, &holdout.manifest.holdout_sha256)?;
     }
     let corpus = bonjour::benchmark::open_artifact(&arguments.artifact)?;
+    if arguments.diagnose_complement_evidence {
+        let holdouts = load_spent_holdouts(arguments)?;
+        let probes = arguments
+            .complement_probes
+            .as_deref()
+            .ok_or("complement diagnostic is missing its qualitative probes path")?;
+        let surname_counts = arguments
+            .complement_surname_counts
+            .as_deref()
+            .ok_or("complement diagnostic is missing its surname counts path")?;
+        let surname_manifest = arguments
+            .complement_surname_manifest
+            .as_deref()
+            .ok_or("complement diagnostic is missing its surname manifest path")?;
+        return run_complement_diagnostic(
+            output,
+            &corpus,
+            holdouts,
+            &fixtures,
+            probes,
+            surname_counts,
+            surname_manifest,
+        );
+    }
     if arguments.diagnose_morphology_evidence {
         let holdouts = load_spent_holdouts(arguments)?;
         let totals = arguments
@@ -3314,6 +3376,21 @@ mod argument_tests {
         arguments
     }
 
+    fn complement_diagnostic_arguments() -> Vec<String> {
+        let mut arguments = calibration_frontier_arguments();
+        let mode = arguments
+            .iter_mut()
+            .find(|argument| argument.as_str() == "--diagnose-c5-calibration-frontier")
+            .unwrap();
+        *mode = "--diagnose-complement-evidence".to_string();
+        arguments.extend([
+            "--complement-probes=probes.csv".to_string(),
+            "--complement-surname-counts=surname-counts.csv".to_string(),
+            "--complement-surname-manifest=surname-manifest.csv".to_string(),
+        ]);
+        arguments
+    }
+
     #[test]
     fn relational_mode_requires_three_unique_spent_triplets() {
         let arguments = parse_owned(relational_arguments()).unwrap();
@@ -3530,6 +3607,50 @@ mod argument_tests {
 
         let mut arguments = morphology_diagnostic_arguments();
         arguments.push("--diagnose-capitalization-evidence".to_string());
+        assert!(parse_owned(arguments).is_err());
+    }
+
+    #[test]
+    fn complement_diagnostic_requires_probes_and_exactly_v1_through_v5() {
+        let arguments = parse_owned(complement_diagnostic_arguments()).unwrap();
+        assert!(arguments.diagnose_complement_evidence);
+        assert!(!arguments.diagnose_c5_calibration_frontier);
+        assert_eq!(
+            arguments.complement_probes,
+            Some(PathBuf::from("probes.csv"))
+        );
+        assert_eq!(
+            arguments.complement_surname_counts,
+            Some(PathBuf::from("surname-counts.csv"))
+        );
+        assert_eq!(
+            arguments.complement_surname_manifest,
+            Some(PathBuf::from("surname-manifest.csv"))
+        );
+        assert_eq!(arguments.clean_csv, None);
+        assert_eq!(arguments.spent_holdouts.len(), 5);
+
+        let mut missing_probes = complement_diagnostic_arguments();
+        missing_probes.retain(|argument| !argument.starts_with("--complement-probes="));
+        assert!(parse_owned(missing_probes).is_err());
+
+        let mut incomplete = complement_diagnostic_arguments();
+        incomplete.drain(incomplete.len() - 6..incomplete.len() - 3);
+        assert!(parse_owned(incomplete).is_err());
+    }
+
+    #[test]
+    fn complement_probes_are_forbidden_outside_complement_mode() {
+        let mut arguments = calibration_frontier_arguments();
+        arguments.extend([
+            "--complement-probes=probes.csv".to_string(),
+            "--complement-surname-counts=surname-counts.csv".to_string(),
+            "--complement-surname-manifest=surname-manifest.csv".to_string(),
+        ]);
+        assert!(parse_owned(arguments).is_err());
+
+        let mut arguments = complement_diagnostic_arguments();
+        arguments.push("--diagnose-ordering-evidence".to_string());
         assert!(parse_owned(arguments).is_err());
     }
 

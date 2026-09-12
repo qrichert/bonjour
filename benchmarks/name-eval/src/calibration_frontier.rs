@@ -18,11 +18,13 @@ use crate::metrics::greeting_matches;
 
 mod c5_selection;
 mod capitalization;
+mod complement;
 mod morphology;
 mod ordering;
 
 pub(crate) use c5_selection::{run_c5_selection, run_sealed_c4_c5_comparison};
 pub(crate) use capitalization::run_capitalization_diagnostic;
+pub(crate) use complement::run_complement_diagnostic;
 pub(crate) use morphology::run_morphology_diagnostic;
 pub(crate) use ordering::run_ordering_diagnostic;
 

@@ -1628,6 +1628,124 @@ SHA-256
 the final generated `report.md` has SHA-256
 `43d4f33a0b6ee43be914b83df9542b1cf853652e328b611bedf377630d403594`.
 
+## Sole-candidate complement-evidence diagnostic
+
+The follow-up complement diagnostic tests native, ordinary two-token C5
+abstentions with exactly one viable, single-token candidate. It
+preserves the existing tokenization, candidate selection, and all
+vetoes. It treats absence from the retained given-name index as unknown,
+never as surname evidence.
+
+The authoritative raw surname source was found on the data host and
+scanned with exact UTF-8 byte equality, matching the existing
+surname-artifact build. The targeted join covered all 105 files,
+491,655,925 rows, and 489,631,377 non-empty surname observations. It
+found positive surname evidence for 376 of 607 distinct proxy/probe
+complement keys. The compact production artifact was not changed.
+
+The strict topology contained 637 spent-proxy rows and no synthetic
+VALIDATION rows. Its complement split was:
+
+| Complement evidence           | Correct winner | Wrong winner | Expected NULL |
+| ----------------------------- | -------------: | -----------: | ------------: |
+| Positive raw surname evidence |            304 |           52 |            16 |
+| No raw surname evidence       |            138 |           98 |            29 |
+
+Absence from the given-name corpus is therefore unsafe by itself.
+Positive surname evidence is also not a standalone decision: it must
+remain conditional on selected-candidate evidence, topology, position,
+and the frozen vetoes.
+
+Position did separate the spent-proxy population strongly:
+
+| Selected token | Correct winner | Wrong winner | Expected NULL |
+| -------------- | -------------: | -----------: | ------------: |
+| First          |            418 |            5 |            19 |
+| Second         |             24 |          145 |            26 |
+
+No primary row had a country or locale hint, so this is raw position
+evidence, not confirmation from the existing name-order prior. A
+selected-candidate-only control gate requiring first position, quality
+at least 0.50, reliability at least 0.40, and role signal at least 0.20
+recovered 254 correct abstentions with zero pooled observed errors. The
+same gate was selected in every leave-one-generation-out fold and
+recovered 51/37/47/59/60 held-out correct cases with zero observed
+errors. This control is not complement evidence and is not promoted by
+the experiment.
+
+The surname-conditioned gate by itself recovered 247 correct cases at
+zero pooled errors, versus 254 for that control. Its useful result
+appeared only in the residual test: unioning a relaxed
+surname-conditioned path with the control added 66 correct cases at zero
+pooled errors, for 320 total. The additive gate required first position,
+selected quality at least 0.40, role signal at least 0.30, and any
+positive raw surname count; reliability could relax to zero.
+
+Leave-one-generation-out selection added correct held-out cases in all
+five generations:
+
+| Held out | Additional correct | Additional wrong | Additional NULL FP |
+| -------- | -----------------: | ---------------: | -----------------: |
+| V1       |                 15 |                0 |                  0 |
+| V2       |                 12 |                0 |                  0 |
+| V3       |                 10 |                0 |                  1 |
+| V4       |                 13 |                0 |                  0 |
+| V5       |                 16 |                0 |                  0 |
+
+That V3 NULL false emission means the zero-training-error selection is
+not a stable zero-error rule. The signal is nevertheless residual rather
+than merely redundant with selected quality, reliability, role, and
+position.
+
+A second exact full-source scan measured surname-observed keys absent
+from all 1,803,175 retained given-name keys. This exposes the
+coverage/storage tradeoff:
+
+| Minimum surname count | Surname-only keys | zstd-19 key bytes | Estimated MPHF + fingerprint + evidence | Zero-error additions |
+| --------------------: | ----------------: | ----------------: | --------------------------------------: | -------------------: |
+|                     1 |        35,417,044 |       114,865,997 |                             192,352,629 |                   66 |
+|                     5 |         3,390,945 |         8,669,513 |                              18,416,478 |                   53 |
+|                    25 |           684,930 |         1,820,637 |                               3,719,907 |                   34 |
+|                    50 |           320,718 |           888,660 |                               1,741,844 |                   26 |
+|                   100 |           135,907 |           399,789 |                                 738,122 |                   18 |
+
+The count-at-least-1 representation is too large relative to the
+existing artifact. A thresholded exact index could be small, but
+choosing its threshold would itself require fresh evidence. Bloom
+membership estimates are reported for feasibility only; false positives
+are not automatically acceptable for a conservative emission path.
+
+The qualitative probes were run only after the grid and operating points
+were frozen, using the actual local strings. Repository-visible output
+is redacted:
+
+| Probe            | Selected | Quality |  Role | Reliability | Raw surname count | Complement state                   | Zero-error control | Zero-error surname gate |
+| ---------------- | -------- | ------: | ----: | ----------: | ----------------: | ---------------------------------- | -----------------: | ----------------------: |
+| Martin REDACTED  | Martin   |   0.627 | 0.460 |       0.898 |                58 | positive surname evidence          |                yes |                     yes |
+| Olivier REDACTED | Olivier  |   0.696 | 0.605 |       0.777 |               138 | positive surname evidence          |                yes |                     yes |
+| Baris REDACTED   | Baris    |   0.710 | 0.541 |       0.575 |            16,864 | given-observed; two-candidate case |                 no |                      no |
+| Motorcycle Club  | Club     |   0.434 | 0.194 |       0.449 |                 1 | organization/lexical negative      |                 no |                      no |
+
+`Motorcycle Club` remains an abstention under frozen C5 and every
+searched gate because all existing vetoes are inherited unchanged. Its
+raw count of one also illustrates why surname occurrence alone is not
+personhood evidence.
+
+Run this diagnostic with `--diagnose-complement-evidence`, an ignored
+local `--complement-probes=FILE`, targeted
+`--complement-surname-counts=FILE` and
+`--complement-surname-manifest=FILE`, and the five acknowledged
+spent-holdout triplets. It emits only aggregate summaries and
+caller-redacted probe labels, including reference, surname-only,
+residual, generation-held-out, and storage tradeoff CSVs.
+
+The recommendation is to keep positive complement-surname evidence as a
+promising experimental feature, without implementing a classifier or
+adding a production index. It has useful conditional separation on spent
+proxies, but the single LOGO error and empty synthetic topology are
+insufficient for a safe promotion. A fresh preregistered holdout would
+be required before selecting a rule or storage threshold.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.

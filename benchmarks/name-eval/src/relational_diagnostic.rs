@@ -956,9 +956,9 @@ fn qualitative_c4_diagnostics(corpus: &impl EvidenceSource) -> Vec<QualitativeC4
         // Redacted: Name that selects its given name but fails both relational paths.
         "Baris REDACTED",
     ]
-        .into_iter()
-        .map(|input| qualitative_c4_diagnostic(corpus, input))
-        .collect()
+    .into_iter()
+    .map(|input| qualitative_c4_diagnostic(corpus, input))
+    .collect()
 }
 
 fn qualitative_c4_diagnostic(
