@@ -438,6 +438,13 @@ pub struct C5EmissionConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct C6EmissionConfig {
+    pub first_position_quality_min: f64,
+    pub first_position_reliability_min: f64,
+    pub first_position_role_signal_min: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecisionContributions {
     pub candidate_quality: f64,
     pub winner_margin: f64,
@@ -563,6 +570,59 @@ pub struct C5DecisionBreakdown {
     pub controlled: C5RuleBreakdown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum C6EmissionSource {
+    C31,
+    SoleNative,
+    DominantWinner,
+    C5,
+    FirstPosition,
+    Abstain,
+}
+
+impl C6EmissionSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::C31 => "c3_1",
+            Self::SoleNative => "sole_native",
+            Self::DominantWinner => "dominant_winner",
+            Self::C5 => "c5",
+            Self::FirstPosition => "first_position",
+            Self::Abstain => "abstain",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct C6RuleBreakdown {
+    pub c5_abstained: bool,
+    pub native_candidate: bool,
+    pub exactly_two_alphabetic_tokens: bool,
+    pub single_token_winner: bool,
+    pub selected_first: bool,
+    pub candidate_count: usize,
+    pub candidate_count_pass: bool,
+    pub candidate_quality: Option<f64>,
+    pub candidate_quality_min: f64,
+    pub candidate_quality_pass: bool,
+    pub reliability: Option<f64>,
+    pub reliability_min: f64,
+    pub reliability_pass: bool,
+    pub role_signal: Option<f64>,
+    pub role_signal_min: f64,
+    pub role_signal_pass: bool,
+    pub vetoes_pass: bool,
+    pub passed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct C6DecisionBreakdown {
+    pub c5: C5DecisionBreakdown,
+    pub emission_source: C6EmissionSource,
+    pub first_position: C6RuleBreakdown,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct C2ScoreBreakdown {
     margin_signal: f64,
@@ -612,6 +672,14 @@ pub const ALGORITHM_C5: C5EmissionConfig = C5EmissionConfig {
     reliability_min: 0.0,
     role_signal_min: 0.0,
     multiple_candidate_margin_min: 0.50,
+};
+
+/// Frozen after development on spent proxy evidence and independent validation
+/// on `REAL_PROXY_V7`. This additive rule preserves every C5 decision.
+pub const ALGORITHM_C6: C6EmissionConfig = C6EmissionConfig {
+    first_position_quality_min: 0.50,
+    first_position_reliability_min: 0.40,
+    first_position_role_signal_min: 0.20,
 };
 
 pub fn infer_prethreshold(
@@ -1834,6 +1902,139 @@ fn c5_rule_breakdown(c4: &C4DecisionBreakdown, config: C5EmissionConfig) -> C5Ru
     }
 }
 
+pub fn c6_decision_breakdown(
+    diagnostic: &RoleInferenceDiagnostic,
+    display_name: &str,
+    c2_config: C2EmissionConfig,
+    c31_config: C31EmissionConfig,
+    c4_config: C4EmissionConfig,
+    c5_config: C5EmissionConfig,
+    c6_config: C6EmissionConfig,
+) -> C6DecisionBreakdown {
+    debug_assert!(c6_config_is_valid(c6_config));
+    let c5 = c5_decision_breakdown(diagnostic, c2_config, c31_config, c4_config, c5_config);
+    c6_decision_from_c5(c5, display_name, diagnostic.candidates.first(), c6_config)
+}
+
+pub fn c6_emitted_candidate(decision: &C6DecisionBreakdown) -> Option<&str> {
+    (decision.emission_source != C6EmissionSource::Abstain)
+        .then(|| {
+            decision
+                .c5
+                .c4
+                .c31
+                .winner
+                .as_ref()
+                .map(|winner| winner.greeting_candidate.as_str())
+        })
+        .flatten()
+}
+
+pub fn c6_config_is_valid(config: C6EmissionConfig) -> bool {
+    [
+        config.first_position_quality_min,
+        config.first_position_reliability_min,
+        config.first_position_role_signal_min,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+}
+
+pub fn c6_decision_from_c5(
+    c5: C5DecisionBreakdown,
+    display_name: &str,
+    selected: Option<&CandidateDiagnostic>,
+    config: C6EmissionConfig,
+) -> C6DecisionBreakdown {
+    debug_assert!(c6_config_is_valid(config));
+    let first_position = c6_rule_breakdown(&c5, display_name, selected, config);
+    let emission_source = match c5.emission_source {
+        C5EmissionSource::C31 => C6EmissionSource::C31,
+        C5EmissionSource::SoleNative => C6EmissionSource::SoleNative,
+        C5EmissionSource::DominantWinner => C6EmissionSource::DominantWinner,
+        C5EmissionSource::C5 => C6EmissionSource::C5,
+        C5EmissionSource::Abstain if first_position.passed => C6EmissionSource::FirstPosition,
+        C5EmissionSource::Abstain => C6EmissionSource::Abstain,
+    };
+    C6DecisionBreakdown {
+        c5,
+        emission_source,
+        first_position,
+    }
+}
+
+fn c6_rule_breakdown(
+    c5: &C5DecisionBreakdown,
+    display_name: &str,
+    selected: Option<&CandidateDiagnostic>,
+    config: C6EmissionConfig,
+) -> C6RuleBreakdown {
+    let c31 = &c5.c4.c31;
+    let winner = c31.winner.as_ref();
+    let selected = winner.and(selected);
+    let c5_abstained = c5.emission_source == C5EmissionSource::Abstain;
+    let native_candidate = c31.segmented_candidate == Some(false);
+    let exactly_two_alphabetic_tokens = has_exactly_two_alphabetic_tokens(display_name);
+    let single_token_winner = selected.is_some_and(|candidate| candidate.length == 1);
+    let selected_first = selected.is_some_and(|candidate| candidate.start == 0);
+    let candidate_count = winner.map_or(0, |winner| winner.candidate_count);
+    let candidate_count_pass = candidate_count == 1;
+    let candidate_quality = winner.map(|winner| winner.winner_score);
+    let candidate_quality_pass =
+        candidate_quality.is_some_and(|quality| quality >= config.first_position_quality_min);
+    let reliability = winner.map(|winner| winner.reliability);
+    let reliability_pass =
+        reliability.is_some_and(|reliability| reliability >= config.first_position_reliability_min);
+    let role_signal = winner.map(|winner| winner.role_signal);
+    let role_signal_pass =
+        role_signal.is_some_and(|role| role >= config.first_position_role_signal_min);
+    let vetoes_pass = c31_vetoes_pass(c31);
+    let passed = c5_abstained
+        && native_candidate
+        && exactly_two_alphabetic_tokens
+        && single_token_winner
+        && selected_first
+        && candidate_count_pass
+        && candidate_quality_pass
+        && reliability_pass
+        && role_signal_pass
+        && vetoes_pass;
+    C6RuleBreakdown {
+        c5_abstained,
+        native_candidate,
+        exactly_two_alphabetic_tokens,
+        single_token_winner,
+        selected_first,
+        candidate_count,
+        candidate_count_pass,
+        candidate_quality,
+        candidate_quality_min: config.first_position_quality_min,
+        candidate_quality_pass,
+        reliability,
+        reliability_min: config.first_position_reliability_min,
+        reliability_pass,
+        role_signal,
+        role_signal_min: config.first_position_role_signal_min,
+        role_signal_pass,
+        vetoes_pass,
+        passed,
+    }
+}
+
+fn has_exactly_two_alphabetic_tokens(display_name: &str) -> bool {
+    let mut tokens = display_name.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    let Some(second) = tokens.next() else {
+        return false;
+    };
+    tokens.next().is_none()
+        && [first, second]
+            .into_iter()
+            .all(|token| token.nfc().all(char::is_alphabetic))
+}
+
 pub fn apply_gender_hint(
     diagnostic: &RoleInferenceDiagnostic,
     inference: &mut RawInference,
@@ -2330,6 +2531,63 @@ mod tests {
             role_signal: ALGORITHM_C5.role_signal_min,
             ..c4_winner(candidate_count)
         }
+    }
+
+    fn c6_winner() -> WinnerFeatures {
+        WinnerFeatures {
+            winner_score: ALGORITHM_C6.first_position_quality_min,
+            reliability: ALGORITHM_C6.first_position_reliability_min,
+            role_signal: ALGORITHM_C6.first_position_role_signal_min,
+            ..c4_winner(1)
+        }
+    }
+
+    fn selected_diagnostic(start: usize, length: usize) -> CandidateDiagnostic {
+        CandidateDiagnostic {
+            display: "Selected".to_string(),
+            start,
+            length,
+            byte_start: None,
+            byte_end: None,
+            global_given_count: 10_000,
+            country_given_count: 0,
+            effective_given_count: 10_000,
+            female_given_count: 0,
+            male_given_count: 10_000,
+            global_surname_count: 100,
+            role_llr: 2.0,
+            role_signal: ALGORITHM_C6.first_position_role_signal_min,
+            reliability: ALGORITHM_C6.first_position_reliability_min,
+            country_support: 0.0,
+            compound_evidence: 0.0,
+            compositional_evidence: 0.0,
+            remainder_evidence: 0.0,
+            origin: "exact",
+            segmentation_mechanism: None,
+            lookup_query: Some("Selected".to_string()),
+            lookup_mode: Some("normalized"),
+            left_lookup_mode: None,
+            right_lookup_mode: None,
+            score: ALGORITHM_C6.first_position_quality_min,
+            algorithm_a_score: 0.0,
+            algorithm_b_score: 0.0,
+        }
+    }
+
+    fn c6_decision_for(
+        winner: WinnerFeatures,
+        display_name: &str,
+        start: usize,
+        length: usize,
+    ) -> C6DecisionBreakdown {
+        let c4 = c4_decision_from_c31(
+            c31_breakdown_for_c4(winner),
+            ALGORITHM_C2.threshold,
+            ALGORITHM_C4,
+        );
+        let c5 = c5_decision_from_c4(c4, ALGORITHM_C5);
+        let selected = selected_diagnostic(start, length);
+        c6_decision_from_c5(c5, display_name, Some(&selected), ALGORITHM_C6)
     }
 
     fn immediately_below(value: f64) -> f64 {
@@ -3281,6 +3539,125 @@ mod tests {
         assert!(!c5_config_is_valid(C5EmissionConfig {
             multiple_candidate_margin_min: f64::NAN,
             ..ALGORITHM_C5
+        }));
+    }
+
+    #[test]
+    fn c6_first_position_rule_has_exact_inclusive_boundaries() {
+        let boundary = c6_decision_for(c6_winner(), "Selected Family", 0, 1);
+        assert_eq!(boundary.emission_source, C6EmissionSource::FirstPosition);
+        assert!(boundary.first_position.passed);
+        assert_eq!(c6_emitted_candidate(&boundary), Some("Selected"));
+
+        let decomposed = c6_decision_for(c6_winner(), "Sele\u{301}cted Family", 0, 1);
+        assert_eq!(decomposed.emission_source, C6EmissionSource::FirstPosition);
+
+        for changed in [
+            WinnerFeatures {
+                winner_score: immediately_below(ALGORITHM_C6.first_position_quality_min),
+                ..c6_winner()
+            },
+            WinnerFeatures {
+                reliability: immediately_below(ALGORITHM_C6.first_position_reliability_min),
+                ..c6_winner()
+            },
+            WinnerFeatures {
+                role_signal: immediately_below(ALGORITHM_C6.first_position_role_signal_min),
+                ..c6_winner()
+            },
+        ] {
+            let decision = c6_decision_for(changed, "Selected Family", 0, 1);
+            assert_eq!(decision.emission_source, C6EmissionSource::Abstain);
+            assert!(!decision.first_position.passed);
+        }
+    }
+
+    #[test]
+    fn c6_first_position_rule_requires_the_frozen_topology() {
+        for (display_name, start, length, winner) in [
+            ("Family Selected", 1, 1, c6_winner()),
+            ("Selected", 0, 1, c6_winner()),
+            ("Selected Family Other", 0, 1, c6_winner()),
+            ("Selected Family-Other", 0, 1, c6_winner()),
+            ("Selected Family", 0, 2, c6_winner()),
+            (
+                "Selected Family",
+                0,
+                1,
+                WinnerFeatures {
+                    candidate_count: 2,
+                    no_competitor: false,
+                    second_score: Some(0.10),
+                    ..c6_winner()
+                },
+            ),
+        ] {
+            let decision = c6_decision_for(winner, display_name, start, length);
+            assert_eq!(decision.emission_source, C6EmissionSource::Abstain);
+            assert!(!decision.first_position.passed);
+        }
+
+        let mut segmented = c6_winner();
+        segmented.candidate_origin = "handle_segment";
+        segmented.segmentation_mechanism = Some("digit");
+        let decision = c6_decision_for(segmented, "Selected Family", 0, 1);
+        assert_eq!(decision.emission_source, C6EmissionSource::Abstain);
+        assert!(!decision.first_position.native_candidate);
+    }
+
+    #[test]
+    fn c6_preserves_c5_emissions_and_every_existing_veto() {
+        let selected = selected_diagnostic(0, 1);
+        for source in [
+            C5EmissionSource::C31,
+            C5EmissionSource::SoleNative,
+            C5EmissionSource::DominantWinner,
+            C5EmissionSource::C5,
+        ] {
+            let mut c5 = c5_decision_from_c4(
+                c4_decision_from_c31(
+                    c31_breakdown_for_c4(c5_winner(1)),
+                    ALGORITHM_C2.threshold,
+                    ALGORITHM_C4,
+                ),
+                ALGORITHM_C5,
+            );
+            c5.emission_source = source;
+            let decision =
+                c6_decision_from_c5(c5, "Selected Family", Some(&selected), ALGORITHM_C6);
+            let expected = match source {
+                C5EmissionSource::C31 => C6EmissionSource::C31,
+                C5EmissionSource::SoleNative => C6EmissionSource::SoleNative,
+                C5EmissionSource::DominantWinner => C6EmissionSource::DominantWinner,
+                C5EmissionSource::C5 => C6EmissionSource::C5,
+                C5EmissionSource::Abstain => unreachable!(),
+            };
+            assert_eq!(decision.emission_source, expected);
+            assert!(!decision.first_position.passed);
+        }
+
+        for mutate in [
+            |breakdown: &mut C31DecisionBreakdown| breakdown.hard_organization_marker = true,
+            |breakdown: &mut C31DecisionBreakdown| breakdown.generic_organization_marker = true,
+            |breakdown: &mut C31DecisionBreakdown| breakdown.ampersand = true,
+            |breakdown: &mut C31DecisionBreakdown| breakdown.candidate_too_short = true,
+        ] {
+            let mut c31 = c31_breakdown_for_c4(c6_winner());
+            mutate(&mut c31);
+            let c5 = c5_decision_from_c4(
+                c4_decision_from_c31(c31, ALGORITHM_C2.threshold, ALGORITHM_C4),
+                ALGORITHM_C5,
+            );
+            let decision =
+                c6_decision_from_c5(c5, "Selected Family", Some(&selected), ALGORITHM_C6);
+            assert_eq!(decision.emission_source, C6EmissionSource::Abstain);
+            assert!(!decision.first_position.vetoes_pass);
+        }
+
+        assert!(c6_config_is_valid(ALGORITHM_C6));
+        assert!(!c6_config_is_valid(C6EmissionConfig {
+            first_position_role_signal_min: f64::NAN,
+            ..ALGORITHM_C6
         }));
     }
 

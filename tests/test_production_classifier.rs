@@ -32,7 +32,7 @@ fn production_inference_preserves_source_spans_and_hard_abstention() {
 }
 
 #[test]
-fn production_c5_preserves_c4_relational_emissions() {
+fn production_c6_preserves_c4_relational_emissions() {
     let Some(classifier) = test_classifier() else {
         return;
     };
@@ -42,6 +42,31 @@ fn production_c5_preserves_c4_relational_emissions() {
     assert_eq!(inference.emission_source, EmissionSource::DominantWinner);
     assert_eq!(inference.greeting(), Some("Arthur"));
     assert_eq!(inference.gender_hint, Some(GenderHint::Male));
+}
+
+#[test]
+fn production_c6_emits_only_the_validated_first_position_shape() {
+    let Some(classifier) = test_classifier() else {
+        return;
+    };
+    let first_position = classifier.infer_detailed("Martin REDACTED", None, None);
+    assert_eq!(first_position.inference.greeting(), Some("Martin"));
+    assert_eq!(
+        first_position.inference.emission_source,
+        EmissionSource::FirstPosition
+    );
+    assert!(first_position.decision.first_position.passed);
+    assert!(!first_position.decision.c5.passed);
+
+    let organization = classifier.infer_detailed("Motorcycle Club", None, None);
+    assert_eq!(organization.inference.greeting(), None);
+    assert_eq!(
+        organization.inference.emission_source,
+        EmissionSource::Abstain
+    );
+    assert!(organization.decision.vetoes.generic_organization_marker);
+    assert!(!organization.decision.first_position.vetoes_pass);
+    assert!(!organization.decision.first_position.passed);
 }
 
 #[test]
@@ -136,7 +161,7 @@ fn cli_greeting_and_json_contracts_are_exact_with_runtime_data() {
         "{}",
         String::from_utf8_lossy(&json.stderr)
     );
-    assert_c5_json_snapshot(
+    assert_c6_json_snapshot(
         String::from_utf8_lossy(&json.stdout),
         "{\n  \"input\": \"Quentin Richert\",\n  \"best_candidate\": \"Quentin\",\n  \"greeting_name\": \"Quentin\",\n  \"decision_score\": 0.8258187425766436,\n  \"decision\": {\n    \"candidate_quality\": 0.9341785978125992,\n    \"winner_margin\": 0.7342375610072307,\n    \"margin_signal\": 1.0,\n    \"role_llr\": 3.1788968086994007,\n    \"role_signal\": 0.8258296772199872,\n    \"reliability\": 0.7386898426132628,\n    \"alphabetic_length\": 7,\n    \"minimum_alphabetic_length\": 3,\n    \"contributions\": {\n      \"candidate_quality\": 0.0,\n      \"winner_margin\": 0.1,\n      \"role\": 0.578080774053991,\n      \"reliability\": 0.14773796852265256\n    },\n    \"pre_veto_score\": 0.8258187425766436,\n    \"post_veto_score\": 0.8258187425766436,\n    \"segmented_candidate\": false,\n    \"segmentation_mechanism\": null,\n    \"segmented_candidate_penalty\": 0.0,\n    \"vetoes\": {\n      \"strong_organization_marker\": false,\n      \"generic_organization_marker\": false,\n      \"ampersand\": false,\n      \"candidate_too_short\": false\n    }\n  },\n  \"candidates\": [\n    {\n      \"candidate\": \"Quentin\",\n      \"ranking_score\": 0.9341785978125992,\n      \"signals\": {\n        \"corpus_score\": 0.9341785978125992\n      }\n    },\n    {\n      \"candidate\": \"Richert\",\n      \"ranking_score\": 0.1999410368053685,\n      \"signals\": {\n        \"corpus_score\": 0.1999410368053685\n      }\n    },\n    {\n      \"candidate\": \"Quentin Richert\",\n      \"ranking_score\": null,\n      \"signals\": {\n        \"corpus_score\": null\n      }\n    }\n  ],\n  \"gender_hint\": \"male\",\n  \"gender_confidence\": 0.9170640418908462\n}\n",
         EmissionSource::C31,
@@ -156,7 +181,7 @@ fn cli_greeting_and_json_contracts_are_exact_with_runtime_data() {
         "{}",
         String::from_utf8_lossy(&below_default.stderr)
     );
-    assert_c5_json_snapshot(
+    assert_c6_json_snapshot(
         String::from_utf8_lossy(&below_default.stdout),
         "{\n  \"input\": \"Martin Emmanuel\",\n  \"best_candidate\": \"Martin Emmanuel\",\n  \"greeting_name\": null,\n  \"decision_score\": 0.5481962760808583,\n  \"decision\": {\n    \"candidate_quality\": 0.7068577742176809,\n    \"winner_margin\": 0.04391163594672676,\n    \"margin_signal\": 0.08782327189345351,\n    \"role_llr\": 2.4953750309459153,\n    \"role_signal\": 0.7442401833792305,\n    \"reliability\": 0.09222910263025777,\n    \"alphabetic_length\": 14,\n    \"minimum_alphabetic_length\": 3,\n    \"contributions\": {\n      \"candidate_quality\": 0.0,\n      \"winner_margin\": 0.008782327189345351,\n      \"role\": 0.5209681283654614,\n      \"reliability\": 0.018445820526051555\n    },\n    \"pre_veto_score\": 0.5481962760808583,\n    \"post_veto_score\": 0.5481962760808583,\n    \"segmented_candidate\": false,\n    \"segmentation_mechanism\": null,\n    \"segmented_candidate_penalty\": 0.0,\n    \"vetoes\": {\n      \"strong_organization_marker\": false,\n      \"generic_organization_marker\": false,\n      \"ampersand\": false,\n      \"candidate_too_short\": false\n    }\n  },\n  \"candidates\": [\n    {\n      \"candidate\": \"Martin Emmanuel\",\n      \"ranking_score\": 0.7068577742176809,\n      \"signals\": {\n        \"corpus_score\": 0.7068577742176809\n      }\n    },\n    {\n      \"candidate\": \"Emmanuel\",\n      \"ranking_score\": 0.6629461382709542,\n      \"signals\": {\n        \"corpus_score\": 0.6629461382709542\n      }\n    },\n    {\n      \"candidate\": \"Martin\",\n      \"ranking_score\": 0.614387611173123,\n      \"signals\": {\n        \"corpus_score\": 0.614387611173123\n      }\n    }\n  ],\n  \"gender_hint\": null,\n  \"gender_confidence\": 0.0\n}\n",
         EmissionSource::Abstain,
@@ -196,7 +221,7 @@ fn cli_greeting_and_json_contracts_are_exact_with_runtime_data() {
         "{}",
         String::from_utf8_lossy(&gender.stderr)
     );
-    assert_c5_json_snapshot(
+    assert_c6_json_snapshot(
         String::from_utf8_lossy(&gender.stdout),
         "{\n  \"input\": \"Simone\",\n  \"best_candidate\": \"Simone\",\n  \"greeting_name\": \"Simone\",\n  \"decision_score\": 0.8100985093918445,\n  \"decision\": {\n    \"candidate_quality\": 0.8365742000974182,\n    \"winner_margin\": 1.0,\n    \"margin_signal\": 1.0,\n    \"role_llr\": 2.685054369563951,\n    \"role_signal\": 0.7691664066737898,\n    \"reliability\": 0.858410123600958,\n    \"alphabetic_length\": 6,\n    \"minimum_alphabetic_length\": 3,\n    \"contributions\": {\n      \"candidate_quality\": 0.0,\n      \"winner_margin\": 0.1,\n      \"role\": 0.5384164846716528,\n      \"reliability\": 0.17168202472019162\n    },\n    \"pre_veto_score\": 0.8100985093918445,\n    \"post_veto_score\": 0.8100985093918445,\n    \"segmented_candidate\": false,\n    \"segmentation_mechanism\": null,\n    \"segmented_candidate_penalty\": 0.0,\n    \"vetoes\": {\n      \"strong_organization_marker\": false,\n      \"generic_organization_marker\": false,\n      \"ampersand\": false,\n      \"candidate_too_short\": false\n    }\n  },\n  \"candidates\": [\n    {\n      \"candidate\": \"Simone\",\n      \"ranking_score\": 0.8365742000974182,\n      \"signals\": {\n        \"corpus_score\": 0.8365742000974182\n      }\n    }\n  ],\n  \"gender_hint\": \"male\",\n  \"gender_confidence\": 0.714385674755892\n}\n",
         EmissionSource::C31,
@@ -216,7 +241,7 @@ fn cli_greeting_and_json_contracts_are_exact_with_runtime_data() {
         "{}",
         String::from_utf8_lossy(&hard_abstention.stderr)
     );
-    assert_c5_json_snapshot(
+    assert_c6_json_snapshot(
         String::from_utf8_lossy(&hard_abstention.stdout),
         "{\n  \"input\": \"Quentin Richert SAS\",\n  \"best_candidate\": null,\n  \"greeting_name\": null,\n  \"decision_score\": 0.0,\n  \"decision\": {\n    \"candidate_quality\": null,\n    \"winner_margin\": null,\n    \"margin_signal\": null,\n    \"role_llr\": null,\n    \"role_signal\": null,\n    \"reliability\": null,\n    \"alphabetic_length\": null,\n    \"minimum_alphabetic_length\": 3,\n    \"contributions\": null,\n    \"pre_veto_score\": null,\n    \"post_veto_score\": 0.0,\n    \"segmented_candidate\": null,\n    \"segmentation_mechanism\": null,\n    \"segmented_candidate_penalty\": 0.0,\n    \"vetoes\": {\n      \"strong_organization_marker\": true,\n      \"generic_organization_marker\": false,\n      \"ampersand\": false,\n      \"candidate_too_short\": false\n    }\n  },\n  \"candidates\": [\n    {\n      \"candidate\": \"Quentin\",\n      \"ranking_score\": 0.9237220385528407,\n      \"signals\": {\n        \"corpus_score\": 0.9237220385528407\n      }\n    },\n    {\n      \"candidate\": \"SAS\",\n      \"ranking_score\": 0.33597018983124183,\n      \"signals\": {\n        \"corpus_score\": 0.33597018983124183\n      }\n    },\n    {\n      \"candidate\": \"Richert\",\n      \"ranking_score\": 0.1999410368053685,\n      \"signals\": {\n        \"corpus_score\": 0.1999410368053685\n      }\n    },\n    {\n      \"candidate\": \"Quentin Richert\",\n      \"ranking_score\": null,\n      \"signals\": {\n        \"corpus_score\": null\n      }\n    },\n    {\n      \"candidate\": \"Richert SAS\",\n      \"ranking_score\": null,\n      \"signals\": {\n        \"corpus_score\": null\n      }\n    }\n  ],\n  \"gender_hint\": null,\n  \"gender_confidence\": 0.0\n}\n",
         EmissionSource::Abstain,
@@ -228,7 +253,7 @@ fn cli_greeting_and_json_contracts_are_exact_with_runtime_data() {
 }
 
 #[cfg(not(feature = "standalone"))]
-fn assert_c5_json_snapshot(
+fn assert_c6_json_snapshot(
     actual: impl AsRef<str>,
     legacy_expected: &str,
     emission_source: EmissionSource,
@@ -245,6 +270,7 @@ fn assert_c5_json_snapshot(
         EmissionSource::SoleNative => "sole_native",
         EmissionSource::DominantWinner => "dominant_winner",
         EmissionSource::C5 => "c5",
+        EmissionSource::FirstPosition => "first_position",
         EmissionSource::Abstain => "abstain",
     };
     assert_eq!(decision["emission_source"], source_name);
@@ -252,6 +278,7 @@ fn assert_c5_json_snapshot(
     assert_rule_json(&decision["sole_native"], false, sole_passed);
     assert_rule_json(&decision["dominant_winner"], true, dominant_passed);
     assert_c5_rule_json(&decision["c5"], c5_passed);
+    assert_first_position_rule_json(&decision["first_position"], false);
 
     let header = format!(
         "    \"emission_source\": \"{source_name}\",\n    \"candidate_count\": {candidate_count},\n"
@@ -274,6 +301,16 @@ fn assert_c5_rule_json(rule: &serde_json::Value, passed: bool) {
     assert_eq!(rule["candidate_quality_min"], 0.7);
     assert_eq!(rule["reliability_min"], 0.0);
     assert_eq!(rule["role_signal_min"], 0.0);
+    assert_eq!(rule["passed"], passed);
+}
+
+#[cfg(not(feature = "standalone"))]
+fn assert_first_position_rule_json(rule: &serde_json::Value, passed: bool) {
+    let rule = rule.as_object().unwrap();
+    assert_eq!(rule.len(), 15);
+    assert_eq!(rule["candidate_quality_min"], 0.5);
+    assert_eq!(rule["reliability_min"], 0.4);
+    assert_eq!(rule["role_signal_min"], 0.2);
     assert_eq!(rule["passed"], passed);
 }
 

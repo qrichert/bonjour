@@ -138,6 +138,23 @@ $ bonjour --json "Quentin Richert"
       "role_signal_pass": true,
       "vetoes_pass": true,
       "passed": false
+    },
+    "first_position": {
+      "c5_abstained": false,
+      "native_candidate": true,
+      "exactly_two_alphabetic_tokens": true,
+      "single_token_winner": true,
+      "selected_first": true,
+      "candidate_count": 2,
+      "candidate_count_pass": false,
+      "candidate_quality_min": 0.5,
+      "candidate_quality_pass": true,
+      "reliability_min": 0.4,
+      "reliability_pass": true,
+      "role_signal_min": 0.2,
+      "role_signal_pass": true,
+      "vetoes_pass": true,
+      "passed": false
     }
   },
   "candidates": [
@@ -168,23 +185,24 @@ $ bonjour --json "Quentin Richert"
 }
 ```
 
-`best_candidate` is the highest-ranked candidate before C5 decides
+`best_candidate` is the highest-ranked candidate before C6 decides
 whether it is safe to greet. `greeting_name` is the candidate emitted by
-C5, or `null` when C5 abstains. `decision_score` is the frozen C3.1
-diagnostic score. The default C5 decision is recorded by
+C6, or `null` when C6 abstains. `decision_score` is the frozen C3.1
+diagnostic score. The default C6 decision is recorded by
 `emission_source`: `c3_1`, `sole_native`, and `dominant_winner` preserve
 the historical C4 path, while `c5` identifies a candidate newly emitted
-by C5. Each `ranking_score` orders competing candidates. These are
-different model quantities, and none is a calibrated probability.
+by C5 and `first_position` identifies a candidate newly emitted by C6.
+Each `ranking_score` orders competing candidates. These are different
+model quantities, and none is a calibrated probability.
 
 The `decision` object shows how the winning candidate reaches the C3.1
 score: the winner margin, role evidence, and reliability feed the
 weighted `contributions`; vetoes can then reduce the score to zero, and
 segmented handle candidates can receive a provenance penalty. It also
-shows every condition in C4's two additive relational paths and C5's
-controlled-calibration path. Candidate length has no numeric bonus:
-`alphabetic_length` is only checked against `minimum_alphabetic_length`
-as a safety veto.
+shows every condition in C4's two additive relational paths, C5's
+controlled-calibration path, and C6's first-position path. Candidate
+length has no numeric bonus: `alphabetic_length` is only checked against
+`minimum_alphabetic_length` as a safety veto.
 
 `candidates` also includes eligible source spans that the current corpus
 cannot score. Their `ranking_score` and `signals.corpus_score` are
@@ -230,8 +248,8 @@ Expected output may be something like this:
 
 For readability, the following examples omit the production-decision
 `emission_source`, `candidate_count`, `sole_native`, and
-`dominant_winner` fields, plus the `c5` trace shown in the complete
-diagnostic above.
+`dominant_winner` fields, plus the `c5` and `first_position` traces
+shown in the complete diagnostic above.
 
 ```console
 $ bonjour --json "Quentin Richert"
@@ -449,7 +467,7 @@ $ bonjour --json "Les Motards d'Alsace"
 }
 ```
 
-The plain greeting applies frozen C5 and therefore keeps using the
+The plain greeting applies frozen C6 and therefore keeps using the
 complete display name here.
 
 ## Country and gender hints
@@ -690,8 +708,8 @@ not force a greeting.
 usage: bonjour [--data-dir=PATH] [--country=XX] [--gender=F|M] [--locale=LOCALE] [--json] <display name>
 ```
 
-Plain greetings use frozen C5. `--json` reports the selected candidate,
-C3.1 diagnostic score, C5 emission source, and rule traces.
+Plain greetings use frozen C6. `--json` reports the selected candidate,
+C3.1 diagnostic score, C6 emission source, and rule traces.
 
 ## Installation
 
@@ -870,7 +888,7 @@ library that enables `standalone` must document the build-time artifact
 requirement to its users.
 
 `inference.greeting_name` is the selected candidate before the emission
-decision; `greeting()` applies frozen C5. Every candidate is a non-empty
+decision; `greeting()` applies frozen C6. Every candidate is a non-empty
 contiguous span of the original input, preserving its spelling, casing,
 accents, punctuation, normalization form, and internal whitespace.
 `Classifier` is immutable, reusable, and `Send + Sync`.
@@ -891,12 +909,21 @@ records or ground truth. Benchmark methodology and frozen classifier
 history live in
 [`benchmarks/name-eval`](benchmarks/name-eval/README.md).
 
-Production uses frozen C5. On untouched REAL_PROXY_V6, C5 added 225
-correct proxy-label matches over C4 for three additional wrong
-greetings, including two additional expected-NULL emissions. Recall
-increased from 22.10% to 41.30%. This machine-consensus proxy result is
-not a claim of worldwide population precision; ambiguous annotator
-disagreements were excluded.
+Production uses frozen C6. It preserves every C5 decision and adds a
+first-position path only when C5 abstains on a native, non-segmented,
+exactly two-token alphabetic input with one viable single-token winner
+in first position. Candidate quality must be at least 0.50, reliability
+at least 0.40, role signal at least 0.20, and every existing veto must
+pass. On untouched REAL_PROXY_V7 this path added 55 correct proxy-label
+matches over C5 with no observed wrong or expected-NULL emission.
+
+Previously, on untouched REAL_PROXY_V6, C5 added 225 correct matches
+over C4 for three additional wrong greetings, including two additional
+expected-NULL emissions. Recall increased from 22.10% to 41.30%. These
+machine-consensus proxy results are not claims of worldwide population
+precision; ambiguous annotator disagreements were excluded. The
+complement-surname residual remains experimental and no surname-only
+index is loaded by production.
 
 ## TODO
 
@@ -904,7 +931,7 @@ disagreements were excluded.
   greeting selection abstains but every plausible name candidate agrees
   on sufficiently strong gender evidence, a future model could still
   emit a gender hint. It must use candidate consensus rather than
-  exposing the rejected greeting winner's gender. Current C5 behavior
+  exposing the rejected greeting winner's gender. Current C6 behavior
   intentionally returns `gender_hint: null` and `gender_confidence: 0.0`
   whenever the default greeting decision abstains.
 

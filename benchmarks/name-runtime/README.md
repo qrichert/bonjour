@@ -121,3 +121,30 @@ runtime-loaded and 19,068 standalone lookups per second, so the absolute
 timing was unstable on this machine and does not establish a C5
 performance regression. Allocation behavior was identical to the C4
 checkpoint.
+
+## C6 first-position promotion result
+
+Measured after the C6 first-position promotion on 2026-09-12 with Rust
+1.93.0, target `x86_64-apple-darwin`, release profile, the same artifact
+manifest, and 50,000 iterations over the same eight inputs:
+
+| Measurement             | Runtime-loaded | Standalone |
+| ----------------------- | -------------: | ---------: |
+| Load time               |        0.164 s |    0.154 s |
+| Lookups/second          |         42,811 |     42,946 |
+| Nanoseconds/lookup      |         23,359 |     23,285 |
+| Emission checksum       |     `8cc2e086` | `8cc2e086` |
+| Allocation calls/lookup |            129 |        129 |
+| Allocated bytes/lookup  |      6,750.375 |  6,750.375 |
+
+The full checksum remained `8cc2e086fc208425`. These inputs do not
+happen to exercise a C6-only emission; production regression tests
+separately cover the new path and its veto behavior. The unchanged
+allocation result follows a streaming Unicode topology check that does
+not allocate another normalized display-name string.
+
+The given-name artifact remained unchanged at 36,632,687 bytes. The
+standalone C6 benchmark binary was 37,665,208 bytes, 168 bytes larger
+than the recorded C5 binary. The timing remains a single-machine
+engineering measurement and does not establish a performance change
+relative to the noisy earlier runs.

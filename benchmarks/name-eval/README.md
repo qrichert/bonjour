@@ -1808,6 +1808,191 @@ The aggregate output hashes are:
 | `run_manifest.csv`       | `124caa1737c229b4afa17f15b80d820a5aa195fa20fb6e2d56741d8ef7cfe5fd` |
 | `report.md`              | `d0696da791f94c2d6aecaef1800a4c56d071ba8db00138282e8e75e99ce76cb6` |
 
+## C6 first-position production promotion
+
+After the sealed V7 checkpoint above was committed, a separate change
+promoted the independently validated first-position gate to production
+as C6. C6 preserves every C5 emission and adds exactly this path:
+
+```text
+C5 abstains
+native / non-segmented
+exactly two alphabetic lexical tokens
+single-token selected winner
+candidate_count == 1
+selected candidate is first token
+candidate_quality >= 0.50
+reliability >= 0.40
+role_signal >= 0.20
+all existing vetoes pass
+```
+
+The thresholds and topology are unchanged from the V1-V5 development
+control that added 254 correct greetings with no pooled observed error.
+On untouched V7 the frozen rule added 55 correct greetings with no wrong
+or expected-NULL emission. It is not applied to second-position,
+segmented, punctuated, or multi-token winners.
+
+Existing C3.1, C4, and C5 emissions retain their historical provenance.
+Only a new emission receives `emission_source = first_position`, and the
+JSON decision trace exposes every condition above. Candidate generation,
+ranking, the compact given-name artifact, and every existing veto remain
+unchanged. In particular, `Motorcycle Club` remains an abstention under
+the generic-organization veto.
+
+The complement-surname residual remains experimental. C6 does not load
+surname-only keys, reinterpret unknown tokens as surnames, or alter the
+existing artifact. The separate spent-data selection below determines
+only which production-shaped surname membership candidate should later
+be validated on V8.
+
+## Production-shaped surname-only index selection
+
+After V7 became spent, the fixed complement-surname rule was evaluated
+on V1-V7 at only the preregistered raw-count thresholds. Candidate
+quality, reliability, role, topology, position, and veto behavior were
+not retuned. No V8 data was created or inspected.
+
+The authoritative rescan covered the same 105 raw files, 491,655,925
+rows, and 489,631,377 nonempty surname observations. It excluded all
+1,803,175 retained given-name keys using exact UTF-8 byte equality. All
+ten surname-only key counts and sorted raw-byte totals reproduced the
+earlier storage curve exactly. The four sets larger than zstd's default
+window were recompressed with the historical `zstd -19 --long` setting,
+after which all ten compressed-byte totals also matched.
+
+### Fixed threshold results
+
+All results below are residual additions beyond production C6:
+
+| Count | Correct | Wrong | NULL FP |       Keys |   Raw bytes | zstd-19 bytes | Estimated MPHF + fingerprint |
+| ----: | ------: | ----: | ------: | ---------: | ----------: | ------------: | ---------------------------: |
+|     1 |      95 |     1 |       1 | 35,417,044 | 467,302,147 |   114,865,997 |                  156,935,585 |
+|     2 |      86 |     1 |       1 | 10,271,119 | 122,230,732 |    28,703,435 |                   45,512,101 |
+|     5 |      76 |     1 |       1 |  3,390,945 |  37,111,326 |     8,669,513 |                   15,025,533 |
+|    10 |      63 |     1 |       1 |  1,709,397 |  18,235,331 |     4,385,703 |                    7,574,467 |
+|    25 |      34 |     1 |       1 |    684,930 |   7,177,753 |     1,820,637 |                    3,034,977 |
+|    50 |      23 |     1 |       1 |    320,718 |   3,329,972 |       888,660 |                    1,421,126 |
+|   100 |      14 |     1 |       1 |    135,907 |   1,403,589 |       399,789 |                      602,215 |
+|   250 |       8 |     1 |       1 |     33,385 |     339,910 |       110,145 |                      147,932 |
+|   500 |       4 |     1 |       1 |      8,979 |      91,447 |        32,714 |                       39,787 |
+| 1,000 |       0 |     1 |       1 |      2,117 |      22,358 |         8,633 |                        9,381 |
+
+The one error at every point is the same expected-NULL false emission
+from V7. Its redacted diagnostic has raw surname count 1,233, candidate
+quality 0.512946, role signal 0.346924, reliability 0.386687,
+first-token selection, and no active organization/personhood veto.
+Because its count exceeds the grid maximum, no declared threshold
+removes it.
+
+Per-generation results are shown as `correct/wrong/NULL FP`:
+
+| Generation |    >=1 |    >=2 |    >=5 |   >=10 |  >=25 |  >=50 | >=100 | >=250 | >=500 | >=1000 |
+| ---------- | -----: | -----: | -----: | -----: | ----: | ----: | ----: | ----: | ----: | -----: |
+| V1         | 15/0/0 | 15/0/0 | 13/0/0 | 11/0/0 | 4/0/0 | 2/0/0 | 2/0/0 | 2/0/0 | 1/0/0 |  0/0/0 |
+| V2         | 12/0/0 | 10/0/0 |  9/0/0 |  8/0/0 | 5/0/0 | 4/0/0 | 2/0/0 | 1/0/0 | 0/0/0 |  0/0/0 |
+| V3         | 10/0/0 |  9/0/0 |  8/0/0 |  6/0/0 | 3/0/0 | 1/0/0 | 1/0/0 | 0/0/0 | 0/0/0 |  0/0/0 |
+| V4         | 13/0/0 | 12/0/0 | 11/0/0 | 10/0/0 | 4/0/0 | 2/0/0 | 2/0/0 | 1/0/0 | 1/0/0 |  0/0/0 |
+| V5         | 16/0/0 | 15/0/0 | 12/0/0 | 10/0/0 | 7/0/0 | 7/0/0 | 3/0/0 | 1/0/0 | 1/0/0 |  0/0/0 |
+| V6         | 11/0/0 | 10/0/0 | 10/0/0 |  8/0/0 | 4/0/0 | 2/0/0 | 1/0/0 | 1/0/0 | 0/0/0 |  0/0/0 |
+| V7         | 18/1/1 | 15/1/1 | 13/1/1 | 10/1/1 | 7/1/1 | 5/1/1 | 3/1/1 | 2/1/1 | 1/1/1 |  0/1/1 |
+
+Leave-one-generation-out selection chose count 1 in every fold:
+
+| Held out | Training correct/wrong/NULL | Held-out correct/wrong/NULL |
+| -------- | --------------------------: | --------------------------: |
+| V1       |                      80/1/1 |                      15/0/0 |
+| V2       |                      83/1/1 |                      12/0/0 |
+| V3       |                      85/1/1 |                      10/0/0 |
+| V4       |                      82/1/1 |                      13/0/0 |
+| V5       |                      79/1/1 |                      16/0/0 |
+| V6       |                      84/1/1 |                      11/0/0 |
+| V7       |                      77/0/0 |                      18/1/1 |
+
+No threshold achieved zero observed error. Under the declared fallback
+objective they all tie at one wrong and one NULL false emission, so
+maximum additional correct greetings selects `surname_count >= 1`: **+95
+correct / 1 wrong / 1 NULL FP**. This is a spent-data selection, not
+evidence that the resulting size is desirable or that the branch is safe
+enough to promote.
+
+### Production-shaped representation
+
+The selected count-1 candidate contains 35,417,044 surname-only keys in
+an MPHF plus an independent 32-bit fingerprint, with no stored count or
+evidence byte:
+
+| Constituent                      |           Bytes |
+| -------------------------------- | --------------: |
+| MPHF                             |      15,248,560 |
+| 32-bit fingerprints              |     141,668,176 |
+| Authenticated manifest           |             710 |
+| **Candidate total**              | **156,917,446** |
+| Existing given-name artifact     |      36,632,687 |
+| **Potential combined footprint** | **193,550,133** |
+
+The candidate is about 149.65 MiB and would raise total runtime name
+data to about 184.58 MiB. This is much larger than the earlier desired
+region; the selection objective deliberately placed observed safety and
+recall before size.
+
+The fingerprint has nominal false-accept probability `2^-32` per
+unrelated query. A disk round-trip accepted all 35,417,044 members. All
+1,803,175 retained given-name keys and 100,000 deterministic nonmembers
+produced zero observed fingerprint false accepts. The candidate was
+built independently three times with identical MPHF, fingerprint, and
+manifest bytes.
+
+A Bloom filter at theoretical false-positive rate `10^-3` uses
+63,651,457 bytes but produced 1,932 false accepts over those same
+1,903,175 negative queries, so it is rejected. A Bloom filter targeting
+`2^-32` uses 204,383,975 bytes and produced zero observed false accepts;
+it is larger than the selected MPHF/fingerprint candidate. The one-byte
+coarse-evidence comparison would raise the selected estimate from
+156,935,585 to 192,352,629 bytes without serving the fixed membership-
+only runtime rule.
+
+The qualitative probes were run after selection:
+
+| Probe            | Selected | Raw surname count | In selected index | C6 emits | Residual emits | Vetoes pass |
+| ---------------- | -------- | ----------------: | ----------------: | -------: | -------------: | ----------: |
+| Martin REDACTED  | Martin   |                58 |               yes |      yes |             no |         yes |
+| Olivier REDACTED | Olivier  |               138 |               yes |      yes |             no |         yes |
+| Baris REDACTED   | Baris    |            16,864 |                no |       no |             no |         yes |
+| Motorcycle Club  | Club     |                 1 |               yes |       no |             no |          no |
+
+Martin REDACTED and Olivier REDACTED now emit through production C6, so
+the surname residual is not reached, although both complements are in
+the selected index. Baris REDACTED remains outside the sole-candidate
+topology. `Motorcycle Club` demonstrates that surname membership does
+not override personhood vetoes.
+
+The exact candidate frozen for a separate V8 validation is:
+
+```text
+production C6 abstains
+native / non-segmented
+exactly two alphabetic lexical tokens
+single-token selected winner
+candidate_count == 1
+selected candidate is first token
+candidate_quality >= 0.40
+reliability >= 0.00
+role_signal >= 0.30
+all existing vetoes pass
+complement absent from retained given-name index
+complement present in count >= 1 surname-only membership index
+```
+
+The surname branch remains experimental and is not loaded by production.
+The ignored candidate's source-key SHA-256 is
+`710d491599f2140ccdb85e25cb553d574584bad30ef3543904cdcd7270703013`; its
+manifest SHA-256 is
+`99d7be0c592eb817eb6ae2c4e59517a12753e86302abed390099293d6c02b675`. The
+aggregate report SHA-256 is
+`77321b1f814c38d097a1f59cca06c183f70d07218c9aab18dffa3e2bb827f2a6`. V7
+is spent; V8 does not exist yet.
+
 ## Metric definitions
 
 - Greeting precision: correct emitted greetings / all emitted greetings.
