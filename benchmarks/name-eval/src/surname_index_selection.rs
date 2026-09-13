@@ -66,6 +66,17 @@ const FROZEN_CANDIDATE_MPHF_SHA256: &str =
 const FROZEN_CANDIDATE_FINGERPRINT_BYTES: usize = 141_668_176;
 const FROZEN_CANDIDATE_FINGERPRINT_SHA256: &str =
     "a419dfb9d6d792ae08710c1f007cfd58442a0e7224f2630e9d33bd7becdabc7b";
+const FROZEN_COMPACT_CANDIDATE_MANIFEST_BYTES: usize = 728;
+const FROZEN_COMPACT_CANDIDATE_MANIFEST_SHA256: &str =
+    "33fbd24462f13b980b0f8a0a8618edcf6209c8032be6875116a472224adf3fb8";
+const FROZEN_COMPACT_CANDIDATE_SOURCE_KEYS_SHA256: &str =
+    "b5734b8ff0bc6bba300558b30be73c8644db76ab2e823915968422fe028fbdc5";
+const FROZEN_COMPACT_CANDIDATE_MPHF_BYTES: usize = 737_024;
+const FROZEN_COMPACT_CANDIDATE_MPHF_SHA256: &str =
+    "832244b41604149295a1a26f879a633598a144e5a11731bc42597716913dc5c1";
+const FROZEN_COMPACT_CANDIDATE_FINGERPRINT_BYTES: usize = 6_837_588;
+const FROZEN_COMPACT_CANDIDATE_FINGERPRINT_SHA256: &str =
+    "183639758511ba02a8824e4a419b41f7ff6de46530db90524608051824e25ceb";
 const SURNAME_THRESHOLDS: [u64; 10] = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1_000];
 const PRIOR_KEY_COUNTS: [usize; 10] = [
     35_417_044, 10_271_119, 3_390_945, 1_709_397, 684_930, 320_718, 135_907, 33_385, 8_979, 2_117,
@@ -378,6 +389,20 @@ impl MembershipIndex {
 
 pub(super) struct FrozenSurnameMembership {
     index: MembershipIndex,
+    metadata: FrozenMembershipMetadata,
+}
+
+#[derive(Clone, Copy)]
+struct FrozenMembershipMetadata {
+    surname_count_min: u64,
+    key_count: usize,
+    manifest_bytes: usize,
+    manifest_sha256: &'static str,
+    source_keys_sha256: &'static str,
+    mphf_bytes: usize,
+    mphf_sha256: &'static str,
+    fingerprint_bytes: usize,
+    fingerprint_sha256: &'static str,
 }
 
 impl FrozenSurnameMembership {
@@ -385,30 +410,32 @@ impl FrozenSurnameMembership {
         self.index.contains(key)
     }
 
+    pub(super) const fn surname_count_min(&self) -> u64 {
+        self.metadata.surname_count_min
+    }
+
     pub(super) const fn key_count(&self) -> usize {
-        PRIOR_KEY_COUNTS[0]
+        self.metadata.key_count
     }
 
     pub(super) const fn artifact_bytes(&self) -> usize {
-        FROZEN_CANDIDATE_MPHF_BYTES
-            + FROZEN_CANDIDATE_FINGERPRINT_BYTES
-            + FROZEN_CANDIDATE_MANIFEST_BYTES
+        self.metadata.mphf_bytes + self.metadata.fingerprint_bytes + self.metadata.manifest_bytes
     }
 
     pub(super) const fn manifest_sha256(&self) -> &'static str {
-        FROZEN_CANDIDATE_MANIFEST_SHA256
+        self.metadata.manifest_sha256
     }
 
     pub(super) const fn source_keys_sha256(&self) -> &'static str {
-        FROZEN_CANDIDATE_SOURCE_KEYS_SHA256
+        self.metadata.source_keys_sha256
     }
 
     pub(super) const fn mphf_sha256(&self) -> &'static str {
-        FROZEN_CANDIDATE_MPHF_SHA256
+        self.metadata.mphf_sha256
     }
 
     pub(super) const fn fingerprint_sha256(&self) -> &'static str {
-        FROZEN_CANDIDATE_FINGERPRINT_SHA256
+        self.metadata.fingerprint_sha256
     }
 }
 
@@ -1600,6 +1627,103 @@ fn retain_selected_compact_candidate(output: &Path, threshold: u64) -> Result<()
 pub(super) fn load_frozen_membership_candidate(
     directory: &Path,
 ) -> Result<FrozenSurnameMembership> {
+    let metadata = FrozenMembershipMetadata {
+        surname_count_min: 1,
+        key_count: PRIOR_KEY_COUNTS[0],
+        manifest_bytes: FROZEN_CANDIDATE_MANIFEST_BYTES,
+        manifest_sha256: FROZEN_CANDIDATE_MANIFEST_SHA256,
+        source_keys_sha256: FROZEN_CANDIDATE_SOURCE_KEYS_SHA256,
+        mphf_bytes: FROZEN_CANDIDATE_MPHF_BYTES,
+        mphf_sha256: FROZEN_CANDIDATE_MPHF_SHA256,
+        fingerprint_bytes: FROZEN_CANDIDATE_FINGERPRINT_BYTES,
+        fingerprint_sha256: FROZEN_CANDIDATE_FINGERPRINT_SHA256,
+    };
+    load_authenticated_membership_candidate(
+        directory,
+        metadata,
+        &[
+            ("format", "surname-only-membership-candidate-v1"),
+            ("surname_count_min", "1"),
+            ("key_count", "35417044"),
+            ("source_keys_sha256", FROZEN_CANDIDATE_SOURCE_KEYS_SHA256),
+            ("routing_seed", "0x6e616d652d726f75"),
+            ("fingerprint_seed", "0x6e616d652d667033"),
+            ("mphf_gamma", "1.7"),
+            ("names_mphf_bytes", "15248560"),
+            ("names_mphf_sha256", FROZEN_CANDIDATE_MPHF_SHA256),
+            ("fingerprints_bytes", "141668176"),
+            (
+                "fingerprints_sha256",
+                FROZEN_CANDIDATE_FINGERPRINT_SHA256,
+            ),
+            ("given_negative_queries", "1803175"),
+            ("given_false_accepts", "0"),
+            ("generated_negative_queries", "100000"),
+            ("generated_false_accepts", "0"),
+            ("bloom_0_001_bytes", "63651457"),
+            ("bloom_0_001_false_accepts", "1932"),
+            ("bloom_2^-32_bytes", "204383975"),
+            ("bloom_2^-32_false_accepts", "0"),
+        ],
+    )
+}
+
+pub(super) fn load_frozen_compact_membership_candidate(
+    directory: &Path,
+) -> Result<FrozenSurnameMembership> {
+    let metadata = FrozenMembershipMetadata {
+        surname_count_min: 10,
+        key_count: PRIOR_KEY_COUNTS[3],
+        manifest_bytes: FROZEN_COMPACT_CANDIDATE_MANIFEST_BYTES,
+        manifest_sha256: FROZEN_COMPACT_CANDIDATE_MANIFEST_SHA256,
+        source_keys_sha256: FROZEN_COMPACT_CANDIDATE_SOURCE_KEYS_SHA256,
+        mphf_bytes: FROZEN_COMPACT_CANDIDATE_MPHF_BYTES,
+        mphf_sha256: FROZEN_COMPACT_CANDIDATE_MPHF_SHA256,
+        fingerprint_bytes: FROZEN_COMPACT_CANDIDATE_FINGERPRINT_BYTES,
+        fingerprint_sha256: FROZEN_COMPACT_CANDIDATE_FINGERPRINT_SHA256,
+    };
+    load_authenticated_membership_candidate(
+        directory,
+        metadata,
+        &[
+            ("format", "compact-surname-membership-candidate-v1"),
+            ("surname_count_min", "10"),
+            ("key_count", "1709397"),
+            (
+                "source_keys_sha256",
+                FROZEN_COMPACT_CANDIDATE_SOURCE_KEYS_SHA256,
+            ),
+            ("routing_seed", "0x6e616d652d726f75"),
+            ("fingerprint_seed", "0x6e616d652d667033"),
+            ("mphf_gamma", "1.7"),
+            ("fingerprint_bits", "32"),
+            ("stores_surname_count", "false"),
+            ("names_mphf_bytes", "737024"),
+            (
+                "names_mphf_sha256",
+                FROZEN_COMPACT_CANDIDATE_MPHF_SHA256,
+            ),
+            ("fingerprints_bytes", "6837588"),
+            (
+                "fingerprints_sha256",
+                FROZEN_COMPACT_CANDIDATE_FINGERPRINT_SHA256,
+            ),
+            ("member_queries", "1709397"),
+            ("member_misses", "0"),
+            ("given_negative_queries", "1803175"),
+            ("given_false_accepts", "0"),
+            ("generated_negative_queries", "100000"),
+            ("generated_false_accepts", "0"),
+            ("nominal_unknown_false_accept_probability", "2^-32"),
+        ],
+    )
+}
+
+fn load_authenticated_membership_candidate(
+    directory: &Path,
+    metadata: FrozenMembershipMetadata,
+    expected_manifest: &[(&str, &str)],
+) -> Result<FrozenSurnameMembership> {
     let actual_files = fs::read_dir(directory)?
         .map(|entry| {
             entry?
@@ -1618,58 +1742,37 @@ pub(super) fn load_frozen_membership_candidate(
 
     let manifest_path = directory.join("manifest.csv");
     let manifest_bytes = fs::read(&manifest_path)?;
-    if manifest_bytes.len() != FROZEN_CANDIDATE_MANIFEST_BYTES
-        || sha256_hex(&manifest_bytes) != FROZEN_CANDIDATE_MANIFEST_SHA256
+    if manifest_bytes.len() != metadata.manifest_bytes
+        || sha256_hex(&manifest_bytes) != metadata.manifest_sha256
     {
         return Err("frozen surname candidate manifest failed authentication".into());
     }
     let manifest = load_key_value_manifest(&manifest_path)?;
-    let expected_manifest = [
-        ("format", "surname-only-membership-candidate-v1"),
-        ("surname_count_min", "1"),
-        ("key_count", "35417044"),
-        ("source_keys_sha256", FROZEN_CANDIDATE_SOURCE_KEYS_SHA256),
-        ("routing_seed", "0x6e616d652d726f75"),
-        ("fingerprint_seed", "0x6e616d652d667033"),
-        ("mphf_gamma", "1.7"),
-        ("names_mphf_bytes", "15248560"),
-        ("names_mphf_sha256", FROZEN_CANDIDATE_MPHF_SHA256),
-        ("fingerprints_bytes", "141668176"),
-        ("fingerprints_sha256", FROZEN_CANDIDATE_FINGERPRINT_SHA256),
-        ("given_negative_queries", "1803175"),
-        ("given_false_accepts", "0"),
-        ("generated_negative_queries", "100000"),
-        ("generated_false_accepts", "0"),
-        ("bloom_0_001_bytes", "63651457"),
-        ("bloom_0_001_false_accepts", "1932"),
-        ("bloom_2^-32_bytes", "204383975"),
-        ("bloom_2^-32_false_accepts", "0"),
-    ];
     if manifest.len() != expected_manifest.len() {
         return Err("frozen surname candidate manifest has unexpected fields".into());
     }
-    for (key, expected) in expected_manifest {
+    for &(key, expected) in expected_manifest {
         validate_manifest_value(&manifest, key, expected)?;
     }
 
     let mphf_bytes = fs::read(directory.join("names.mphf"))?;
-    if mphf_bytes.len() != FROZEN_CANDIDATE_MPHF_BYTES
-        || sha256_hex(&mphf_bytes) != FROZEN_CANDIDATE_MPHF_SHA256
+    if mphf_bytes.len() != metadata.mphf_bytes
+        || sha256_hex(&mphf_bytes) != metadata.mphf_sha256
     {
         return Err("frozen surname candidate MPHF failed authentication".into());
     }
     let fingerprint_bytes = fs::read(directory.join("fingerprints.u32"))?;
-    if fingerprint_bytes.len() != FROZEN_CANDIDATE_FINGERPRINT_BYTES
-        || sha256_hex(&fingerprint_bytes) != FROZEN_CANDIDATE_FINGERPRINT_SHA256
+    if fingerprint_bytes.len() != metadata.fingerprint_bytes
+        || sha256_hex(&fingerprint_bytes) != metadata.fingerprint_sha256
     {
         return Err("frozen surname candidate fingerprints failed authentication".into());
     }
     let index = decode_membership_candidate(
         &mphf_bytes,
         &fingerprint_bytes,
-        FROZEN_CANDIDATE_FINGERPRINT_BYTES / size_of::<u32>(),
+        metadata.key_count,
     )?;
-    Ok(FrozenSurnameMembership { index })
+    Ok(FrozenSurnameMembership { index, metadata })
 }
 
 fn load_membership_candidate(directory: &Path, key_count: usize) -> Result<MembershipIndex> {
@@ -3227,6 +3330,21 @@ mod tests {
             FROZEN_CANDIDATE_FINGERPRINT_SHA256,
         ] {
             validate_sha256(digest, "frozen candidate digest").unwrap();
+        }
+        assert_eq!(PRIOR_KEY_COUNTS[3], 1_709_397);
+        assert_eq!(
+            FROZEN_COMPACT_CANDIDATE_MPHF_BYTES
+                + FROZEN_COMPACT_CANDIDATE_FINGERPRINT_BYTES
+                + FROZEN_COMPACT_CANDIDATE_MANIFEST_BYTES,
+            7_575_340
+        );
+        for digest in [
+            FROZEN_COMPACT_CANDIDATE_MANIFEST_SHA256,
+            FROZEN_COMPACT_CANDIDATE_SOURCE_KEYS_SHA256,
+            FROZEN_COMPACT_CANDIDATE_MPHF_SHA256,
+            FROZEN_COMPACT_CANDIDATE_FINGERPRINT_SHA256,
+        ] {
+            validate_sha256(digest, "frozen compact candidate digest").unwrap();
         }
     }
 }

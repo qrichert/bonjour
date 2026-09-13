@@ -2566,3 +2566,102 @@ This freezes the exact `>=10` MPHF/fingerprint artifact as the candidate
 for a later one-shot V9 validation. It is not loaded by production, the
 surname residual remains disabled, C6 remains production, and no V9 was
 created or inspected during selection.
+
+## Frozen REAL_PROXY_V9 compact surname validation
+
+REAL_PROXY_V9 tested unchanged production C6 against C6 plus the exact
+count-at-least-10 compact surname candidate selected on spent V1-V8. It
+used 5,000 fresh Meta Kaggle rows sampled with the predeclared seed
+`0x5245414C5F5639`, excluding exact display-name values from V1 through
+V8. The 2,587,424,211-byte source remained stable at SHA-256
+`30b95ff7d079289fe76a0fada39ebbb174f15f6f85a2e09f7a208c6fdf57dd82`. Of
+33,084,108 source rows, 204 were blank or whitespace-only and 172,547
+matched one of 15,995 prior values, leaving 32,911,357 eligible rows.
+Independent sampling runs produced the same 5,000-row source, containing
+4,997 unique values and no exact V1-V8 overlap, at SHA-256
+`47f3afeb53384b85409cd8edc37fc1cd6fad880419a174fd93c0c7b16c9877ef`.
+
+Two independent classifier-blind machine annotations were normalized
+mechanically without repairing labels. Annotator A supplied 2,941 exact
+greetings, 25 NULLs, and 2,034 explicit skips; annotator B supplied
+1,731 exact greetings, 123 NULLs, and 3,146 explicit skips. Both
+supplied 5,000 schema-valid rows and zero unusable or non-exact labels.
+Their raw annotation SHA-256 values were
+`0171efe2e272067d6eb4c1be99b8e9ae892eb9b5de9f7a62a9d66e271902ed55` and
+`2f8559345dbf8628b0292e1c9dfa8b30a30f2db86e950e6e8ab5ba2524448a97`.
+
+Exact consensus produced 1,630 greeting agreements, 16 NULL agreements,
+3,307 cases with an annotator SKIP, and 47 other disagreements. The
+canonical holdout therefore has 1,646 evaluable and 3,354 skipped rows.
+It was independently serialized twice and frozen before any classifier
+or surname-membership lookup at SHA-256:
+
+```text
+5382ee07f442c6d22575c682f2a6e11354c09ad3f14eb244a56b6df2b90ebf42
+```
+
+### Compact artifact verification
+
+V9 queried the exact frozen MPHF and independent 32-bit fingerprint
+files listed in the preceding selection checkpoint. It did not rebuild
+the artifact, substitute raw counts or a `HashSet`, or evaluate another
+threshold. A new exact scan of all 105 authoritative files reproduced
+491,655,925 source rows, 489,631,377 nonempty surnames, and the selected
+member stream at 1,709,397 keys, 18,235,331 bytes, and SHA-256
+`b5734b8ff0bc6bba300558b30be73c8644db76ab2e823915968422fe028fbdc5`.
+
+All 1,709,397 member lookups succeeded. Another 1,803,175 retained-given
+queries and 100,000 deterministic generated nonmembers produced zero
+observed false accepts. The aggregate verification receipt has SHA-256
+`b1961c0ae9efe379baae5c8aaf7c0a66e16b5eddc7c9079b86b6c4542cb821f8`. The
+MPHF itself is not exact membership: the independent fingerprint's
+nominal accidental acceptance probability remains approximately `2^-32`
+per unrelated query.
+
+### One-shot C6 comparison
+
+The release evaluator authenticated the V9 holdout, compact artifact,
+and verification receipt before running exactly the two frozen policies.
+It serialized aggregate outputs only. No V9 row, failure, correct
+addition, prediction, candidate, complement, or qualitative sample was
+written or inspected.
+
+| Policy                        | Emitted | Correct | Wrong | NULL FP | Precision |  Recall | Abstention rate |
+| ----------------------------- | ------: | ------: | ----: | ------: | --------: | ------: | --------------: |
+| Frozen C6                     |   1,053 |   1,035 |    18 |       1 |   98.291% | 63.497% |         36.027% |
+| C6 + compact surname residual |   1,057 |   1,039 |    18 |       1 |   98.297% | 63.742% |         35.784% |
+
+The compact residual added **four emissions: four correct, zero wrong,
+and zero expected-NULL false emissions** beyond C6. Thirteen evaluable
+rows reached the pre-membership topology, eight actually queried the
+surname index after the fixed evidence and given-absence conditions, and
+four returned positive membership. Positive memberships exactly equaled
+additional emissions.
+
+Under the preregistered interpretation this is **negative validation**.
+There was no observed safety regression, but four correct additions do
+not meet the predeclared minimum of ten meaningful additions needed to
+justify integrating the 7,575,340-byte (7.22 MiB) secondary artifact.
+The low query incidence also leaves limited fresh evidence about rare
+semantic errors. Production therefore remains C6 and the compact
+surname-integration path stops here unless a new, separately justified
+experiment is proposed.
+
+Two post-checkpoint evaluator runs and two artifact-verification runs
+produced byte-identical aggregate outputs. The primary validation
+outputs are pinned below:
+
+| Output                    | SHA-256                                                            |
+| ------------------------- | ------------------------------------------------------------------ |
+| `artifact_validation.csv` | `b1961c0ae9efe379baae5c8aaf7c0a66e16b5eddc7c9079b86b6c4542cb821f8` |
+| `lookup_incidence.csv`    | `b50605e7bba9dae52e8247bf80bcc0c4e70b525fdf58df8e0f3275dc44454dd6` |
+| `policy_metrics.csv`      | `9f3e3602119be730ceb8d4f833212a6b1c25d37deb17f7e6b3af91fbe8ae402a` |
+| `surname_delta.csv`       | `6a3994952d898d90f574456d7f4f895c9ea88287fd8b68bc8d39200175e98b5c` |
+| `run_manifest.csv`        | `7848ff24faa4e4b8eb4f58d5d5fe116a6ee5e3b521ce1866706657f86000ce74` |
+| `validation_report.md`    | `8dcfdf06b6aa4f60b9e8c0466607180938f5714b5ff672ca4fd02c11079cbfa1` |
+
+The existing caller-redacted probes remain unchanged: production C6
+already emits the two established first-position examples; the
+two-candidate example remains outside the sole-candidate topology; and
+`Motorcycle Club` remains vetoed. The surname artifact is not loaded by
+normal production inference.

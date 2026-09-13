@@ -14,16 +14,22 @@ use crate::classifier::{
     C6EmissionSource, c6_decision_breakdown, c6_emitted_candidate, canonicalize,
     diagnose_role_inference, expected_lookup_diagnostic,
 };
-use crate::surname_index_selection::{FrozenSurnameMembership, load_frozen_membership_candidate};
+use crate::surname_index_selection::{
+    FrozenSurnameMembership, load_frozen_compact_membership_candidate,
+    load_frozen_membership_candidate,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub(super) const V8_SHA256: &str =
     "55fe9ae0efc7e604e55c997f8c26cd2cfc3e97961514a6a3780cd2f0420ae6c9";
+pub(super) const V9_SHA256: &str =
+    "5382ee07f442c6d22575c682f2a6e11354c09ad3f14eb244a56b6df2b90ebf42";
 const SURNAME_QUALITY_MIN: f64 = 0.40;
 const SURNAME_RELIABILITY_MIN: f64 = 0.00;
 const SURNAME_ROLE_MIN: f64 = 0.30;
 const EXPECTED_MEMBERS: usize = 35_417_044;
+const EXPECTED_COMPACT_MEMBERS: usize = 1_709_397;
 const EXPECTED_GIVEN_NEGATIVES: usize = 1_803_175;
 const GENERATED_NEGATIVES: usize = 100_000;
 const SUBSTANTIAL_CORRECT_MIN: usize = 5;
@@ -112,7 +118,17 @@ struct ValidationResult {
     combined: SealedMetrics,
     surname_additions: AdditionMetrics,
     residual_topology_rows: usize,
+    membership_query_rows: usize,
+    positive_membership_rows: usize,
     artifact: ArtifactValidation,
+}
+
+struct PolicyInference {
+    c6: Option<String>,
+    surname: Option<String>,
+    residual_topology: bool,
+    membership_query: bool,
+    positive_membership: bool,
 }
 
 pub(crate) fn verify_frozen_surname_candidate(
@@ -122,21 +138,46 @@ pub(crate) fn verify_frozen_surname_candidate(
     name_totals: &Path,
 ) -> Result<String> {
     let membership = load_frozen_membership_candidate(membership_directory)?;
-    let (member_queries, member_misses, source_keys_sha256) =
-        verify_all_members(&membership, member_keys)?;
-    if member_queries != EXPECTED_MEMBERS
+    verify_frozen_candidate(output, &membership, member_keys, name_totals, EXPECTED_MEMBERS)
+}
+
+pub(crate) fn verify_frozen_compact_surname_candidate(
+    output: &Path,
+    membership_directory: &Path,
+    member_keys: &Path,
+    name_totals: &Path,
+) -> Result<String> {
+    let membership = load_frozen_compact_membership_candidate(membership_directory)?;
+    verify_frozen_candidate(
+        output,
+        &membership,
+        member_keys,
+        name_totals,
+        EXPECTED_COMPACT_MEMBERS,
+    )
+}
+
+fn verify_frozen_candidate(
+    output: &Path,
+    membership: &FrozenSurnameMembership,
+    member_keys: &Path,
+    name_totals: &Path,
+    expected_members: usize,
+) -> Result<String> {
+    let (member_queries, member_misses, source_keys_sha256) = verify_all_members(membership, member_keys)?;
+    if member_queries != expected_members
         || member_misses != 0
         || source_keys_sha256 != membership.source_keys_sha256()
     {
         return Err("frozen surname candidate member verification failed".into());
     }
     let (given_negative_queries, given_false_accepts) =
-        verify_given_negatives(&membership, name_totals)?;
+        verify_given_negatives(membership, name_totals)?;
     if given_negative_queries != EXPECTED_GIVEN_NEGATIVES || given_false_accepts != 0 {
         return Err("frozen surname candidate retained-given verification failed".into());
     }
     let (generated_negative_queries, generated_false_accepts) =
-        verify_generated_negatives(&membership);
+        verify_generated_negatives(membership);
     if generated_negative_queries != GENERATED_NEGATIVES || generated_false_accepts != 0 {
         return Err("frozen surname candidate generated-negative verification failed".into());
     }
@@ -149,15 +190,52 @@ pub(crate) fn verify_frozen_surname_candidate(
         generated_negative_queries,
         generated_false_accepts,
     };
-    let receipt = artifact_validation_csv(&membership, counts)?;
-    let repeated = artifact_validation_csv(&membership, counts)?;
+    let receipt = artifact_validation_csv(membership, counts)?;
+    let repeated = artifact_validation_csv(membership, counts)?;
     if receipt != repeated {
         return Err("surname artifact verification serialization is not deterministic".into());
     }
     fs::write(output.join("artifact_validation.csv"), &receipt)?;
-    let report = artifact_verification_report(&membership, &receipt, counts);
+    let report = artifact_verification_report(membership, &receipt, counts);
     fs::write(output.join("verification_report.md"), report.as_bytes())?;
     Ok(report)
+}
+
+pub(crate) fn run_compact_surname_complement_validation(
+    output: &Path,
+    corpus: &impl EvidenceSource,
+    holdout: &FrozenHoldout,
+    membership_directory: &Path,
+    artifact_receipt: &Path,
+) -> Result<String> {
+    if holdout.manifest.holdout_sha256 != V9_SHA256 {
+        return Err(format!(
+            "compact surname-complement validation requires frozen REAL_PROXY_V9 {}; received {}",
+            V9_SHA256, holdout.manifest.holdout_sha256
+        )
+        .into());
+    }
+    let membership = load_frozen_compact_membership_candidate(membership_directory)?;
+    let artifact = load_artifact_validation(artifact_receipt, &membership)?;
+    validate_safety_control(corpus, &membership)?;
+    let result = evaluate_validation(corpus, holdout, &membership, artifact)?;
+    if result.positive_membership_rows != result.surname_additions.emitted {
+        return Err("V9 positive memberships do not equal surname additions".into());
+    }
+    let outputs = build_compact_outputs(holdout, &membership, &result)?;
+    let repeated = build_compact_outputs(holdout, &membership, &result)?;
+    if outputs != repeated {
+        return Err("V9 compact surname-complement serialization is not deterministic".into());
+    }
+    for (name, bytes) in &outputs {
+        fs::write(output.join(name), bytes)?;
+    }
+    Ok(String::from_utf8(
+        outputs
+            .get("validation_report.md")
+            .ok_or("V9 validation report missing")?
+            .clone(),
+    )?)
 }
 
 pub(crate) fn run_surname_complement_validation(
@@ -323,7 +401,7 @@ fn artifact_verification_report(
 ) -> String {
     let mut report = String::new();
     writeln!(report, "# Frozen surname candidate verification\n").unwrap();
-    writeln!(report, "The already frozen count-at-least-1 MPHF + 32-bit-fingerprint candidate authenticated under manifest SHA-256 `{}`. No candidate constituent was rebuilt or changed.\n", membership.manifest_sha256()).unwrap();
+    writeln!(report, "The already frozen count-at-least-{} MPHF + 32-bit-fingerprint candidate authenticated under manifest SHA-256 `{}`. No candidate constituent was rebuilt or changed.\n", membership.surname_count_min(), membership.manifest_sha256()).unwrap();
     writeln!(report, "- Keys: {}", membership.key_count()).unwrap();
     writeln!(report, "- Artifact bytes: {}", membership.artifact_bytes()).unwrap();
     writeln!(report, "- Full member lookups: {}", counts.member_queries).unwrap();
@@ -364,33 +442,48 @@ fn load_artifact_validation(
     let receipt_bytes = fs::read(path)?;
     let values = parse_key_value_csv(&receipt_bytes)?;
     let expected = [
-        ("format", "frozen-surname-membership-validation-v1"),
-        ("candidate_manifest_sha256", membership.manifest_sha256()),
-        ("candidate_key_count", "35417044"),
-        ("candidate_artifact_bytes", "156917446"),
+        ("format", "frozen-surname-membership-validation-v1".to_string()),
+        (
+            "candidate_manifest_sha256",
+            membership.manifest_sha256().to_string(),
+        ),
+        ("candidate_key_count", membership.key_count().to_string()),
+        (
+            "candidate_artifact_bytes",
+            membership.artifact_bytes().to_string(),
+        ),
         (
             "candidate_source_keys_sha256",
-            membership.source_keys_sha256(),
+            membership.source_keys_sha256().to_string(),
         ),
-        ("candidate_mphf_sha256", membership.mphf_sha256()),
+        (
+            "candidate_mphf_sha256",
+            membership.mphf_sha256().to_string(),
+        ),
         (
             "candidate_fingerprints_sha256",
-            membership.fingerprint_sha256(),
+            membership.fingerprint_sha256().to_string(),
         ),
-        ("member_queries", "35417044"),
-        ("member_misses", "0"),
-        ("given_negative_queries", "1803175"),
-        ("given_false_accepts", "0"),
-        ("generated_negative_queries", "100000"),
-        ("generated_false_accepts", "0"),
-        ("nominal_unknown_false_accept_probability", "2^-32"),
-        ("row_level_output", "forbidden"),
+        ("member_queries", membership.key_count().to_string()),
+        ("member_misses", "0".to_string()),
+        (
+            "given_negative_queries",
+            EXPECTED_GIVEN_NEGATIVES.to_string(),
+        ),
+        ("given_false_accepts", "0".to_string()),
+        ("generated_negative_queries", GENERATED_NEGATIVES.to_string()),
+        ("generated_false_accepts", "0".to_string()),
+        (
+            "nominal_unknown_false_accept_probability",
+            "2^-32".to_string(),
+        ),
+        ("row_level_output", "forbidden".to_string()),
     ];
     if values.len() != expected.len() {
         return Err("surname artifact verification receipt has unexpected fields".into());
     }
     for (key, expected) in expected {
-        if values.get(key).map(String::as_str) != Some(expected) {
+        if values.get(key) != Some(&expected) {
             return Err(format!("surname artifact verification receipt mismatch for {key}").into());
         }
     }
@@ -416,6 +509,8 @@ fn evaluate_validation(
     let mut combined_emissions = Vec::with_capacity(holdout.cases.len());
     let mut surname_only_emissions = Vec::with_capacity(holdout.cases.len());
     let mut residual_topology_rows = 0;
+    let mut membership_query_rows = 0;
+    let mut positive_membership_rows = 0;
     for case in &holdout.cases {
         if !case.is_evaluable() {
             c6_emissions.push(None);
@@ -423,17 +518,19 @@ fn evaluate_validation(
             surname_only_emissions.push(None);
             continue;
         }
-        let (c6, surname, residual_topology) = infer_policies(
+        let inference = infer_policy_details(
             corpus,
             membership,
             &case.display_name,
             nonempty(&case.country_hint),
             nonempty(&case.locale_hint),
         )?;
-        residual_topology_rows += usize::from(residual_topology);
-        combined_emissions.push(c6.clone().or_else(|| surname.clone()));
-        c6_emissions.push(c6);
-        surname_only_emissions.push(surname);
+        residual_topology_rows += usize::from(inference.residual_topology);
+        membership_query_rows += usize::from(inference.membership_query);
+        positive_membership_rows += usize::from(inference.positive_membership);
+        combined_emissions.push(inference.c6.clone().or_else(|| inference.surname.clone()));
+        c6_emissions.push(inference.c6);
+        surname_only_emissions.push(inference.surname);
     }
     let c6 = evaluate_explicit_emissions(holdout, &c6_emissions)?;
     let combined = evaluate_explicit_emissions(holdout, &combined_emissions)?;
@@ -447,6 +544,8 @@ fn evaluate_validation(
         combined,
         surname_additions,
         residual_topology_rows,
+        membership_query_rows,
+        positive_membership_rows,
         artifact,
     })
 }
@@ -458,6 +557,27 @@ fn infer_policies(
     country_hint: Option<&str>,
     locale_hint: Option<&str>,
 ) -> Result<(Option<String>, Option<String>, bool)> {
+    let inference = infer_policy_details(
+        corpus,
+        membership,
+        display_name,
+        country_hint,
+        locale_hint,
+    )?;
+    Ok((
+        inference.c6,
+        inference.surname,
+        inference.residual_topology,
+    ))
+}
+
+fn infer_policy_details(
+    corpus: &impl EvidenceSource,
+    membership: &FrozenSurnameMembership,
+    display_name: &str,
+    country_hint: Option<&str>,
+    locale_hint: Option<&str>,
+) -> Result<PolicyInference> {
     let diagnostic = diagnose_role_inference(
         corpus,
         ALGORITHM_C3,
@@ -476,7 +596,13 @@ fn infer_policies(
     );
     let baseline = c6_emitted_candidate(&c6).map(str::to_string);
     if c6.emission_source != C6EmissionSource::Abstain {
-        return Ok((baseline, None, false));
+        return Ok(PolicyInference {
+            c6: baseline,
+            surname: None,
+            residual_topology: false,
+            membership_query: false,
+            positive_membership: false,
+        });
     }
 
     let winner = c6.c5.c4.c31.winner.as_ref();
@@ -502,9 +628,7 @@ fn infer_policies(
         complement_absent_from_given_index: complement_lookup
             .as_ref()
             .is_some_and(|lookup| lookup.evidence.is_none()),
-        complement_surname_member: complement
-            .as_deref()
-            .is_some_and(|key| membership.contains(key)),
+        complement_surname_member: false,
         vetoes_pass: c6.first_position.vetoes_pass,
     };
     let residual_topology = gate.c6_abstained
@@ -514,11 +638,31 @@ fn infer_policies(
         && gate.selected_first
         && gate.candidate_count_pass
         && gate.vetoes_pass;
+    let membership_query = residual_topology
+        && gate.candidate_quality >= SURNAME_QUALITY_MIN
+        && gate.reliability >= SURNAME_RELIABILITY_MIN
+        && gate.role_signal >= SURNAME_ROLE_MIN
+        && gate.complement_lookup_eligible
+        && gate.complement_absent_from_given_index;
+    let positive_membership = membership_query
+        && complement
+            .as_deref()
+            .is_some_and(|key| membership.contains(key));
+    let gate = ResidualGate {
+        complement_surname_member: positive_membership,
+        ..gate
+    };
     let surname = gate
         .passes()
         .then(|| winner.map(|winner| winner.greeting_candidate.clone()))
         .flatten();
-    Ok((baseline, surname, residual_topology))
+    Ok(PolicyInference {
+        c6: baseline,
+        surname,
+        residual_topology,
+        membership_query,
+        positive_membership,
+    })
 }
 
 fn validate_safety_control(
@@ -570,6 +714,154 @@ fn build_outputs(
         validation_report(holdout, membership, result).into_bytes(),
     );
     Ok(outputs)
+}
+
+fn build_compact_outputs(
+    holdout: &FrozenHoldout,
+    membership: &FrozenSurnameMembership,
+    result: &ValidationResult,
+) -> Result<BTreeMap<&'static str, Vec<u8>>> {
+    let mut outputs = BTreeMap::new();
+    outputs.insert(
+        "artifact_validation.csv",
+        result.artifact.receipt_bytes.clone(),
+    );
+    outputs.insert("policy_metrics.csv", policy_metrics_csv(result)?);
+    outputs.insert("surname_delta.csv", surname_delta_csv(result)?);
+    outputs.insert("lookup_incidence.csv", lookup_incidence_csv(result)?);
+    outputs.insert(
+        "run_manifest.csv",
+        compact_run_manifest_csv(holdout, membership, result)?,
+    );
+    outputs.insert(
+        "validation_report.md",
+        compact_validation_report(holdout, membership, result).into_bytes(),
+    );
+    Ok(outputs)
+}
+
+fn lookup_incidence_csv(result: &ValidationResult) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record(["population", "rows"])?;
+    for (population, rows) in [
+        ("pre_membership_topology", result.residual_topology_rows),
+        ("surname_index_queries", result.membership_query_rows),
+        ("positive_surname_memberships", result.positive_membership_rows),
+    ] {
+        writer.write_record([population, &rows.to_string()])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_run_manifest_csv(
+    holdout: &FrozenHoldout,
+    membership: &FrozenSurnameMembership,
+    result: &ValidationResult,
+) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record(["key", "value"])?;
+    for (key, value) in [
+        ("holdout", "REAL_PROXY_V9".to_string()),
+        ("holdout_sha256", holdout.manifest.holdout_sha256.clone()),
+        ("total_cases", holdout.manifest.total_cases.to_string()),
+        (
+            "evaluable_cases",
+            holdout.manifest.evaluable_cases.to_string(),
+        ),
+        (
+            "residual_topology_rows",
+            result.residual_topology_rows.to_string(),
+        ),
+        (
+            "surname_index_queries",
+            result.membership_query_rows.to_string(),
+        ),
+        (
+            "positive_surname_memberships",
+            result.positive_membership_rows.to_string(),
+        ),
+        ("baseline", "production_c6".to_string()),
+        (
+            "surname_count_min",
+            membership.surname_count_min().to_string(),
+        ),
+        (
+            "surname_candidate_manifest_sha256",
+            membership.manifest_sha256().to_string(),
+        ),
+        (
+            "surname_artifact_validation_sha256",
+            result.artifact.receipt_sha256.clone(),
+        ),
+        ("row_level_output", "forbidden".to_string()),
+        ("threshold_search", "forbidden".to_string()),
+        ("production_integration", "false".to_string()),
+        ("v10_created", "false".to_string()),
+    ] {
+        writer.write_record([key, &value])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_validation_report(
+    holdout: &FrozenHoldout,
+    membership: &FrozenSurnameMembership,
+    result: &ValidationResult,
+) -> String {
+    let mut report = String::new();
+    let (verdict, explanation) = compact_validation_verdict(result.surname_additions);
+    writeln!(
+        report,
+        "# Frozen compact surname-complement validation on REAL_PROXY_V9\n"
+    )
+    .unwrap();
+    writeln!(report, "The fresh 5,000-row holdout was frozen and checksum-verified as `{}` before any classifier or surname inference. The exact count-at-least-10 MPHF + 32-bit-fingerprint candidate was evaluated once, with no threshold search or row-level output.\n", holdout.manifest.holdout_sha256).unwrap();
+    writeln!(report, "V9 contains {} rows: {} evaluable and {} skipped, with {} expected greetings and {} expected NULL decisions.\n", holdout.manifest.total_cases, holdout.manifest.evaluable_cases, holdout.manifest.skipped_cases, holdout.manifest.expected_greetings, holdout.manifest.expected_abstentions).unwrap();
+    writeln!(report, "| Policy | Emitted | Correct | Wrong | NULL FP | Precision | Recall | Abstention rate |\n|---|---:|---:|---:|---:|---:|---:|---:|").unwrap();
+    for (name, metrics) in [
+        ("Frozen C6", result.c6),
+        ("C6 + compact surname residual", result.combined),
+    ] {
+        writeln!(
+            report,
+            "| {name} | {} | {} | {} | {} | {} | {} | {} |",
+            metrics.emitted_greetings,
+            metrics.correct_greetings,
+            metrics.wrong_greetings,
+            metrics.false_emissions_on_expected_abstentions,
+            format_percent(metrics.greeting_precision()),
+            format_percent(metrics.greeting_recall()),
+            format_percent(metrics.abstention_rate())
+        )
+        .unwrap();
+    }
+    let delta = result.surname_additions;
+    writeln!(report, "\nThe compact surname residual added **{} emissions: {} correct, {} wrong, and {} NULL false emissions** beyond C6. Expected-NULL false emissions are a subset of wrong emissions. Of {} evaluable pre-membership topology rows, {} queried the compact index and {} returned positive membership.\n", delta.emitted, delta.correct, delta.wrong, delta.null_false_emissions, result.residual_topology_rows, result.membership_query_rows, result.positive_membership_rows).unwrap();
+    writeln!(report, "## Frozen candidate\n").unwrap();
+    writeln!(report, "The candidate contains {} surname-only keys and occupies {} bytes under manifest SHA-256 `{}`. Its full {}-member check produced {} misses; {} retained-given and {} generated negative probes produced {} and {} observed false accepts. The MPHF always maps a query to a candidate slot; the independent 32-bit fingerprint provides rejection with nominal accidental acceptance probability `2^-32` per unrelated lookup.\n", membership.key_count(), membership.artifact_bytes(), membership.manifest_sha256(), result.artifact.member_queries, result.artifact.member_misses, result.artifact.given_negative_queries, result.artifact.generated_negative_queries, result.artifact.given_false_accepts, result.artifact.generated_false_accepts).unwrap();
+    writeln!(report, "## Aggregate verdict\n").unwrap();
+    writeln!(report, "**{verdict}.** {explanation}\n").unwrap();
+    writeln!(report, "Historical V7 remains unchanged: first-position `+55 correct / 0 wrong / 0 NULL FP`; surname residual `+18 correct / 1 wrong / 1 NULL FP`. V9 is now spent. No individual V9 row, failure, or correct addition was inspected. Production remains C6; the compact surname candidate is validated only and is not loaded by normal production behavior.").unwrap();
+    report
+}
+
+fn compact_validation_verdict(metrics: AdditionMetrics) -> (&'static str, &'static str) {
+    if metrics.correct >= 10 && metrics.wrong == 0 {
+        (
+            "Strong validation",
+            "The frozen compact surname residual recovered a meaningful unseen set of correct greetings with no observed additional semantic error. This validates the compact candidate for a separate production-integration decision but does not enable it.",
+        )
+    } else if metrics.correct >= 10 && metrics.wrong <= MIXED_ERROR_MAX {
+        (
+            "Mixed but acceptable validation",
+            "The frozen compact surname residual recovered meaningful unseen greetings with a very small observed semantic error count consistent with prior evidence. It remains a production-integration candidate, not enabled behavior.",
+        )
+    } else {
+        (
+            "Negative validation",
+            "The frozen compact surname residual did not reproduce enough safe incremental recall to justify production integration.",
+        )
+    }
 }
 
 fn policy_metrics_csv(result: &ValidationResult) -> Result<Vec<u8>> {
@@ -886,6 +1178,19 @@ mod tests {
         assert_eq!(validation_verdict(addition(5, 1)).0, "Mixed validation");
         assert_eq!(validation_verdict(addition(4, 0)).0, "Negative validation");
         assert_eq!(validation_verdict(addition(5, 2)).0, "Negative validation");
+        assert_eq!(compact_validation_verdict(addition(10, 0)).0, "Strong validation");
+        assert_eq!(
+            compact_validation_verdict(addition(10, 1)).0,
+            "Mixed but acceptable validation"
+        );
+        assert_eq!(
+            compact_validation_verdict(addition(9, 0)).0,
+            "Negative validation"
+        );
+        assert_eq!(
+            compact_validation_verdict(addition(10, 2)).0,
+            "Negative validation"
+        );
     }
 
     #[test]
