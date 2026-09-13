@@ -2443,3 +2443,126 @@ outputs:
 V8 is now spent and was not used for threshold or artifact-size
 selection. Production remains unchanged C6, no surname artifact is
 loaded by normal inference, and no V9 was created.
+
+## Compact surname-only candidate selected on spent V1-V8
+
+After the frozen V8 checkpoint, all V1-V8 labels became spent
+development evidence. The production C6 classifier and the frozen
+surname-residual topology remained unchanged. The only varied value was
+the minimum authoritative raw surname count defining membership in the
+separate surname-only index:
+
+```text
+observed as a surname
+AND absent from the retained given-name index
+AND raw surname count >= fixed threshold
+```
+
+The declared threshold grid was
+`1, 2, 5, 10, 25, 50, 100, 250, 500, 1000`. Every point used an actual
+deterministic MPHF plus an independent 32-bit fingerprint, with no count
+or evidence byte. Semantic results below are residual additions beyond
+C6:
+
+All eight frozen holdout digests were authenticated before exporting a
+12,018-key private lexical lookup set at SHA-256
+`1e08eb015586ea43cbbf549847c57fa8ffd78822823f7531cc48fc5b2c76053f`. The
+authoritative 105-file rescan reproduced 491,655,925 source rows,
+489,631,377 nonempty surnames, and 1,803,175 retained given-name keys.
+The complete targeted-count table had SHA-256
+`160c19748e43f782dc0205adfa17859e6ea61486d573d20b1aab49e498c1a53e`; the
+aggregate ten-threshold inventory had SHA-256
+`eddc4139dea1fcac8009a7b08ed3971c3feb5ce159d0beaa12d363f5fec6f98b`. The
+private key/count streams and remote scan workspace were removed after
+aggregate receipts and the selected binary candidate were frozen.
+
+| Minimum count | Correct | Wrong | NULL FP | Count-1 benefit retained | Surname-only keys | Direct bytes | zstd-19 shipping bytes |
+| ------------: | ------: | ----: | ------: | -----------------------: | ----------------: | -----------: | ---------------------: |
+|             1 |     110 |     1 |       1 |                  100.00% |        35,417,044 |  156,917,446 |            154,542,031 |
+|             2 |      97 |     1 |       1 |                   88.18% |        10,271,119 |   45,506,687 |             44,819,207 |
+|             5 |      87 |     1 |       1 |                   79.09% |         3,390,945 |   15,023,693 |             14,797,832 |
+|            10 |      71 |     1 |       1 |                   64.55% |         1,709,397 |    7,575,340 |              7,461,219 |
+|            25 |      41 |     1 |       1 |                   37.27% |           684,930 |    3,035,830 |              2,990,705 |
+|            50 |      28 |     1 |       1 |                   25.45% |           320,718 |    1,422,350 |              1,400,937 |
+|           100 |      18 |     1 |       1 |                   16.36% |           135,907 |      603,401 |                594,272 |
+|           250 |      10 |     1 |       1 |                    9.09% |            33,385 |      149,039 |                146,652 |
+|           500 |       4 |     1 |       1 |                    3.64% |             8,979 |       40,803 |                 40,124 |
+|          1000 |       0 |     1 |       1 |                    0.00% |             2,117 |       10,347 |                 10,141 |
+
+All ten points are Pareto points: increasing the threshold monotonically
+reduces size and recovered greetings without removing the one semantic
+error. The error is the previously documented expected-NULL V7 case; its
+complement raw surname count is 1,233, so it survives every declared
+threshold, including `>=1000`, where the observed correct benefit is
+already zero. Its abstract frozen signals were candidate quality
+0.512946, role signal 0.346924, reliability 0.386687, selected
+first/complement second, with no organization, ampersand, or
+minimum-length veto. No row strings or identifiers were serialized.
+
+Per-generation correct/wrong/NULL-FP results at the selected `>=10`
+point were:
+
+| Generation | Correct | Wrong | NULL FP | Count-1 correct |
+| ---------- | ------: | ----: | ------: | --------------: |
+| V1         |      11 |     0 |       0 |              15 |
+| V2         |       8 |     0 |       0 |              12 |
+| V3         |       6 |     0 |       0 |              10 |
+| V4         |      10 |     0 |       0 |              13 |
+| V5         |      10 |     0 |       0 |              16 |
+| V6         |       8 |     0 |       0 |              11 |
+| V7         |      10 |     1 |       1 |              18 |
+| V8         |       8 |     0 |       0 |              15 |
+
+Applying the fixed selection procedure in leave-one-generation-out
+analysis selected `>=10` in all eight folds. The procedure first
+requires at least five correct additions, minimizes wrong and then NULL
+false emissions, requires at least half of the count-1 correct benefit,
+and then chooses the smallest actual artifact. This selects `>=10` with
+71 correct additions, one wrong/NULL false emission, and 64.55% retained
+benefit. It is the smallest point that preserves at least half of the
+validated count-1 benefit; `>=25` falls to 37.27%.
+
+The safety-first best points under the requested direct-size caps are:
+
+| Size cap | Threshold | Correct | Wrong | NULL FP | Direct bytes |
+| -------: | --------: | ------: | ----: | ------: | -----------: |
+|    1 MiB |       100 |      18 |     1 |       1 |      603,401 |
+|    2 MiB |        50 |      28 |     1 |       1 |    1,422,350 |
+|    4 MiB |        25 |      41 |     1 |       1 |    3,035,830 |
+|    8 MiB |        10 |      71 |     1 |       1 |    7,575,340 |
+|   16 MiB |         5 |      87 |     1 |       1 |   15,023,693 |
+
+The frozen V9 candidate has these constituents:
+
+| Constituent        |     Bytes | SHA-256                                                            |
+| ------------------ | --------: | ------------------------------------------------------------------ |
+| `manifest.csv`     |       728 | `33fbd24462f13b980b0f8a0a8618edcf6209c8032be6875116a472224adf3fb8` |
+| `names.mphf`       |   737,024 | `832244b41604149295a1a26f879a633598a144e5a11731bc42597716913dc5c1` |
+| `fingerprints.u32` | 6,837,588 | `183639758511ba02a8824e4a419b41f7ff6de46530db90524608051824e25ceb` |
+
+The direct surname artifact is 7,575,340 bytes (7.22 MiB). Combined with
+the unchanged 36,632,687-byte given-name artifact, the runtime name-data
+footprint would be 44,208,027 bytes (42.16 MiB). A second independent
+build matched byte-for-byte; its aggregate reproduction receipt SHA-256
+is `d38fe5a13776c4318185dba9522facf0ecbb746280979bc404bf238bbeb57bbb`.
+
+Every threshold passed all-member verification after disk round-trip. At
+every threshold, 1,803,175 retained-given negative probes and 100,000
+generated negative probes produced zero observed fingerprint false
+accepts. This does not make membership mathematically exact: the nominal
+unknown-query false-accept risk remains approximately `2^-32` per
+lookup. Only 193 of 12,046 spent evaluable rows (1.60%) reached the
+frozen pre-membership query point; this is proxy incidence, not a
+production traffic guarantee.
+
+With caller-redacted labels, both `Martin REDACTED` and
+`Olivier REDACTED` have complements in the selected compact index, but
+production C6 already emits them so the additive residual is not
+reached. `Baris REDACTED` remains outside the sole-candidate topology.
+`Motorcycle Club` remains vetoed and abstains regardless of surname
+membership.
+
+This freezes the exact `>=10` MPHF/fingerprint artifact as the candidate
+for a later one-shot V9 validation. It is not loaded by production, the
+surname residual remains disabled, C6 remains production, and no V9 was
+created or inspected during selection.

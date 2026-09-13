@@ -37,6 +37,8 @@ pub(super) const V6_SHA256: &str =
     "a02d7105ea4f084e9d4ee94b3633e5068eb35e076dd7413b58b6d65549e734b1";
 pub(super) const V7_SHA256: &str =
     "901e630f2ed612e9cd40f5c2ecd28f9d47c9768b10ddd762d2136c5a56cd8a6d";
+pub(super) const V8_SHA256: &str =
+    "55fe9ae0efc7e604e55c997f8c26cd2cfc3e97961514a6a3780cd2f0420ae6c9";
 const RAW_FILES: usize = 105;
 const RAW_ROWS: u64 = 491_655_925;
 const NONEMPTY_SURNAMES: u64 = 489_631_377;
@@ -50,6 +52,9 @@ const MPHF_GAMMA: f64 = 1.7;
 const BLOOM_REFERENCE_FPR: f64 = 0.001;
 const BLOOM_FINGERPRINT_FPR: f64 = 1.0 / 4_294_967_296.0;
 const GENERATED_NEGATIVES: usize = 100_000;
+const COMPACT_MIN_CORRECT: usize = 5;
+const MIB: usize = 1_048_576;
+const COMPACT_SIZE_CAPS_MIB: [usize; 5] = [1, 2, 4, 8, 16];
 const FROZEN_CANDIDATE_MANIFEST_BYTES: usize = 710;
 const FROZEN_CANDIDATE_MANIFEST_SHA256: &str =
     "99d7be0c592eb817eb6ae2c4e59517a12753e86302abed390099293d6c02b675";
@@ -99,10 +104,11 @@ enum Generation {
     V5,
     V6,
     V7,
+    V8,
 }
 
 impl Generation {
-    const ALL: [Self; 7] = [
+    const V1_TO_V7: [Self; 7] = [
         Self::V1,
         Self::V2,
         Self::V3,
@@ -110,6 +116,16 @@ impl Generation {
         Self::V5,
         Self::V6,
         Self::V7,
+    ];
+    const V1_TO_V8: [Self; 8] = [
+        Self::V1,
+        Self::V2,
+        Self::V3,
+        Self::V4,
+        Self::V5,
+        Self::V6,
+        Self::V7,
+        Self::V8,
     ];
 
     fn from_digest(digest: &str) -> Option<Self> {
@@ -121,6 +137,7 @@ impl Generation {
             V5_SHA256 => Some(Self::V5),
             V6_SHA256 => Some(Self::V6),
             V7_SHA256 => Some(Self::V7),
+            V8_SHA256 => Some(Self::V8),
             _ => None,
         }
     }
@@ -134,6 +151,7 @@ impl Generation {
             Self::V5 => "REAL_PROXY_V5",
             Self::V6 => "REAL_PROXY_V6",
             Self::V7 => "REAL_PROXY_V7",
+            Self::V8 => "REAL_PROXY_V8",
         }
     }
 }
@@ -190,6 +208,16 @@ impl SelectionRow {
         .then_some(self.selected_candidate.as_deref())
         .flatten()
     }
+
+    fn residual_membership_emission(&self, member: bool) -> Option<&str> {
+        (self.would_query_surname_index() && member)
+            .then_some(self.selected_candidate.as_deref())
+            .flatten()
+    }
+
+    fn would_query_surname_index(&self) -> bool {
+        self.residual_topology && !self.complement_given_observed
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -245,6 +273,68 @@ struct SelectionResult {
     candidate_manifest_sha256: String,
     inventory_sha256: String,
     probes: Vec<ProbeResult>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActualMembershipStats {
+    threshold: u64,
+    key_count: usize,
+    mphf_bytes: usize,
+    fingerprint_bytes: usize,
+    manifest_bytes: usize,
+    total_bytes: usize,
+    mphf_sha256: String,
+    fingerprint_sha256: String,
+    manifest_sha256: String,
+    member_queries: usize,
+    member_misses: usize,
+    given_negative_queries: usize,
+    given_false_accepts: usize,
+    generated_negative_queries: usize,
+    generated_false_accepts: usize,
+    zstd19_mphf_bytes: usize,
+    zstd19_fingerprint_bytes: usize,
+    zstd19_total_bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompactThresholdPoint {
+    threshold: u64,
+    metrics: Metrics,
+    inventory: InventoryRow,
+    membership: ActualMembershipStats,
+    membership_hits: Vec<bool>,
+}
+
+impl CompactThresholdPoint {
+    fn retained_correct_denominator(points: &[Self]) -> Result<usize> {
+        let denominator = points
+            .iter()
+            .find(|point| point.threshold == 1)
+            .ok_or("compact threshold frontier is missing count 1")?
+            .metrics
+            .correct;
+        if denominator == 0 {
+            return Err("count-1 compact threshold has zero correct additions".into());
+        }
+        Ok(denominator)
+    }
+
+    fn retained_at_least_half(&self, denominator: usize) -> bool {
+        self.metrics.correct.saturating_mul(2) >= denominator
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompactSelectionResult {
+    rows: Vec<SelectionRow>,
+    points: Vec<CompactThresholdPoint>,
+    logo: Vec<(Generation, CompactThresholdPoint, Metrics)>,
+    selected: CompactThresholdPoint,
+    counts_sha256: String,
+    inventory_sha256: String,
+    probes: Vec<ProbeResult>,
+    selected_reproduction_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,14 +458,20 @@ pub(crate) fn prepare_surname_index_selection(
     holdouts: Vec<FrozenHoldout>,
     probes_path: &Path,
 ) -> Result<String> {
-    let holdouts = validate_and_order_holdouts(holdouts)?;
+    let holdouts = validate_and_order_holdouts(holdouts, &Generation::V1_TO_V7)?;
     let keys = expected_lookup_keys(&holdouts, Some(probes_path))?;
     let bytes = serialize_keys(&keys)?;
     let digest = sha256_hex(&bytes);
     fs::write(output.join("lookup_keys.csv"), &bytes)?;
     fs::write(
         output.join("lookup_manifest.csv"),
-        lookup_manifest_csv(&holdouts, keys.len(), &digest)?,
+        lookup_manifest_csv(
+            &holdouts,
+            &Generation::V1_TO_V7,
+            "all_plain_alphabetic_tokens_from_v1_through_v7_plus_private_probes",
+            keys.len(),
+            &digest,
+        )?,
     )?;
     let mut report = String::new();
     writeln!(report, "# Private spent V1-V7 surname lookup preparation\n").unwrap();
@@ -395,14 +491,20 @@ pub(crate) fn run_surname_index_selection(
     name_totals: &Path,
     probes_path: &Path,
 ) -> Result<String> {
-    let holdouts = validate_and_order_holdouts(holdouts)?;
+    let holdouts = validate_and_order_holdouts(holdouts, &Generation::V1_TO_V7)?;
     let expected_keys = expected_lookup_keys(&holdouts, Some(probes_path))?;
-    let scan = load_targeted_scan(surname_counts, surname_manifest, &expected_keys, &holdouts)?;
+    let scan = load_targeted_scan(
+        surname_counts,
+        surname_manifest,
+        &expected_keys,
+        &holdouts,
+        &Generation::V1_TO_V7,
+    )?;
     let inventory = load_inventory(inventory_path, &scan.inventory_sha256)?;
-    let rows = build_rows(corpus, &holdouts, &scan.counts)?;
+    let rows = build_rows(corpus, &holdouts, &Generation::V1_TO_V7, &scan.counts)?;
     let points = threshold_points(&rows, &inventory);
     let selected = select_point(&points).ok_or("surname threshold grid is empty")?;
-    let logo = logo_points(&rows, &inventory)?;
+    let logo = logo_points(&rows, &inventory, &Generation::V1_TO_V7, select_point)?;
     let (selected_keys, selected_key_sha256) =
         load_selected_keys(key_directory, &inventory, selected.threshold)?;
     let (membership, candidate_manifest_sha256) = build_membership_candidate(
@@ -450,7 +552,110 @@ pub(crate) fn run_surname_index_selection(
     )?)
 }
 
-fn validate_and_order_holdouts(holdouts: Vec<FrozenHoldout>) -> Result<Vec<FrozenHoldout>> {
+pub(crate) fn prepare_compact_surname_index_selection(
+    output: &Path,
+    holdouts: Vec<FrozenHoldout>,
+    probes_path: &Path,
+) -> Result<String> {
+    let holdouts = validate_and_order_holdouts(holdouts, &Generation::V1_TO_V8)?;
+    let keys = expected_lookup_keys(&holdouts, Some(probes_path))?;
+    let bytes = serialize_keys(&keys)?;
+    let digest = sha256_hex(&bytes);
+    fs::write(output.join("lookup_keys.csv"), &bytes)?;
+    fs::write(
+        output.join("lookup_manifest.csv"),
+        lookup_manifest_csv(
+            &holdouts,
+            &Generation::V1_TO_V8,
+            "all_plain_alphabetic_tokens_from_v1_through_v8_plus_private_probes",
+            keys.len(),
+            &digest,
+        )?,
+    )?;
+    let mut report = String::new();
+    writeln!(
+        report,
+        "# Private spent V1-V8 compact surname lookup preparation\n"
+    )
+    .unwrap();
+    writeln!(report, "All eight holdouts were checksum-verified before exporting a lexical superset of {} distinct keys. The lookup-key SHA-256 is `{digest}`. This unredacted material must remain under ignored `_wip/`.", keys.len()).unwrap();
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_compact_surname_index_selection(
+    output: &Path,
+    corpus: &impl EvidenceSource,
+    holdouts: Vec<FrozenHoldout>,
+    surname_counts: &Path,
+    surname_manifest: &Path,
+    inventory_path: &Path,
+    key_directory: &Path,
+    name_totals: &Path,
+    probes_path: &Path,
+) -> Result<String> {
+    let holdouts = validate_and_order_holdouts(holdouts, &Generation::V1_TO_V8)?;
+    let expected_keys = expected_lookup_keys(&holdouts, Some(probes_path))?;
+    let scan = load_targeted_scan(
+        surname_counts,
+        surname_manifest,
+        &expected_keys,
+        &holdouts,
+        &Generation::V1_TO_V8,
+    )?;
+    let inventory = load_inventory(inventory_path, &scan.inventory_sha256)?;
+    let rows = build_rows(corpus, &holdouts, &Generation::V1_TO_V8, &scan.counts)?;
+    let points =
+        build_compact_threshold_points(output, &rows, &inventory, key_directory, name_totals)?;
+    let selected = select_compact_point(&points)?;
+    if selected.membership.given_false_accepts != 0
+        || selected.membership.generated_false_accepts != 0
+    {
+        return Err("selected compact candidate has an observed fingerprint false accept".into());
+    }
+    let logo = compact_logo_points(&rows, &points)?;
+    let selected_reproduction_sha256 =
+        reproduce_selected_compact_candidate(output, &selected, key_directory, name_totals)?;
+    let selected_keys = load_selected_keys(key_directory, &inventory, selected.threshold)?.0;
+    let probes = evaluate_probes(
+        corpus,
+        probes_path,
+        &scan.counts,
+        &selected_keys,
+        selected.threshold,
+    )?;
+    validate_safety_probe(&probes)?;
+    retain_selected_compact_candidate(output, selected.threshold)?;
+    let result = CompactSelectionResult {
+        rows,
+        points,
+        logo,
+        selected,
+        counts_sha256: scan.counts_sha256,
+        inventory_sha256: scan.inventory_sha256,
+        probes,
+        selected_reproduction_sha256,
+    };
+    let outputs = build_compact_outputs(&result)?;
+    let repeated = build_compact_outputs(&result)?;
+    if outputs != repeated {
+        return Err("compact surname-index selection serialization is not deterministic".into());
+    }
+    for (name, bytes) in &outputs {
+        fs::write(output.join(name), bytes)?;
+    }
+    Ok(String::from_utf8(
+        outputs
+            .get("selection_report.md")
+            .ok_or("compact selection report missing")?
+            .clone(),
+    )?)
+}
+
+fn validate_and_order_holdouts(
+    holdouts: Vec<FrozenHoldout>,
+    required: &[Generation],
+) -> Result<Vec<FrozenHoldout>> {
     let mut by_generation = BTreeMap::new();
     for holdout in holdouts {
         let generation = Generation::from_digest(&holdout.manifest.holdout_sha256)
@@ -459,11 +664,19 @@ fn validate_and_order_holdouts(holdouts: Vec<FrozenHoldout>) -> Result<Vec<Froze
             return Err("duplicate spent holdout generation".into());
         }
     }
-    if by_generation.keys().copied().ne(Generation::ALL) {
-        return Err("surname-index selection requires exactly REAL_PROXY_V1 through V7".into());
+    if by_generation.keys().copied().ne(required.iter().copied()) {
+        let last = required
+            .last()
+            .ok_or("surname-index selection requires at least one generation")?;
+        return Err(format!(
+            "surname-index selection requires exactly REAL_PROXY_V1 through {}",
+            last.as_str()
+        )
+        .into());
     }
-    Ok(Generation::ALL
-        .into_iter()
+    Ok(required
+        .iter()
+        .copied()
         .map(|generation| {
             by_generation
                 .remove(&generation)
@@ -510,18 +723,17 @@ fn serialize_keys(keys: &BTreeSet<String>) -> Result<Vec<u8>> {
 
 fn lookup_manifest_csv(
     holdouts: &[FrozenHoldout],
+    generations: &[Generation],
+    selection: &str,
     key_count: usize,
     key_sha256: &str,
 ) -> Result<Vec<u8>> {
     let mut writer = canonical_writer();
     writer.write_record(["key", "value"])?;
-    writer.write_record([
-        "selection",
-        "all_plain_alphabetic_tokens_from_v1_through_v7_plus_private_probes",
-    ])?;
+    writer.write_record(["selection", selection])?;
     writer.write_record(["target_keys", &key_count.to_string()])?;
     writer.write_record(["lookup_keys_sha256", key_sha256])?;
-    for (generation, holdout) in Generation::ALL.iter().zip(holdouts) {
+    for (generation, holdout) in generations.iter().zip(holdouts) {
         writer.write_record([
             &format!("{}_sha256", generation.as_str().to_ascii_lowercase()),
             &holdout.manifest.holdout_sha256,
@@ -535,6 +747,7 @@ fn load_targeted_scan(
     manifest_path: &Path,
     expected_keys: &BTreeSet<String>,
     holdouts: &[FrozenHoldout],
+    generations: &[Generation],
 ) -> Result<TargetedScan> {
     let bytes = fs::read(counts_path)?;
     let counts_sha256 = sha256_hex(&bytes);
@@ -560,7 +773,7 @@ fn load_targeted_scan(
         .ok_or("surname manifest is missing surname_inventory_sha256")?
         .to_string();
     validate_sha256(&inventory_sha256, "surname inventory digest")?;
-    for (generation, holdout) in Generation::ALL.iter().zip(holdouts) {
+    for (generation, holdout) in generations.iter().zip(holdouts) {
         validate_manifest_value(
             &manifest,
             &format!("{}_sha256", generation.as_str().to_ascii_lowercase()),
@@ -651,10 +864,11 @@ fn load_inventory(path: &Path, expected_sha256: &str) -> Result<Vec<InventoryRow
 fn build_rows(
     corpus: &impl EvidenceSource,
     holdouts: &[FrozenHoldout],
+    generations: &[Generation],
     surname_counts: &BTreeMap<String, u64>,
 ) -> Result<Vec<SelectionRow>> {
     let mut rows = Vec::new();
-    for (generation, holdout) in Generation::ALL.iter().copied().zip(holdouts) {
+    for (generation, holdout) in generations.iter().copied().zip(holdouts) {
         for case in &holdout.cases {
             if !case.is_evaluable() {
                 continue;
@@ -770,9 +984,11 @@ fn threshold_points(rows: &[SelectionRow], inventory: &[InventoryRow]) -> Vec<Th
 fn logo_points(
     rows: &[SelectionRow],
     inventory: &[InventoryRow],
+    generations: &[Generation],
+    select: fn(&[ThresholdPoint]) -> Option<ThresholdPoint>,
 ) -> Result<Vec<(Generation, ThresholdPoint, Metrics)>> {
     let mut output = Vec::new();
-    for held_out in Generation::ALL {
+    for held_out in generations.iter().copied() {
         let training = SURNAME_THRESHOLDS
             .into_iter()
             .zip(inventory)
@@ -782,7 +998,7 @@ fn logo_points(
                 artifact_bytes: estimated_mphf_membership_bytes(inventory.key_count),
             })
             .collect::<Vec<_>>();
-        let selected = select_point(&training).ok_or("LOGO threshold grid is empty")?;
+        let selected = select(&training).ok_or("LOGO threshold grid has no selectable point")?;
         let held_out_metrics =
             evaluate_threshold(rows, selected.threshold, |row| row.generation == held_out);
         output.push((held_out, selected, held_out_metrics));
@@ -805,6 +1021,25 @@ fn evaluate_threshold(
     metrics
 }
 
+fn evaluate_membership_hits(
+    rows: &[SelectionRow],
+    membership_hits: &[bool],
+    include: impl Fn(&SelectionRow) -> bool,
+) -> Result<Metrics> {
+    if rows.len() != membership_hits.len() {
+        return Err("compact membership decisions do not align with selection rows".into());
+    }
+    let mut metrics = Metrics::default();
+    for (row, member) in rows.iter().zip(membership_hits) {
+        if !include(row) {
+            continue;
+        }
+        let emission = row.residual_membership_emission(*member);
+        metrics.observe(row.expected_greeting.as_deref(), emission);
+    }
+    Ok(metrics)
+}
+
 fn select_point(points: &[ThresholdPoint]) -> Option<ThresholdPoint> {
     points.iter().copied().min_by(compare_points)
 }
@@ -821,6 +1056,153 @@ fn compare_points(left: &ThresholdPoint, right: &ThresholdPoint) -> Ordering {
         .then_with(|| right.metrics.correct.cmp(&left.metrics.correct))
         .then_with(|| left.artifact_bytes.cmp(&right.artifact_bytes))
         .then_with(|| right.threshold.cmp(&left.threshold))
+}
+
+fn build_compact_threshold_points(
+    output: &Path,
+    rows: &[SelectionRow],
+    inventory: &[InventoryRow],
+    key_directory: &Path,
+    name_totals: &Path,
+) -> Result<Vec<CompactThresholdPoint>> {
+    let candidates = output.join("candidates");
+    fs::create_dir(&candidates)?;
+    let mut points = Vec::with_capacity(SURNAME_THRESHOLDS.len());
+    for inventory in inventory {
+        let threshold = inventory.threshold;
+        let (keys, key_sha256) =
+            load_selected_keys(key_directory, std::slice::from_ref(inventory), threshold)?;
+        let raw_metrics = evaluate_threshold(rows, threshold, |_| true);
+        let (membership, index) = build_actual_membership_candidate(
+            &candidates.join(format!("count-{threshold}")),
+            ThresholdPoint {
+                threshold,
+                metrics: raw_metrics,
+                artifact_bytes: 0,
+            },
+            &keys,
+            &key_sha256,
+            name_totals,
+        )?;
+        let membership_hits = rows
+            .iter()
+            .map(|row| {
+                row.complement
+                    .as_deref()
+                    .is_some_and(|key| index.contains(key))
+            })
+            .collect::<Vec<_>>();
+        let metrics = evaluate_membership_hits(rows, &membership_hits, |_| true)?;
+        points.push(CompactThresholdPoint {
+            threshold,
+            metrics,
+            inventory: inventory.clone(),
+            membership,
+            membership_hits,
+        });
+    }
+    Ok(points)
+}
+
+fn select_compact_point(points: &[CompactThresholdPoint]) -> Result<CompactThresholdPoint> {
+    let denominator = CompactThresholdPoint::retained_correct_denominator(points)?;
+    let meaningful = points
+        .iter()
+        .filter(|point| point.metrics.correct >= COMPACT_MIN_CORRECT)
+        .collect::<Vec<_>>();
+    let minimum_wrong = meaningful
+        .iter()
+        .map(|point| point.metrics.wrong)
+        .min()
+        .ok_or("compact threshold grid has no meaningfully useful point")?;
+    let minimum_null = meaningful
+        .iter()
+        .filter(|point| point.metrics.wrong == minimum_wrong)
+        .map(|point| point.metrics.null_false_emissions)
+        .min()
+        .ok_or("compact threshold grid has no safety-optimal point")?;
+    meaningful
+        .into_iter()
+        .filter(|point| {
+            point.metrics.wrong == minimum_wrong
+                && point.metrics.null_false_emissions == minimum_null
+                && point.retained_at_least_half(denominator)
+        })
+        .min_by(|left, right| compare_compact_sizes(left, right))
+        .cloned()
+        .ok_or_else(|| {
+            "no safety-optimal compact threshold retains at least half of count-1 benefit".into()
+        })
+}
+
+fn compare_compact_sizes(left: &CompactThresholdPoint, right: &CompactThresholdPoint) -> Ordering {
+    left.membership
+        .total_bytes
+        .cmp(&right.membership.total_bytes)
+        .then_with(|| right.metrics.correct.cmp(&left.metrics.correct))
+        .then_with(|| right.threshold.cmp(&left.threshold))
+}
+
+fn compact_logo_points(
+    rows: &[SelectionRow],
+    points: &[CompactThresholdPoint],
+) -> Result<Vec<(Generation, CompactThresholdPoint, Metrics)>> {
+    let mut output = Vec::new();
+    for held_out in Generation::V1_TO_V8 {
+        let mut training = Vec::with_capacity(points.len());
+        for point in points {
+            training.push(CompactThresholdPoint {
+                threshold: point.threshold,
+                metrics: evaluate_membership_hits(rows, &point.membership_hits, |row| {
+                    row.generation != held_out
+                })?,
+                inventory: point.inventory.clone(),
+                membership: point.membership.clone(),
+                membership_hits: point.membership_hits.clone(),
+            });
+        }
+        let selected = select_compact_point(&training)?;
+        let held_out_metrics = evaluate_membership_hits(rows, &selected.membership_hits, |row| {
+            row.generation == held_out
+        })?;
+        output.push((held_out, selected, held_out_metrics));
+    }
+    Ok(output)
+}
+
+fn point_is_pareto(points: &[CompactThresholdPoint], candidate: &CompactThresholdPoint) -> bool {
+    !points.iter().any(|other| {
+        other.threshold != candidate.threshold
+            && other.metrics.wrong <= candidate.metrics.wrong
+            && other.metrics.null_false_emissions <= candidate.metrics.null_false_emissions
+            && other.metrics.correct >= candidate.metrics.correct
+            && other.membership.total_bytes <= candidate.membership.total_bytes
+            && (other.metrics.wrong < candidate.metrics.wrong
+                || other.metrics.null_false_emissions < candidate.metrics.null_false_emissions
+                || other.metrics.correct > candidate.metrics.correct
+                || other.membership.total_bytes < candidate.membership.total_bytes)
+    })
+}
+
+fn best_point_under_cap(
+    points: &[CompactThresholdPoint],
+    cap_bytes: usize,
+) -> Option<&CompactThresholdPoint> {
+    points
+        .iter()
+        .filter(|point| point.membership.total_bytes <= cap_bytes)
+        .min_by(|left, right| {
+            left.metrics
+                .wrong
+                .cmp(&right.metrics.wrong)
+                .then_with(|| {
+                    left.metrics
+                        .null_false_emissions
+                        .cmp(&right.metrics.null_false_emissions)
+                })
+                .then_with(|| right.metrics.correct.cmp(&left.metrics.correct))
+                .then_with(|| compare_compact_sizes(left, right))
+        })
 }
 
 fn load_selected_keys(
@@ -932,6 +1314,287 @@ fn build_membership_candidate(
         bloom_fingerprint_false_accepts: negative_stats.5,
     };
     Ok((membership, manifest_sha256))
+}
+
+fn build_actual_membership_candidate(
+    directory: &Path,
+    point: ThresholdPoint,
+    keys: &[String],
+    key_sha256: &str,
+    name_totals: &Path,
+) -> Result<(ActualMembershipStats, MembershipIndex)> {
+    fs::create_dir(directory)?;
+    let routing = keys
+        .iter()
+        .map(|key| xxh3_64_with_seed(key.as_bytes(), ROUTING_SEED))
+        .collect::<Vec<_>>();
+    let unique_routing = routing.iter().copied().collect::<HashSet<_>>();
+    if unique_routing.len() != routing.len() {
+        return Err("compact surname keys have a 64-bit routing-hash collision".into());
+    }
+    let first = build_membership_index(keys, &routing)?;
+    let second = build_membership_index(keys, &routing)?;
+    if first.1 != second.1 || first.2 != second.2 {
+        return Err("compact surname membership is not byte-deterministic".into());
+    }
+    let (_, mphf_bytes, fingerprint_bytes) = first;
+    fs::write(directory.join("names.mphf"), &mphf_bytes)?;
+    fs::write(directory.join("fingerprints.u32"), &fingerprint_bytes)?;
+    let index = load_membership_candidate(directory, keys.len())?;
+    let member_misses = keys.iter().filter(|key| !index.contains(key)).count();
+    if member_misses != 0 {
+        return Err("round-tripped compact membership candidate missed a member".into());
+    }
+    let negative_stats = test_core_negative_membership(name_totals, keys, &index)?;
+    let manifest = if point.threshold == 1 {
+        let legacy_stats = (
+            negative_stats.0,
+            negative_stats.1,
+            negative_stats.2,
+            negative_stats.3,
+            1_932,
+            0,
+        );
+        candidate_manifest(
+            point,
+            keys.len(),
+            key_sha256,
+            &mphf_bytes,
+            &fingerprint_bytes,
+            &legacy_stats,
+            bloom_bytes(keys.len(), BLOOM_REFERENCE_FPR),
+            bloom_bytes(keys.len(), BLOOM_FINGERPRINT_FPR),
+        )?
+    } else {
+        compact_candidate_manifest(
+            point.threshold,
+            keys.len(),
+            key_sha256,
+            &mphf_bytes,
+            &fingerprint_bytes,
+            negative_stats,
+        )?
+    };
+    fs::write(directory.join("manifest.csv"), &manifest)?;
+    let stats = ActualMembershipStats {
+        threshold: point.threshold,
+        key_count: keys.len(),
+        mphf_bytes: mphf_bytes.len(),
+        fingerprint_bytes: fingerprint_bytes.len(),
+        manifest_bytes: manifest.len(),
+        total_bytes: mphf_bytes.len() + fingerprint_bytes.len() + manifest.len(),
+        mphf_sha256: sha256_hex(&mphf_bytes),
+        fingerprint_sha256: sha256_hex(&fingerprint_bytes),
+        manifest_sha256: sha256_hex(&manifest),
+        member_queries: keys.len(),
+        member_misses,
+        given_negative_queries: negative_stats.0,
+        given_false_accepts: negative_stats.1,
+        generated_negative_queries: negative_stats.2,
+        generated_false_accepts: negative_stats.3,
+        zstd19_mphf_bytes: compress_for_shipping(directory, "names.mphf")?,
+        zstd19_fingerprint_bytes: compress_for_shipping(directory, "fingerprints.u32")?,
+        zstd19_total_bytes: 0,
+    };
+    let stats = ActualMembershipStats {
+        zstd19_total_bytes: stats.zstd19_mphf_bytes
+            + stats.zstd19_fingerprint_bytes
+            + stats.manifest_bytes,
+        ..stats
+    };
+    authenticate_actual_candidate(directory, &stats)?;
+    if point.threshold == 1 {
+        validate_rebuilt_count_one_candidate(&stats, key_sha256)?;
+    }
+    Ok((stats, index))
+}
+
+fn test_core_negative_membership(
+    name_totals: &Path,
+    selected_keys: &[String],
+    index: &MembershipIndex,
+) -> Result<(usize, usize, usize, usize)> {
+    let mut reader = csv::Reader::from_path(name_totals)?;
+    if reader
+        .headers()?
+        .iter()
+        .ne(["name", "given_count", "as_surname_count"])
+    {
+        return Err("unexpected name-totals header".into());
+    }
+    let mut given_queries = 0;
+    let mut given_false_accepts = 0;
+    for record in reader.records() {
+        let record = record?;
+        let key = record.get(0).ok_or("missing retained given-name key")?;
+        if selected_keys
+            .binary_search_by(|candidate| candidate.as_str().cmp(key))
+            .is_ok()
+        {
+            return Err("compact surname-only set duplicates a retained given-name key".into());
+        }
+        given_queries += 1;
+        given_false_accepts += usize::from(index.contains(key));
+    }
+    if given_queries != GIVEN_KEYS {
+        return Err("retained given-name negative-query count changed".into());
+    }
+    let generated_false_accepts = (0..GENERATED_NEGATIVES)
+        .filter(|value| index.contains(&format!("definitely-not-a-surname-{value:06}")))
+        .count();
+    Ok((
+        given_queries,
+        given_false_accepts,
+        GENERATED_NEGATIVES,
+        generated_false_accepts,
+    ))
+}
+
+fn compact_candidate_manifest(
+    threshold: u64,
+    key_count: usize,
+    key_sha256: &str,
+    mphf_bytes: &[u8],
+    fingerprint_bytes: &[u8],
+    negative_stats: (usize, usize, usize, usize),
+) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record(["key", "value"])?;
+    for (key, value) in [
+        (
+            "format",
+            "compact-surname-membership-candidate-v1".to_string(),
+        ),
+        ("surname_count_min", threshold.to_string()),
+        ("key_count", key_count.to_string()),
+        ("source_keys_sha256", key_sha256.to_string()),
+        ("routing_seed", format!("0x{ROUTING_SEED:016x}")),
+        ("fingerprint_seed", format!("0x{FINGERPRINT_SEED:016x}")),
+        ("mphf_gamma", format!("{MPHF_GAMMA:.1}")),
+        ("fingerprint_bits", "32".to_string()),
+        ("stores_surname_count", "false".to_string()),
+        ("names_mphf_bytes", mphf_bytes.len().to_string()),
+        ("names_mphf_sha256", sha256_hex(mphf_bytes)),
+        ("fingerprints_bytes", fingerprint_bytes.len().to_string()),
+        ("fingerprints_sha256", sha256_hex(fingerprint_bytes)),
+        ("member_queries", key_count.to_string()),
+        ("member_misses", "0".to_string()),
+        ("given_negative_queries", negative_stats.0.to_string()),
+        ("given_false_accepts", negative_stats.1.to_string()),
+        ("generated_negative_queries", negative_stats.2.to_string()),
+        ("generated_false_accepts", negative_stats.3.to_string()),
+        (
+            "nominal_unknown_false_accept_probability",
+            "2^-32".to_string(),
+        ),
+    ] {
+        writer.write_record([key, &value])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compress_for_shipping(directory: &Path, filename: &str) -> Result<usize> {
+    let source = directory.join(filename);
+    let compressed = directory.join(format!("{filename}.zst"));
+    let status = Command::new("zstd")
+        .args(["-19", "--long", "-q", "-f"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&compressed)
+        .status()?;
+    if !status.success() {
+        return Err(format!("zstd shipping measurement failed with {status}").into());
+    }
+    Ok(usize::try_from(fs::metadata(compressed)?.len())?)
+}
+
+fn authenticate_actual_candidate(directory: &Path, stats: &ActualMembershipStats) -> Result<()> {
+    for (filename, bytes, digest) in [
+        ("names.mphf", stats.mphf_bytes, stats.mphf_sha256.as_str()),
+        (
+            "fingerprints.u32",
+            stats.fingerprint_bytes,
+            stats.fingerprint_sha256.as_str(),
+        ),
+        (
+            "manifest.csv",
+            stats.manifest_bytes,
+            stats.manifest_sha256.as_str(),
+        ),
+    ] {
+        let contents = fs::read(directory.join(filename))?;
+        if contents.len() != bytes || sha256_hex(&contents) != digest {
+            return Err(format!("compact candidate authentication failed for {filename}").into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_rebuilt_count_one_candidate(
+    stats: &ActualMembershipStats,
+    key_sha256: &str,
+) -> Result<()> {
+    if stats.key_count != PRIOR_KEY_COUNTS[0]
+        || key_sha256 != FROZEN_CANDIDATE_SOURCE_KEYS_SHA256
+        || stats.mphf_bytes != FROZEN_CANDIDATE_MPHF_BYTES
+        || stats.mphf_sha256 != FROZEN_CANDIDATE_MPHF_SHA256
+        || stats.fingerprint_bytes != FROZEN_CANDIDATE_FINGERPRINT_BYTES
+        || stats.fingerprint_sha256 != FROZEN_CANDIDATE_FINGERPRINT_SHA256
+        || stats.manifest_bytes != FROZEN_CANDIDATE_MANIFEST_BYTES
+        || stats.manifest_sha256 != FROZEN_CANDIDATE_MANIFEST_SHA256
+    {
+        return Err("rebuilt count-1 candidate differs from the V8 frozen artifact".into());
+    }
+    Ok(())
+}
+
+fn reproduce_selected_compact_candidate(
+    output: &Path,
+    selected: &CompactThresholdPoint,
+    key_directory: &Path,
+    name_totals: &Path,
+) -> Result<String> {
+    let reproduction = output.join("selected-reproduction");
+    let (keys, key_sha256) = load_selected_keys(
+        key_directory,
+        std::slice::from_ref(&selected.inventory),
+        selected.threshold,
+    )?;
+    let (rebuilt, _) = build_actual_membership_candidate(
+        &reproduction,
+        ThresholdPoint {
+            threshold: selected.threshold,
+            metrics: selected.metrics,
+            artifact_bytes: selected.membership.total_bytes,
+        },
+        &keys,
+        &key_sha256,
+        name_totals,
+    )?;
+    if rebuilt != selected.membership {
+        return Err("selected compact candidate did not reproduce byte-for-byte".into());
+    }
+    let mut receipt = String::new();
+    writeln!(receipt, "threshold={}", selected.threshold).unwrap();
+    writeln!(receipt, "manifest_sha256={}", rebuilt.manifest_sha256).unwrap();
+    writeln!(receipt, "mphf_sha256={}", rebuilt.mphf_sha256).unwrap();
+    writeln!(receipt, "fingerprint_sha256={}", rebuilt.fingerprint_sha256).unwrap();
+    writeln!(receipt, "byte_identical=true").unwrap();
+    let digest = sha256_hex(receipt.as_bytes());
+    fs::write(output.join("selected_reproduction.txt"), receipt)?;
+    fs::remove_dir_all(&reproduction)?;
+    Ok(digest)
+}
+
+fn retain_selected_compact_candidate(output: &Path, threshold: u64) -> Result<()> {
+    let candidates = output.join("candidates");
+    let selected = candidates.join(format!("count-{threshold}"));
+    for filename in ["names.mphf.zst", "fingerprints.u32.zst"] {
+        fs::remove_file(selected.join(filename))?;
+    }
+    fs::rename(&selected, output.join("selected-candidate"))?;
+    fs::remove_dir_all(candidates)?;
+    Ok(())
 }
 
 pub(super) fn load_frozen_membership_candidate(
@@ -1224,6 +1887,553 @@ fn validate_safety_probe(probes: &[ProbeResult]) -> Result<()> {
     Ok(())
 }
 
+fn build_compact_outputs(
+    result: &CompactSelectionResult,
+) -> Result<BTreeMap<&'static str, Vec<u8>>> {
+    let mut outputs = BTreeMap::new();
+    outputs.insert(
+        "thresholds_pooled.csv",
+        compact_thresholds_pooled_csv(result)?,
+    );
+    outputs.insert(
+        "thresholds_by_generation.csv",
+        compact_thresholds_by_generation_csv(result)?,
+    );
+    outputs.insert("threshold_logo.csv", compact_threshold_logo_csv(result)?);
+    outputs.insert("pareto_frontier.csv", compact_pareto_csv(result)?);
+    outputs.insert("size_budgets.csv", compact_size_budgets_csv(result)?);
+    outputs.insert("query_incidence.csv", compact_query_incidence_csv(result)?);
+    outputs.insert(
+        "membership_verification.csv",
+        compact_membership_verification_csv(result)?,
+    );
+    outputs.insert(
+        "error_diagnostics.csv",
+        compact_error_diagnostics_csv(result)?,
+    );
+    outputs.insert(
+        "qualitative_probes.csv",
+        compact_qualitative_probes_csv(result)?,
+    );
+    outputs.insert(
+        "selected_candidate.csv",
+        compact_selected_candidate_csv(result)?,
+    );
+    outputs.insert("run_manifest.csv", compact_run_manifest_csv(result)?);
+    outputs.insert("selection_report.md", compact_report(result)?.into_bytes());
+    Ok(outputs)
+}
+
+fn compact_thresholds_pooled_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let denominator = CompactThresholdPoint::retained_correct_denominator(&result.points)?;
+    let mut writer = canonical_writer();
+    writer.write_record([
+        "surname_count_min",
+        "additional_emitted",
+        "additional_correct",
+        "additional_wrong",
+        "additional_null_false_emissions",
+        "correct_retained_fraction",
+        "qualifying_keys",
+        "actual_artifact_bytes",
+        "combined_name_data_bytes",
+        "zstd19_shipping_bytes",
+        "pareto",
+        "selected",
+    ])?;
+    for point in &result.points {
+        writer.write_record([
+            point.threshold.to_string(),
+            point.metrics.emitted.to_string(),
+            point.metrics.correct.to_string(),
+            point.metrics.wrong.to_string(),
+            point.metrics.null_false_emissions.to_string(),
+            format_ratio_value(point.metrics.correct, denominator),
+            point.inventory.key_count.to_string(),
+            point.membership.total_bytes.to_string(),
+            (EXISTING_ARTIFACT_BYTES + point.membership.total_bytes).to_string(),
+            point.membership.zstd19_total_bytes.to_string(),
+            bool_string(point_is_pareto(&result.points, point)).to_string(),
+            bool_string(point.threshold == result.selected.threshold).to_string(),
+        ])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_thresholds_by_generation_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record([
+        "generation",
+        "surname_count_min",
+        "additional_emitted",
+        "additional_correct",
+        "additional_wrong",
+        "additional_null_false_emissions",
+        "correct_retained_fraction",
+    ])?;
+    for generation in Generation::V1_TO_V8 {
+        let denominator = metrics_for_generation(result, generation, 1)?.correct;
+        for point in &result.points {
+            let metrics = metrics_for_generation(result, generation, point.threshold)?;
+            writer.write_record([
+                generation.as_str().to_string(),
+                point.threshold.to_string(),
+                metrics.emitted.to_string(),
+                metrics.correct.to_string(),
+                metrics.wrong.to_string(),
+                metrics.null_false_emissions.to_string(),
+                format_ratio_or_empty(metrics.correct, denominator),
+            ])?;
+        }
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn metrics_for_generation(
+    result: &CompactSelectionResult,
+    generation: Generation,
+    threshold: u64,
+) -> Result<Metrics> {
+    let point = result
+        .points
+        .iter()
+        .find(|point| point.threshold == threshold)
+        .ok_or("generation metrics requested an unknown threshold")?;
+    evaluate_membership_hits(&result.rows, &point.membership_hits, |row| {
+        row.generation == generation
+    })
+}
+
+fn compact_threshold_logo_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record([
+        "held_out",
+        "selected_surname_count_min",
+        "training_correct",
+        "training_wrong",
+        "training_null_false_emissions",
+        "held_out_correct",
+        "held_out_wrong",
+        "held_out_null_false_emissions",
+    ])?;
+    for (generation, selected, held_out) in &result.logo {
+        writer.write_record([
+            generation.as_str().to_string(),
+            selected.threshold.to_string(),
+            selected.metrics.correct.to_string(),
+            selected.metrics.wrong.to_string(),
+            selected.metrics.null_false_emissions.to_string(),
+            held_out.correct.to_string(),
+            held_out.wrong.to_string(),
+            held_out.null_false_emissions.to_string(),
+        ])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_pareto_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record([
+        "surname_count_min",
+        "additional_correct",
+        "additional_wrong",
+        "additional_null_false_emissions",
+        "actual_artifact_bytes",
+        "pareto",
+    ])?;
+    for point in &result.points {
+        writer.write_record([
+            point.threshold.to_string(),
+            point.metrics.correct.to_string(),
+            point.metrics.wrong.to_string(),
+            point.metrics.null_false_emissions.to_string(),
+            point.membership.total_bytes.to_string(),
+            bool_string(point_is_pareto(&result.points, point)).to_string(),
+        ])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_size_budgets_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record([
+        "direct_size_cap_mib",
+        "surname_count_min",
+        "additional_correct",
+        "additional_wrong",
+        "additional_null_false_emissions",
+        "actual_artifact_bytes",
+    ])?;
+    for cap in COMPACT_SIZE_CAPS_MIB {
+        let point = best_point_under_cap(&result.points, cap * MIB)
+            .ok_or("no compact candidate fits a declared size cap")?;
+        writer.write_record([
+            cap.to_string(),
+            point.threshold.to_string(),
+            point.metrics.correct.to_string(),
+            point.metrics.wrong.to_string(),
+            point.metrics.null_false_emissions.to_string(),
+            point.membership.total_bytes.to_string(),
+        ])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_query_incidence_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record([
+        "generation",
+        "evaluable_rows",
+        "surname_membership_queries",
+        "query_fraction",
+    ])?;
+    for generation in Generation::V1_TO_V8 {
+        write_query_incidence(&mut writer, generation.as_str(), &result.rows, |row| {
+            row.generation == generation
+        })?;
+    }
+    write_query_incidence(&mut writer, "POOLED_V1_V8", &result.rows, |_| true)?;
+    Ok(writer.into_inner()?)
+}
+
+fn write_query_incidence(
+    writer: &mut csv::Writer<Vec<u8>>,
+    label: &str,
+    rows: &[SelectionRow],
+    include: impl Fn(&SelectionRow) -> bool,
+) -> Result<()> {
+    let selected = rows.iter().filter(|row| include(row)).collect::<Vec<_>>();
+    let queries = selected
+        .iter()
+        .filter(|row| row.would_query_surname_index())
+        .count();
+    writer.write_record([
+        label.to_string(),
+        selected.len().to_string(),
+        queries.to_string(),
+        format_ratio_or_empty(queries, selected.len()),
+    ])?;
+    Ok(())
+}
+
+fn compact_membership_verification_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record([
+        "surname_count_min",
+        "member_queries",
+        "member_misses",
+        "given_negative_queries",
+        "given_false_accepts",
+        "generated_negative_queries",
+        "generated_false_accepts",
+        "nominal_unknown_false_accept_probability",
+        "mphf_bytes",
+        "fingerprint_bytes",
+        "manifest_bytes",
+        "total_bytes",
+        "zstd19_mphf_bytes",
+        "zstd19_fingerprint_bytes",
+        "zstd19_total_bytes",
+        "mphf_sha256",
+        "fingerprint_sha256",
+        "manifest_sha256",
+    ])?;
+    for point in &result.points {
+        let stats = &point.membership;
+        writer.write_record([
+            point.threshold.to_string(),
+            stats.member_queries.to_string(),
+            stats.member_misses.to_string(),
+            stats.given_negative_queries.to_string(),
+            stats.given_false_accepts.to_string(),
+            stats.generated_negative_queries.to_string(),
+            stats.generated_false_accepts.to_string(),
+            "2^-32".to_string(),
+            stats.mphf_bytes.to_string(),
+            stats.fingerprint_bytes.to_string(),
+            stats.manifest_bytes.to_string(),
+            stats.total_bytes.to_string(),
+            stats.zstd19_mphf_bytes.to_string(),
+            stats.zstd19_fingerprint_bytes.to_string(),
+            stats.zstd19_total_bytes.to_string(),
+            stats.mphf_sha256.clone(),
+            stats.fingerprint_sha256.clone(),
+            stats.manifest_sha256.clone(),
+        ])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_error_diagnostics_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let count_one = result
+        .points
+        .iter()
+        .find(|point| point.threshold == 1)
+        .ok_or("compact error diagnostic is missing count 1")?;
+    let mut writer = canonical_writer();
+    writer.write_record([
+        "generation",
+        "category",
+        "raw_surname_count",
+        "candidate_quality",
+        "role_signal",
+        "reliability",
+        "selected_position",
+        "complement_position",
+        "hard_organization_marker",
+        "generic_organization_marker",
+        "ampersand",
+        "candidate_too_short",
+    ])?;
+    for (row, member) in result.rows.iter().zip(&count_one.membership_hits) {
+        let selected = row.residual_membership_emission(*member);
+        if selected.is_none()
+            || row
+                .expected_greeting
+                .as_deref()
+                .is_some_and(|expected| greeting_matches(Some(expected), selected))
+        {
+            continue;
+        }
+        writer.write_record([
+            row.generation.as_str(),
+            if row.expected_greeting.is_none() {
+                "expected_null"
+            } else {
+                "wrong_greeting"
+            },
+            &row.complement_surname_count.unwrap_or(0).to_string(),
+            &format!("{:.6}", row.candidate_quality),
+            &format!("{:.6}", row.role_signal),
+            &format!("{:.6}", row.reliability),
+            "first",
+            "second",
+            bool_string(row.hard_organization_marker),
+            bool_string(row.generic_organization_marker),
+            bool_string(row.ampersand),
+            bool_string(row.candidate_too_short),
+        ])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_qualitative_probes_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record([
+        "probe",
+        "selected_candidate",
+        "raw_surname_count",
+        "complement_in_selected_index",
+        "c6_emits",
+        "surname_residual_emits",
+        "membership_condition_passes",
+        "vetoes_pass",
+    ])?;
+    for probe in &result.probes {
+        writer.write_record([
+            probe.label.clone(),
+            probe.selected_candidate.clone().unwrap_or_default(),
+            probe
+                .complement_surname_count
+                .map_or_else(String::new, |value| value.to_string()),
+            bool_string(probe.complement_in_selected_index).to_string(),
+            bool_string(probe.first_position_emits).to_string(),
+            bool_string(probe.surname_residual_emits).to_string(),
+            bool_string(probe.complement_in_selected_index).to_string(),
+            bool_string(probe.vetoes_pass).to_string(),
+        ])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_selected_candidate_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let point = &result.selected;
+    let mut writer = canonical_writer();
+    writer.write_record(["key", "value"])?;
+    for (key, value) in [
+        ("surname_count_min", point.threshold.to_string()),
+        ("additional_correct", point.metrics.correct.to_string()),
+        ("additional_wrong", point.metrics.wrong.to_string()),
+        (
+            "additional_null_false_emissions",
+            point.metrics.null_false_emissions.to_string(),
+        ),
+        ("surname_only_keys", point.inventory.key_count.to_string()),
+        ("candidate_bytes", point.membership.total_bytes.to_string()),
+        (
+            "combined_name_data_bytes",
+            (EXISTING_ARTIFACT_BYTES + point.membership.total_bytes).to_string(),
+        ),
+        ("source_keys_sha256", point.inventory.raw_sha256.clone()),
+        (
+            "candidate_manifest_sha256",
+            point.membership.manifest_sha256.clone(),
+        ),
+        (
+            "candidate_mphf_sha256",
+            point.membership.mphf_sha256.clone(),
+        ),
+        (
+            "candidate_fingerprint_sha256",
+            point.membership.fingerprint_sha256.clone(),
+        ),
+        (
+            "reproduction_receipt_sha256",
+            result.selected_reproduction_sha256.clone(),
+        ),
+    ] {
+        writer.write_record([key, &value])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_run_manifest_csv(result: &CompactSelectionResult) -> Result<Vec<u8>> {
+    let mut writer = canonical_writer();
+    writer.write_record(["key", "value"])?;
+    for (key, value) in [
+        ("spent_generations", "REAL_PROXY_V1-V8".to_string()),
+        ("surname_counts_sha256", result.counts_sha256.clone()),
+        ("surname_inventory_sha256", result.inventory_sha256.clone()),
+        (
+            "threshold_grid",
+            "1/2/5/10/25/50/100/250/500/1000".to_string(),
+        ),
+        ("selection_minimum_correct", COMPACT_MIN_CORRECT.to_string()),
+        ("selection_retention_minimum", "0.5".to_string()),
+        (
+            "selection_objective",
+            "meaningful_then_wrong_then_null_then_half_retention_then_size".to_string(),
+        ),
+        ("selected_threshold", result.selected.threshold.to_string()),
+        ("row_level_output", "forbidden".to_string()),
+        ("v9_created", "false".to_string()),
+        ("surname_production_integration", "false".to_string()),
+    ] {
+        writer.write_record([key, &value])?;
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compact_report(result: &CompactSelectionResult) -> Result<String> {
+    let denominator = CompactThresholdPoint::retained_correct_denominator(&result.points)?;
+    let selected = &result.selected;
+    let pooled_queries = result
+        .rows
+        .iter()
+        .filter(|row| row.would_query_surname_index())
+        .count();
+    let mut report = String::new();
+    writeln!(
+        report,
+        "# Compact surname-only index selection on spent V1-V8\n"
+    )
+    .unwrap();
+    writeln!(report, "REAL_PROXY_V1 through V8 are spent development evidence. The C6-abstained first-token topology, candidate quality 0.40, reliability 0.00, role signal 0.30, complement-given absence, and every existing veto were frozen. Only the ten declared raw surname-count thresholds changed membership. No V9 data was created or inspected.\n").unwrap();
+    writeln!(report, "| Count | Correct | Wrong | NULL FP | Retained | Keys | Direct bytes | zstd-19 shipping bytes | Pareto |\n|---:|---:|---:|---:|---:|---:|---:|---:|---|").unwrap();
+    for point in &result.points {
+        writeln!(
+            report,
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            point.threshold,
+            point.metrics.correct,
+            point.metrics.wrong,
+            point.metrics.null_false_emissions,
+            format_percent_ratio(point.metrics.correct, denominator),
+            point.inventory.key_count,
+            point.membership.total_bytes,
+            point.membership.zstd19_total_bytes,
+            if point_is_pareto(&result.points, point) {
+                "yes"
+            } else {
+                "no"
+            }
+        )
+        .unwrap();
+    }
+    writeln!(report, "\nThe fixed selection rule chose `surname_count >= {}`: **+{} correct / {} wrong / {} NULL FP**, retaining {} of the count-1 correct benefit in {} direct bytes. Combined with the unchanged {}-byte given-name artifact, the name-data footprint is {} bytes.\n", selected.threshold, selected.metrics.correct, selected.metrics.wrong, selected.metrics.null_false_emissions, format_percent_ratio(selected.metrics.correct, denominator), selected.membership.total_bytes, EXISTING_ARTIFACT_BYTES, EXISTING_ARTIFACT_BYTES + selected.membership.total_bytes).unwrap();
+
+    writeln!(report, "## Fixed-threshold generation stability\n").unwrap();
+    writeln!(report, "| Generation | >=1 | >=2 | >=5 | >=10 | >=25 | >=50 | >=100 | >=250 | >=500 | >=1000 |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|").unwrap();
+    for generation in Generation::V1_TO_V8 {
+        write!(report, "| {} |", generation.as_str()).unwrap();
+        for point in &result.points {
+            let metrics = metrics_for_generation(result, generation, point.threshold)?;
+            write!(
+                report,
+                " {}/{}/{} |",
+                metrics.correct, metrics.wrong, metrics.null_false_emissions
+            )
+            .unwrap();
+        }
+        writeln!(report).unwrap();
+    }
+    writeln!(report, "\nEach cell is `correct/wrong/NULL FP`. V7 and V8 retention relative to their respective count-1 results is reported in `thresholds_by_generation.csv`.\n").unwrap();
+
+    writeln!(report, "## Leave-one-generation-out compact selection\n").unwrap();
+    writeln!(report, "| Held out | Selected count | Training correct/wrong/NULL | Held-out correct/wrong/NULL |\n|---|---:|---:|---:|").unwrap();
+    for (generation, training, held_out) in &result.logo {
+        writeln!(
+            report,
+            "| {} | {} | {}/{}/{} | {}/{}/{} |",
+            generation.as_str(),
+            training.threshold,
+            training.metrics.correct,
+            training.metrics.wrong,
+            training.metrics.null_false_emissions,
+            held_out.correct,
+            held_out.wrong,
+            held_out.null_false_emissions
+        )
+        .unwrap();
+    }
+
+    writeln!(report, "\n## Direct-size caps\n").unwrap();
+    writeln!(report, "| Cap | Best safety-first count | Correct/wrong/NULL | Direct bytes |\n|---:|---:|---:|---:|").unwrap();
+    for cap in COMPACT_SIZE_CAPS_MIB {
+        let point = best_point_under_cap(&result.points, cap * MIB)
+            .ok_or("no compact candidate fits a declared size cap")?;
+        writeln!(
+            report,
+            "| {cap} MiB | {} | {}/{}/{} | {} |",
+            point.threshold,
+            point.metrics.correct,
+            point.metrics.wrong,
+            point.metrics.null_false_emissions,
+            point.membership.total_bytes
+        )
+        .unwrap();
+    }
+
+    writeln!(report, "\n## Representation and lookup incidence\n").unwrap();
+    writeln!(report, "Every threshold used the same deterministic MPHF routing, independent 32-bit fingerprint, fixed-int bincode encoding, and no count/evidence byte. Every member was queried after disk round-trip. Each candidate also received {} retained-given and {} generated negative queries. Observed false accepts are recorded per threshold in `membership_verification.csv`; the nominal unknown-query risk remains approximately `2^-32` per lookup. zstd-19 sizes are shipping measurements only and did not affect selection.\n", GIVEN_KEYS, GENERATED_NEGATIVES).unwrap();
+    writeln!(report, "Only {} of {} evaluable proxy rows ({}) satisfied all frozen pre-membership conditions and would query the surname index. This is spent-proxy incidence, not a production traffic guarantee.\n", pooled_queries, result.rows.len(), format_percent_ratio(pooled_queries, result.rows.len())).unwrap();
+
+    writeln!(report, "The selected candidate contains {} keys: MPHF {} bytes, fingerprints {} bytes, manifest {} bytes, total {} bytes. Its checksums are manifest `{}`, MPHF `{}`, and fingerprints `{}`. Independent reconstruction matched byte-for-byte under reproduction receipt SHA-256 `{}`.\n", selected.inventory.key_count, selected.membership.mphf_bytes, selected.membership.fingerprint_bytes, selected.membership.manifest_bytes, selected.membership.total_bytes, selected.membership.manifest_sha256, selected.membership.mphf_sha256, selected.membership.fingerprint_sha256, result.selected_reproduction_sha256).unwrap();
+
+    writeln!(report, "## Error and qualitative controls\n").unwrap();
+    writeln!(report, "Residual errors are serialized only as abstract numeric/veto rows in `error_diagnostics.csv`. No display name, candidate string, complement string, identifier, country, or locale is included. The known high-count V7 semantic error is not converted into a heuristic.\n").unwrap();
+    writeln!(report, "| Probe | Selected | Count | Member | C6 emits | Residual emits | Vetoes pass |\n|---|---|---:|---|---|---|---|").unwrap();
+    for probe in &result.probes {
+        writeln!(
+            report,
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            probe.label,
+            probe.selected_candidate.as_deref().unwrap_or(""),
+            probe
+                .complement_surname_count
+                .map_or_else(|| "n/a".to_string(), |value| value.to_string()),
+            bool_string(probe.complement_in_selected_index),
+            bool_string(probe.first_position_emits),
+            bool_string(probe.surname_residual_emits),
+            bool_string(probe.vetoes_pass)
+        )
+        .unwrap();
+    }
+    writeln!(report, "\nThe two redacted first-position probes already emit through production C6, so complement membership is diagnostic and the additive residual is not reached. The redacted two-candidate probe remains outside the sole-candidate topology, and `Motorcycle Club` remains vetoed.\n").unwrap();
+    writeln!(report, "C6 remains production. The selected directory is a frozen V9 validation candidate only; normal inference does not load it. No V9 was created.").unwrap();
+    Ok(report)
+}
+
 fn build_outputs(result: &SelectionResult) -> Result<BTreeMap<&'static str, Vec<u8>>> {
     let mut outputs = BTreeMap::new();
     outputs.insert("thresholds_pooled.csv", thresholds_pooled_csv(result)?);
@@ -1262,7 +2472,7 @@ fn thresholds_by_generation_csv(result: &SelectionResult) -> Result<Vec<u8>> {
         "additional_wrong",
         "additional_null_false_emissions",
     ])?;
-    for generation in Generation::ALL {
+    for generation in Generation::V1_TO_V7 {
         for threshold in SURNAME_THRESHOLDS {
             let metrics =
                 evaluate_threshold(&result.rows, threshold, |row| row.generation == generation);
@@ -1500,7 +2710,7 @@ fn report(result: &SelectionResult) -> Result<String> {
         write!(report, "---:|").unwrap();
     }
     writeln!(report).unwrap();
-    for generation in Generation::ALL {
+    for generation in Generation::V1_TO_V7 {
         write!(report, "| {} |", generation.as_str()).unwrap();
         for threshold in SURNAME_THRESHOLDS {
             let metrics =
@@ -1700,6 +2910,25 @@ fn bloom_bytes(keys: usize, false_positive_rate: f64) -> usize {
     (bits_per_key * keys as f64 / 8.0).ceil() as usize
 }
 
+fn format_ratio_value(numerator: usize, denominator: usize) -> String {
+    format!("{:.6}", numerator as f64 / denominator as f64)
+}
+
+fn format_ratio_or_empty(numerator: usize, denominator: usize) -> String {
+    if denominator == 0 {
+        String::new()
+    } else {
+        format_ratio_value(numerator, denominator)
+    }
+}
+
+fn format_percent_ratio(numerator: usize, denominator: usize) -> String {
+    if denominator == 0 {
+        return "n/a".to_string();
+    }
+    format!("{:.2}%", numerator as f64 * 100.0 / denominator as f64)
+}
+
 fn canonical_writer() -> csv::Writer<Vec<u8>> {
     csv::WriterBuilder::new()
         .terminator(csv::Terminator::Any(b'\n'))
@@ -1741,6 +2970,88 @@ mod tests {
         }
     }
 
+    fn compact_point(
+        threshold: u64,
+        correct: usize,
+        wrong: usize,
+        nulls: usize,
+        bytes: usize,
+    ) -> CompactThresholdPoint {
+        CompactThresholdPoint {
+            threshold,
+            metrics: Metrics {
+                emitted: correct + wrong,
+                correct,
+                wrong,
+                null_false_emissions: nulls,
+            },
+            inventory: InventoryRow {
+                threshold,
+                key_count: 1,
+                raw_utf8_bytes: 1,
+                zstd19_bytes: 1,
+                raw_sha256: "0".repeat(64),
+                zstd_sha256: "0".repeat(64),
+            },
+            membership: ActualMembershipStats {
+                threshold,
+                key_count: 1,
+                mphf_bytes: 0,
+                fingerprint_bytes: 0,
+                manifest_bytes: bytes,
+                total_bytes: bytes,
+                mphf_sha256: "0".repeat(64),
+                fingerprint_sha256: "0".repeat(64),
+                manifest_sha256: "0".repeat(64),
+                member_queries: 1,
+                member_misses: 0,
+                given_negative_queries: 1,
+                given_false_accepts: 0,
+                generated_negative_queries: 1,
+                generated_false_accepts: 0,
+                zstd19_mphf_bytes: 0,
+                zstd19_fingerprint_bytes: 0,
+                zstd19_total_bytes: bytes,
+            },
+            membership_hits: Vec::new(),
+        }
+    }
+
+    fn selection_row() -> SelectionRow {
+        SelectionRow {
+            generation: Generation::V8,
+            expected_greeting: Some("ExpectedSecret".to_string()),
+            selected_candidate: Some("SelectedSecret".to_string()),
+            first_position_emission: false,
+            residual_topology: true,
+            candidate_quality: 0.4,
+            reliability: 0.0,
+            role_signal: 0.3,
+            complement: Some("ComplementSecret".to_string()),
+            complement_given_observed: false,
+            complement_surname_count: Some(10),
+            hard_organization_marker: false,
+            generic_organization_marker: false,
+            ampersand: false,
+            candidate_too_short: false,
+        }
+    }
+
+    fn compact_result_with_row(row: SelectionRow, member: bool) -> CompactSelectionResult {
+        let mut point = compact_point(1, 0, 1, 0, 1);
+        point.membership_hits = vec![member];
+        CompactSelectionResult {
+            rows: vec![row],
+            points: vec![point.clone()],
+            logo: Vec::new(),
+            selected: point,
+            counts_sha256: "0".repeat(64),
+            inventory_sha256: "0".repeat(64),
+            probes: Vec::new(),
+            selected_reproduction_sha256: "0".repeat(64),
+        }
+    }
+
     #[test]
     fn selection_objective_is_safety_first_then_recall_then_size() {
         let points = [
@@ -1756,6 +3067,111 @@ mod tests {
     fn selection_minimizes_errors_when_no_zero_error_point_exists() {
         let points = [point(1, 100, 2, 1, 10), point(2, 80, 1, 1, 20)];
         assert_eq!(select_point(&points).unwrap().threshold, 2);
+    }
+
+    #[test]
+    fn compact_selection_requires_half_retention_then_chooses_smallest_safe_point() {
+        let points = [
+            compact_point(1, 100, 1, 1, 100),
+            compact_point(2, 70, 1, 1, 80),
+            compact_point(5, 50, 1, 1, 40),
+            compact_point(10, 49, 1, 1, 20),
+        ];
+        assert_eq!(select_compact_point(&points).unwrap().threshold, 5);
+    }
+
+    #[test]
+    fn compact_selection_prioritizes_semantic_errors_and_rejects_no_useful_point() {
+        let unsafe_points = [
+            compact_point(1, 100, 1, 1, 100),
+            compact_point(2, 60, 1, 1, 50),
+            compact_point(5, 55, 0, 0, 40),
+        ];
+        assert_eq!(select_compact_point(&unsafe_points).unwrap().threshold, 5);
+
+        let insufficient = [
+            compact_point(1, 4, 0, 0, 100),
+            compact_point(2, 3, 0, 0, 50),
+        ];
+        assert!(select_compact_point(&insufficient).is_err());
+        assert!(
+            CompactThresholdPoint::retained_correct_denominator(&[compact_point(1, 0, 0, 0, 100)])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn compact_pareto_and_budget_selection_use_semantics_benefit_and_actual_size() {
+        let points = [
+            compact_point(1, 10, 1, 1, 10 * MIB),
+            compact_point(2, 10, 1, 1, 8 * MIB),
+            compact_point(5, 8, 1, 1, 2 * MIB),
+            compact_point(10, 7, 2, 1, MIB),
+        ];
+        assert!(!point_is_pareto(&points, &points[0]));
+        assert!(point_is_pareto(&points, &points[1]));
+        assert_eq!(best_point_under_cap(&points, 2 * MIB).unwrap().threshold, 5);
+    }
+
+    #[test]
+    fn compact_logo_applies_the_same_selection_rule_to_each_training_fold() {
+        let rows = Generation::V1_TO_V8
+            .into_iter()
+            .map(|generation| {
+                let mut row = selection_row();
+                row.generation = generation;
+                row.expected_greeting = row.selected_candidate.clone();
+                row
+            })
+            .collect::<Vec<_>>();
+        let mut count_one = compact_point(1, 8, 0, 0, 100);
+        count_one.membership_hits = vec![true; rows.len()];
+        let mut count_two = compact_point(2, 8, 0, 0, 50);
+        count_two.membership_hits = vec![true; rows.len()];
+
+        let logo = compact_logo_points(&rows, &[count_one, count_two]).unwrap();
+        assert_eq!(logo.len(), Generation::V1_TO_V8.len());
+        assert!(logo.iter().all(|(_, selected, held_out)| {
+            selected.threshold == 2
+                && selected.metrics.correct == 7
+                && held_out.correct == 1
+                && held_out.wrong == 0
+        }));
+    }
+
+    #[test]
+    fn historical_and_compact_generation_sets_are_exact() {
+        assert_eq!(Generation::V1_TO_V7.len(), 7);
+        assert_eq!(Generation::V1_TO_V8.len(), 8);
+        assert_eq!(Generation::V1_TO_V8[..7], Generation::V1_TO_V7);
+        assert_eq!(Generation::V1_TO_V8[7], Generation::V8);
+        assert_eq!(Generation::from_digest(V8_SHA256), Some(Generation::V8));
+    }
+
+    #[test]
+    fn compact_query_requires_frozen_topology_and_given_absence() {
+        let row = selection_row();
+        assert!(row.would_query_surname_index());
+
+        let mut given_observed = row.clone();
+        given_observed.complement_given_observed = true;
+        assert!(!given_observed.would_query_surname_index());
+
+        let mut outside_topology = row;
+        outside_topology.residual_topology = false;
+        assert!(!outside_topology.would_query_surname_index());
+    }
+
+    #[test]
+    fn compact_error_output_is_aggregate_and_redacted() {
+        let output = String::from_utf8(
+            compact_error_diagnostics_csv(&compact_result_with_row(selection_row(), true)).unwrap(),
+        )
+        .unwrap();
+        for secret in ["ExpectedSecret", "SelectedSecret", "ComplementSecret"] {
+            assert!(!output.contains(secret));
+        }
+        assert!(output.contains("REAL_PROXY_V8,wrong_greeting,10,0.400000,0.300000,0.000000"));
     }
 
     #[test]
@@ -1785,6 +3201,10 @@ mod tests {
             .map(|key| xxh3_64_with_seed(key.as_bytes(), ROUTING_SEED))
             .collect::<Vec<_>>();
         let (_, mphf, fingerprints) = build_membership_index(&keys, &routing).unwrap();
+        let (_, repeated_mphf, repeated_fingerprints) =
+            build_membership_index(&keys, &routing).unwrap();
+        assert_eq!(mphf, repeated_mphf);
+        assert_eq!(fingerprints, repeated_fingerprints);
         let decoded = decode_membership_candidate(&mphf, &fingerprints, keys.len()).unwrap();
         assert!(keys.iter().all(|key| decoded.contains(key)));
         assert!(!decoded.contains("DefinitelyAbsent"));

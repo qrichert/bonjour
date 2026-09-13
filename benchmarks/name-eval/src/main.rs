@@ -67,7 +67,10 @@ use relational_diagnostic::{run_c4_development_freeze, run_relational_diagnostic
 use surname_complement_validation::{
     run_surname_complement_validation, verify_frozen_surname_candidate,
 };
-use surname_index_selection::{prepare_surname_index_selection, run_surname_index_selection};
+use surname_index_selection::{
+    prepare_compact_surname_index_selection, prepare_surname_index_selection,
+    run_compact_surname_index_selection, run_surname_index_selection,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -226,6 +229,8 @@ struct Arguments {
     validate_complement_evidence_sha256: Option<String>,
     prepare_surname_index_selection: bool,
     select_surname_only_index: bool,
+    prepare_compact_surname_index: bool,
+    select_compact_surname_index: bool,
     verify_frozen_surname_candidate: bool,
     validate_frozen_surname_candidate_sha256: Option<String>,
     select_freeze_c5_operating_point: bool,
@@ -277,6 +282,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     let mut validate_complement_evidence_sha256 = None;
     let mut prepare_surname_index_selection = false;
     let mut select_surname_only_index = false;
+    let mut prepare_compact_surname_index = false;
+    let mut select_compact_surname_index = false;
     let mut verify_frozen_surname_candidate = false;
     let mut validate_frozen_surname_candidate_sha256 = None;
     let mut select_freeze_c5_operating_point = false;
@@ -400,6 +407,10 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             prepare_surname_index_selection = true;
         } else if text == "--select-surname-only-index" {
             select_surname_only_index = true;
+        } else if text == "--prepare-compact-surname-index" {
+            prepare_compact_surname_index = true;
+        } else if text == "--select-compact-surname-index" {
+            select_compact_surname_index = true;
         } else if text == "--verify-frozen-surname-candidate" {
             verify_frozen_surname_candidate = true;
         } else if let Some(value) = text.strip_prefix("--validate-frozen-surname-candidate-sha256=")
@@ -479,6 +490,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         + usize::from(validate_complement_evidence_sha256.is_some())
         + usize::from(prepare_surname_index_selection)
         + usize::from(select_surname_only_index)
+        + usize::from(prepare_compact_surname_index)
+        + usize::from(select_compact_surname_index)
         + usize::from(verify_frozen_surname_candidate)
         + usize::from(validate_frozen_surname_candidate_sha256.is_some())
         + usize::from(select_freeze_c5_operating_point);
@@ -494,6 +507,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             || diagnose_complement_evidence
             || select_freeze_c5_operating_point,
         prepare_surname_index_selection || select_surname_only_index,
+        prepare_compact_surname_index || select_compact_surname_index,
         &spent_holdouts,
         &spent_manifests,
         &spent_sha256s,
@@ -516,10 +530,18 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             return Err("--verify-frozen-surname-candidate forbids sealed/tuning flags and takes only an output path".into());
         }
         (PathBuf::new(), None, positional.remove(0))
-    } else if prepare_surname_index_selection {
+    } else if prepare_surname_index_selection || prepare_compact_surname_index {
         if positional.len() != 1 || sealed.is_some() || development_only || reference_threshold_set
         {
-            return Err("--prepare-surname-index-selection requires seven spent holdout triplets, forbids sealed/tuning flags, and takes only an output path".into());
+            let mode = if prepare_compact_surname_index {
+                "--prepare-compact-surname-index requires eight spent holdout triplets"
+            } else {
+                "--prepare-surname-index-selection requires seven spent holdout triplets"
+            };
+            return Err(format!(
+                "{mode}, forbids sealed/tuning flags, and takes only an output path"
+            )
+            .into());
         }
         (PathBuf::new(), None, positional.remove(0))
     } else if prepare_complement_lookup_sha256.is_some() {
@@ -529,6 +551,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         }
         (PathBuf::new(), None, positional.remove(0))
     } else if select_surname_only_index
+        || select_compact_surname_index
         || diagnose_relational_emission
         || freeze_c4_relational_emission
         || diagnose_c5_calibration_frontier
@@ -540,7 +563,9 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     {
         if positional.len() != 2 || sealed.is_some() || development_only || reference_threshold_set
         {
-            let mode = if select_surname_only_index {
+            let mode = if select_compact_surname_index {
+                "--select-compact-surname-index"
+            } else if select_surname_only_index {
                 "--select-surname-only-index"
             } else if select_freeze_c5_operating_point {
                 "--select-freeze-c5-operating-point"
@@ -559,7 +584,9 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
             } else {
                 "--diagnose-relational-emission"
             };
-            let triplets = if select_surname_only_index {
+            let triplets = if select_compact_surname_index {
+                8
+            } else if select_surname_only_index {
                 7
             } else if diagnose_c5_calibration_frontier
                 || diagnose_ordering_evidence
@@ -626,7 +653,7 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         complement_probes.is_some()
             && complement_surname_counts.is_some()
             && complement_surname_manifest.is_some()
-    } else if validates_complement || select_surname_only_index {
+    } else if validates_complement || select_surname_only_index || select_compact_surname_index {
         complement_probes.is_none()
             && complement_surname_counts.is_some()
             && complement_surname_manifest.is_some()
@@ -638,12 +665,13 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
     if !valid_complement_files {
         return Err("complement diagnosis requires probes, surname counts, and a surname manifest; V7 validation and surname-index selection require surname counts and a surname manifest but forbid complement probes; all are forbidden by other modes".into());
     }
-    let valid_surname_selection_files = if select_surname_only_index {
+    let valid_surname_selection_files = if select_surname_only_index || select_compact_surname_index
+    {
         surname_inventory.is_some()
             && surname_key_directory.is_some()
             && surname_name_totals.is_some()
             && surname_selection_probes.is_some()
-    } else if prepare_surname_index_selection {
+    } else if prepare_surname_index_selection || prepare_compact_surname_index {
         surname_inventory.is_none()
             && surname_key_directory.is_none()
             && surname_name_totals.is_none()
@@ -708,6 +736,8 @@ fn parse_arguments_from(arguments: impl IntoIterator<Item = OsString>) -> Result
         validate_complement_evidence_sha256,
         prepare_surname_index_selection,
         select_surname_only_index,
+        prepare_compact_surname_index,
+        select_compact_surname_index,
         verify_frozen_surname_candidate,
         validate_frozen_surname_candidate_sha256,
         select_freeze_c5_operating_point,
@@ -741,11 +771,12 @@ fn validate_spent_arguments(
     relational_enabled: bool,
     frontier_enabled: bool,
     seven_proxy_enabled: bool,
+    eight_proxy_enabled: bool,
     holdouts: &[PathBuf],
     manifests: &[PathBuf],
     digests: &[String],
 ) -> Result<()> {
-    if !relational_enabled && !frontier_enabled && !seven_proxy_enabled {
+    if !relational_enabled && !frontier_enabled && !seven_proxy_enabled && !eight_proxy_enabled {
         if holdouts.is_empty() && manifests.is_empty() && digests.is_empty() {
             return Ok(());
         }
@@ -753,7 +784,9 @@ fn validate_spent_arguments(
             "spent holdout triplets require a relational, calibration-frontier, C5-selection, ordering, capitalization, morphology, complement, or surname-index mode".into(),
         );
     }
-    let expected = if seven_proxy_enabled {
+    let expected = if eight_proxy_enabled {
+        8
+    } else if seven_proxy_enabled {
         7
     } else if frontier_enabled {
         5
@@ -769,7 +802,27 @@ fn validate_spent_arguments(
     {
         return Err("spent holdout paths, manifests, and digests must be unique".into());
     }
-    if seven_proxy_enabled {
+    if eight_proxy_enabled {
+        let actual = digests.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let expected = [
+            surname_index_selection::V1_SHA256,
+            surname_index_selection::V2_SHA256,
+            surname_index_selection::V3_SHA256,
+            surname_index_selection::V4_SHA256,
+            surname_index_selection::V5_SHA256,
+            surname_index_selection::V6_SHA256,
+            surname_index_selection::V7_SHA256,
+            surname_index_selection::V8_SHA256,
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        if actual != expected {
+            return Err(format!(
+                "eight-proxy compact surname-index modes require exactly the acknowledged V1-V8 digests; received {actual:?}"
+            )
+            .into());
+        }
+    } else if seven_proxy_enabled {
         let actual = digests.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let expected = [
             surname_index_selection::V1_SHA256,
@@ -811,7 +864,7 @@ fn validate_spent_arguments(
 
 fn usage() -> String {
     format!(
-        "{}\n  name-eval <new-output-directory> --verify-frozen-surname-candidate --surname-membership-directory=DIR --surname-member-keys=FILE --surname-name-totals=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --validate-frozen-surname-candidate-sha256=SHA256 --surname-membership-directory=DIR --surname-verification-receipt=FILE --sealed=FILE --sealed-manifest=FILE",
+        "{}\n  name-eval <new-output-directory> --verify-frozen-surname-candidate --surname-membership-directory=DIR --surname-member-keys=FILE --surname-name-totals=FILE\n  name-eval <c32-artifact-directory> <new-output-directory> --validate-frozen-surname-candidate-sha256=SHA256 --surname-membership-directory=DIR --surname-verification-receipt=FILE --sealed=FILE --sealed-manifest=FILE\n  name-eval <new-output-directory> --prepare-compact-surname-index --surname-selection-probes=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x8\n  name-eval <c32-artifact-directory> <new-output-directory> --select-compact-surname-index --complement-surname-counts=FILE --complement-surname-manifest=FILE --surname-inventory=FILE --surname-key-directory=DIR --surname-name-totals=FILE --surname-selection-probes=FILE [--spent-holdout=FILE --spent-manifest=FILE --spent-sha256=SHA256]x8",
         legacy_usage()
     )
 }
@@ -864,6 +917,16 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
                 .surname_selection_probes
                 .as_deref()
                 .ok_or("surname-index preparation is missing probes")?,
+        );
+    }
+    if arguments.prepare_compact_surname_index {
+        return prepare_compact_surname_index_selection(
+            output,
+            load_spent_holdouts(arguments)?,
+            arguments
+                .surname_selection_probes
+                .as_deref()
+                .ok_or("compact surname-index preparation is missing probes")?,
         );
     }
     if arguments.verify_frozen_surname_candidate {
@@ -931,6 +994,37 @@ fn evaluate(arguments: &Arguments, output: &Path) -> Result<String> {
                 .surname_selection_probes
                 .as_deref()
                 .ok_or("surname-index selection is missing probes")?,
+        );
+    }
+    if arguments.select_compact_surname_index {
+        return run_compact_surname_index_selection(
+            output,
+            &corpus,
+            load_spent_holdouts(arguments)?,
+            arguments
+                .complement_surname_counts
+                .as_deref()
+                .ok_or("compact surname-index selection is missing targeted surname counts")?,
+            arguments
+                .complement_surname_manifest
+                .as_deref()
+                .ok_or("compact surname-index selection is missing its surname manifest")?,
+            arguments
+                .surname_inventory
+                .as_deref()
+                .ok_or("compact surname-index selection is missing its inventory")?,
+            arguments
+                .surname_key_directory
+                .as_deref()
+                .ok_or("compact surname-index selection is missing its key directory")?,
+            arguments
+                .surname_name_totals
+                .as_deref()
+                .ok_or("compact surname-index selection is missing name totals")?,
+            arguments
+                .surname_selection_probes
+                .as_deref()
+                .ok_or("compact surname-index selection is missing probes")?,
         );
     }
     if arguments.validate_complement_evidence_sha256.is_some() {
@@ -3744,6 +3838,30 @@ mod argument_tests {
         arguments
     }
 
+    fn compact_surname_index_arguments(prepare: bool) -> Vec<String> {
+        let mut arguments = surname_index_arguments(prepare);
+        let old_mode = if prepare {
+            "--prepare-surname-index-selection"
+        } else {
+            "--select-surname-only-index"
+        };
+        let new_mode = if prepare {
+            "--prepare-compact-surname-index"
+        } else {
+            "--select-compact-surname-index"
+        };
+        *arguments
+            .iter_mut()
+            .find(|argument| argument.as_str() == old_mode)
+            .expect("historical surname mode") = new_mode.to_string();
+        arguments.extend([
+            "--spent-holdout=v8/sealed.csv".to_string(),
+            "--spent-manifest=v8/sealed.manifest.csv".to_string(),
+            format!("--spent-sha256={}", surname_index_selection::V8_SHA256),
+        ]);
+        arguments
+    }
+
     fn surname_candidate_verification_arguments() -> Vec<String> {
         vec![
             "output".to_string(),
@@ -4142,6 +4260,83 @@ mod argument_tests {
             .unwrap();
         *digest = format!("--spent-sha256={DIGEST}");
         assert!(parse_owned(wrong_digest).is_err());
+    }
+
+    #[test]
+    fn compact_surname_preparation_requires_exactly_v1_through_v8_and_private_probes() {
+        let arguments = parse_owned(compact_surname_index_arguments(true)).unwrap();
+        assert!(arguments.prepare_compact_surname_index);
+        assert!(!arguments.prepare_surname_index_selection);
+        assert_eq!(arguments.artifact, PathBuf::new());
+        assert_eq!(arguments.spent_holdouts.len(), 8);
+
+        let mut incomplete = compact_surname_index_arguments(true);
+        incomplete.truncate(incomplete.len() - 3);
+        assert!(parse_owned(incomplete).is_err());
+
+        let mut conflicting = compact_surname_index_arguments(true);
+        conflicting.push("--prepare-surname-index-selection".to_string());
+        assert!(parse_owned(conflicting).is_err());
+    }
+
+    #[test]
+    fn compact_surname_selection_requires_fixed_inputs_and_exact_v1_through_v8() {
+        let arguments = parse_owned(compact_surname_index_arguments(false)).unwrap();
+        assert!(arguments.select_compact_surname_index);
+        assert!(!arguments.select_surname_only_index);
+        assert_eq!(arguments.spent_holdouts.len(), 8);
+        assert_eq!(arguments.clean_csv, None);
+
+        for prefix in [
+            "--complement-surname-counts=",
+            "--complement-surname-manifest=",
+            "--surname-inventory=",
+            "--surname-key-directory=",
+            "--surname-name-totals=",
+            "--surname-selection-probes=",
+        ] {
+            let mut missing = compact_surname_index_arguments(false);
+            missing.retain(|argument| !argument.starts_with(prefix));
+            assert!(parse_owned(missing).is_err(), "{prefix}");
+        }
+
+        let mut wrong_digest = compact_surname_index_arguments(false);
+        let v8_digest = wrong_digest
+            .iter_mut()
+            .find(|argument| {
+                argument.as_str()
+                    == format!("--spent-sha256={}", surname_index_selection::V8_SHA256)
+            })
+            .unwrap();
+        *v8_digest = format!("--spent-sha256={DIGEST}");
+        assert!(parse_owned(wrong_digest).is_err());
+
+        let mut conflicting = compact_surname_index_arguments(false);
+        conflicting.push("--select-surname-only-index".to_string());
+        assert!(parse_owned(conflicting).is_err());
+
+        let mut ninth = compact_surname_index_arguments(false);
+        ninth.extend([
+            "--spent-holdout=extra/sealed.csv".to_string(),
+            "--spent-manifest=extra/sealed.manifest.csv".to_string(),
+            format!("--spent-sha256={DIGEST}"),
+        ]);
+        assert!(parse_owned(ninth).is_err());
+
+        let mut duplicate = compact_surname_index_arguments(false);
+        let v8_digest = duplicate
+            .iter_mut()
+            .find(|argument| {
+                argument.as_str()
+                    == format!("--spent-sha256={}", surname_index_selection::V8_SHA256)
+            })
+            .unwrap();
+        *v8_digest = format!("--spent-sha256={}", surname_index_selection::V7_SHA256);
+        assert!(parse_owned(duplicate).is_err());
+
+        let mut sealed = compact_surname_index_arguments(false);
+        sealed.push("--sealed=fresh/sealed.csv".to_string());
+        assert!(parse_owned(sealed).is_err());
     }
 
     #[test]
