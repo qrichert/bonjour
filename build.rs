@@ -175,10 +175,19 @@ fn validate_regular_file(
     if expected_length.is_some_and(|expected| bytes.len() as u64 != expected) {
         return Err(format!("{} has the wrong byte length", path.display()));
     }
-    if expected_digest.is_some_and(|expected| format!("{:x}", Sha256::digest(&bytes)) != expected) {
+    if expected_digest.is_some_and(|expected| sha256_hex(&bytes) != expected) {
         return Err(format!("{} has the wrong checksum", path.display()));
     }
     Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 fn write_embedded(output: &Path, documents: &Path, files: &Path, manifest: &Manifest) {

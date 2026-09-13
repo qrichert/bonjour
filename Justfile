@@ -15,7 +15,7 @@ run *args:
 alias b := build
 # Make optimized release build
 build:
-    cargo build --release --features standalone
+    cargo build --locked --release --features standalone
 
 alias l := lint
 # Run various linting tools
@@ -35,19 +35,19 @@ check:
 alias t := test
 # Run unit tests
 test *args:
-    cargo test --all-features -- {{ args }}
+    cargo test --locked --all-features -- {{ args }}
     just python-test
     uv run python -m unittest discover -s benchmarks/name-eval/tests -p 'test_*.py'
 
 # Build the local standalone Python extension
 python-build:
-    uv run maturin build --release
+    uv run maturin build --release --locked
 
 # Install and test the local standalone Python extension
 python-test:
-    uv run maturin develop
-    cargo test --manifest-path bindings/python/Cargo.toml
-    cargo build --features standalone --bin bonjour
+    uv run maturin develop --locked
+    cargo test --locked --manifest-path bindings/python/Cargo.toml
+    cargo build --locked --features standalone --bin bonjour
     BONJOUR_RUST_CLI=target/debug/bonjour uv run python -m unittest discover -s tests -p 'test_*.py'
 
 # Build documentation

@@ -24,7 +24,8 @@ jobs:
 
       - name: Verify tag, package versions, CLI version, and package
         run: |
-          version=$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          cargo metadata --locked --manifest-path bindings/python/Cargo.toml --format-version=1 > /dev/null
+          version=$(cargo metadata --locked --no-deps --format-version=1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           test "${{ github.ref_name }}" = "$version"
           python3 - "$version" <<'PY'
           import sys
@@ -37,10 +38,10 @@ jobs:
               table = "project" if path.name == "pyproject.toml" else "package"
               assert document[table]["version"] == expected, path
           PY
-          test "$(cargo run --quiet -- --version)" = "bonjour $version"
+          test "$(cargo run --locked --quiet -- --version)" = "bonjour $version"
           cargo package --locked
-          cargo package --list | grep -F 'data/name-v1/manifest.json'
-          if cargo package --list | grep -E 'data/name-v1/.*\.(u8|u32|u64|q8|dict|mphf|2bit)$'; then
+          cargo package --locked --list | grep -F 'data/name-v1/manifest.json'
+          if cargo package --locked --list | grep -E 'data/name-v1/.*\.(u8|u32|u64|q8|dict|mphf|2bit)$'; then
             echo 'large name-data constituent entered the crate package' >&2
             exit 1
           fi
@@ -110,7 +111,7 @@ jobs:
 
       - name: Verify embedded artifact and version
         run: |
-          version=$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          version=$(cargo metadata --locked --no-deps --format-version=1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           test "$(target/release/bonjour --version)" = "bonjour $version"
           test "$(target/release/bonjour 'Quentin Richert')" = 'Bonjour Quentin !'
 

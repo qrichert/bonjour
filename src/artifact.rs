@@ -1,6 +1,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 #[cfg(any(feature = "standalone", test))]
@@ -524,7 +525,7 @@ fn validate_file(bytes: &[u8], expected: &ManifestFile, path: &Path) -> Result<(
 }
 
 fn validate_digest(bytes: &[u8], expected: &str, path: &Path) -> Result<(), LoadError> {
-    let actual = format!("{:x}", Sha256::digest(bytes));
+    let actual = sha256_hex(bytes);
     if actual != expected {
         return Err(corrupt(
             path,
@@ -532,6 +533,15 @@ fn validate_digest(bytes: &[u8], expected: &str, path: &Path) -> Result<(), Load
         ));
     }
     Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 #[allow(clippy::too_many_arguments)]
