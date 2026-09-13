@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "bonjour"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "boomphf",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "pyjour-native"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bonjour",
  "pyo3",

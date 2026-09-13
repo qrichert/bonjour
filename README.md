@@ -860,7 +860,7 @@ For a self-contained binary or library, enable `standalone`:
 
 ```toml
 [dependencies]
-bonjour = { version = "0.1", features = ["standalone"] }
+bonjour = { version = "0.2", features = ["standalone"] }
 ```
 
 Then provide the extracted artifact while Cargo compiles `bonjour`:

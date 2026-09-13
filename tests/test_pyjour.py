@@ -116,13 +116,13 @@ class CommandLineTests(unittest.TestCase):
             main(["--threshold=0.8", "Quentin Richert"])
 
     def test_version_matches_the_distribution(self) -> None:
-        self.assertEqual(pyjour.__version__, "0.1.0")
+        self.assertEqual(pyjour.__version__, "0.2.0")
         with (
             contextlib.redirect_stdout(io.StringIO()) as stdout,
             self.assertRaisesRegex(SystemExit, "0"),
         ):
             main(["--version"])
-        self.assertEqual(stdout.getvalue(), "pyjour 0.1.0\n")
+        self.assertEqual(stdout.getvalue(), "pyjour 0.2.0\n")
 
 
 def run_main(arguments: list[str]) -> str:

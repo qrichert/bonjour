@@ -1,8 +1,8 @@
 # Bonjour name-data artifact
 
 This document describes the maintainer-owned pipeline and fixed binary
-snapshot used by `bonjour` 0.1.0. It is a reproduction guide for the
-official artifact, not a public custom-corpus interface: the 0.1.0
+snapshot used by `bonjour` 0.2.0. It is a reproduction guide for the
+official artifact, not a public custom-corpus interface: the 0.2.0
 loader accepts only the exact manifest and bytes pinned in
 `data/name-v1/manifest.json`.
 

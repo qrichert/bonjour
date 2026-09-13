@@ -56,7 +56,7 @@ the crate.
 Install the small default package:
 
 ```console
-$ cargo install bonjour --version 0.1.0
+$ cargo install bonjour --version 0.2.0
 ```
 
 Extract `bonjour-name-data-v1.tar.zst` into the platform data location:
@@ -139,7 +139,7 @@ Enable the feature in the binary crate:
 
 ```toml
 [dependencies]
-bonjour = { version = "0.1", features = ["standalone"] }
+bonjour = { version = "0.2", features = ["standalone"] }
 ```
 
 When building from crates.io, point Cargo at the extracted artifact:
@@ -183,7 +183,7 @@ entry:
 
 ```toml
 [dependencies]
-bonjour = { version = "0.1", features = ["standalone"] }
+bonjour = { version = "0.2", features = ["standalone"] }
 ```
 
 Its application or CI build must provide the artifact when Cargo
@@ -216,7 +216,7 @@ through `cargo install`:
 
 ```console
 $ BONJOUR_DATA_DIR=/path/to/bonjour-name-data-v1 \
-    cargo install bonjour --version 0.1.0 --features standalone
+    cargo install bonjour --version 0.2.0 --features standalone
 ```
 
 The resulting `bonjour` executable is self-contained.
@@ -261,7 +261,7 @@ Bonjour Quentin !
 $ pyjour --json --country=FR "Quentin Richert"
 ```
 
-Version 0.1.0 targets ordinary GIL-enabled CPython 3.12 and newer.
+Version 0.2.0 targets ordinary GIL-enabled CPython 3.12 and newer.
 Wheels are built for x86-64 and Arm64 Linux, Intel and Apple Silicon
 macOS, and x86-64 Windows. PyPy, free-threaded CPython, and source
 distributions are not part of the initial release.
@@ -271,7 +271,7 @@ distributions are not part of the initial release.
 The artifact schema, exact source columns, sanitation thresholds,
 deterministic producer commands, binary constituents, and packaging
 procedure are documented in [the name-data format guide]. Custom
-artifacts are not a supported 0.1.0 runtime interface: the loader
+artifacts are not a supported 0.2.0 runtime interface: the loader
 accepts only the exact artifact pinned by this release.
 
 [`examples/runtime_loaded.rs`]: ../examples/runtime_loaded.rs

@@ -7,7 +7,7 @@ default-run = "name-eval"
 
 [dependencies]
 bincode = "1.3.3"
-bonjour = { version = "0.1.0", path = "../..", features = ["benchmark-internals"] }
+bonjour = { version = "0.2.0", path = "../..", features = ["benchmark-internals"] }
 boomphf = { version = "0.6.0", features = ["serde"] }
 csv = "1.4.0"
 serde = { version = "1.0.229", features = ["derive"] }
